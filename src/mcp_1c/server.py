@@ -100,6 +100,79 @@ async def click_button(
 
 
 @mcp.tool()
+async def find_object(
+    name: Annotated[str, "Object technical name"] = "",
+    title: Annotated[str, "Object visible title/caption"] = "",
+    type: Annotated[str, "1C test object type, e.g. ТестируемаяФорма"] = "",
+    max_depth: Annotated[int, "Maximum search depth"] = 8,
+) -> Any:
+    """Find an object in the active UI hierarchy by name, title, or test object type."""
+    return await bridge.call("find_object", {"name": name, "title": title, "type": type, "max_depth": max_depth})
+
+
+@mcp.tool()
+async def activate_object(
+    name: Annotated[str, "Object technical name"] = "",
+    title: Annotated[str, "Object visible title/caption"] = "",
+    type: Annotated[str, "1C test object type"] = "",
+    max_depth: Annotated[int, "Maximum search depth"] = 8,
+) -> Any:
+    """Find and activate a UI object in the active test client window."""
+    return await bridge.call("activate_object", {"name": name, "title": title, "type": type, "max_depth": max_depth})
+
+
+@mcp.tool()
+async def execute_window_command(command: Annotated[str, "Command name to execute in the active window"]) -> Any:
+    """Execute a command in the active 1C test client window."""
+    return await bridge.call("execute_window_command", {"command": command})
+
+
+@mcp.tool()
+async def current_element() -> Any:
+    """Return the current active form element."""
+    return await bridge.call("current_element", {})
+
+
+@mcp.tool()
+async def table_current_row(
+    name: Annotated[str, "Table technical name"] = "",
+    title: Annotated[str, "Table visible title"] = "",
+    max_depth: Annotated[int, "Maximum search depth"] = 8,
+) -> Any:
+    """Return current row of a tested table as key/value text mapping."""
+    return await bridge.call("table_current_row", {"name": name, "title": title, "max_depth": max_depth})
+
+
+@mcp.tool()
+async def table_selected_rows(
+    name: Annotated[str, "Table technical name"] = "",
+    title: Annotated[str, "Table visible title"] = "",
+    max_depth: Annotated[int, "Maximum search depth"] = 8,
+) -> Any:
+    """Return selected rows of a tested table as key/value text mappings."""
+    return await bridge.call("table_selected_rows", {"name": name, "title": title, "max_depth": max_depth})
+
+
+@mcp.tool()
+async def tabular_documents(
+    include_text: Annotated[bool, "Include tabular document text"] = False,
+    max_depth: Annotated[int, "Maximum search depth"] = 8,
+) -> Any:
+    """List tabular document fields in the active window; optionally include their text."""
+    return await bridge.call("tabular_documents", {"include_text": include_text, "max_depth": max_depth})
+
+
+@mcp.tool()
+async def tabular_document_text(
+    name: Annotated[str, "Tabular document field technical name"] = "",
+    title: Annotated[str, "Tabular document field visible title"] = "",
+    max_depth: Annotated[int, "Maximum search depth"] = 8,
+) -> Any:
+    """Return text and dimensions of a tabular document field in the active window."""
+    return await bridge.call("tabular_document_text", {"name": name, "title": title, "max_depth": max_depth})
+
+
+@mcp.tool()
 def screenshot(path: Annotated[str, "Output image path"] = "build/screenshots/screenshot.png") -> dict[str, Any]:
     """Capture a desktop screenshot from the MCP host."""
     output_path = Path(path)
