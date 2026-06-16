@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""E2E test of the stable manager + test client launch pipeline.
+"""E2E test of the autonomous-server pipeline (ibcmd → ibsrv → 1cv8c /WS).
 
 Validates that:
-  1. `launch_manager` creates a file infobase via ibcmd
-  2. `launch_manager` starts 1cv8 /TESTMANAGER /Execute <epf>
-  3. The manager connects to the WebSocket bridge
-  4. `connect_test_client` launches 1cv8c /TESTCLIENT and connects
-  5. `disconnect_test_client` cleanly tears down
-  6. `stop_manager` tears down manager
+  1. `launch_manager(create_infobase=True, load_configuration=True, start_standalone=True)`
+     creates the file IB, loads a .cf into it, and starts ibsrv.
+  2. `launch_manager(use_thin_client=True)` starts the thin test-manager
+     via `1cv8c /WS ws://.../TESTMANAGER /Execute <epf> /C <ws>`.
+  3. The manager connects to the WebSocket bridge.
+  4. `connect_test_client` launches 1cv8c /TESTCLIENT and connects.
+  5. `disconnect_test_client` cleanly tears down.
+  6. `stop_manager` tears down manager + ibsrv.
 """
 
 import asyncio
@@ -25,6 +27,7 @@ from mcp_1c import runtime  # noqa: E402
 
 INBOX = Path(os.environ.get("ONEC_MCP_DATA_DIR", "/tmp/onec-mcp"))
 IB_PATH = INBOX / "ib"
+SRV_DATA = INBOX / "ibsrv-data"
 LOG_DIR = INBOX / "logs"
 
 
@@ -53,18 +56,28 @@ async def main() -> None:
     await server.bridge.start()
     print(f"Bridge URL: {server.bridge.url}", flush=True)
 
-    print("=== launch_manager (ibcmd → file IB → 1cv8 TESTMANAGER) ===", flush=True)
+    print("=== launch_manager (CREATEINFOBASE → ibcmd config load → ibsrv → 1cv8c /WS) ===", flush=True)
     result = server.launch_manager(
         platform_dir="/opt/1cv8/x86_64/8.5.1.1150",
         db_path=str(IB_PATH),
+        server_data_dir=str(SRV_DATA),
+        ibsrv_address="127.0.0.1",
+        ibsrv_port=8314,
+        ibsrv_http_base="/",
         processor="build/MCPTestManager.epf",
         create_infobase=True,
+        load_configuration=True,
+        cf_path=runtime.DEFAULT_CF_TEMPLATE,
+        start_standalone=True,
+        use_thin_client=True,
     )
     print(json.dumps(result, indent=2, ensure_ascii=False), flush=True)
 
     print("=== Waiting for manager to connect to WS bridge ===", flush=True)
     if not await wait_for_ws(30):
         print("ERROR: manager did not connect to WS bridge within 30s", flush=True)
+        print("=== runtime_status ===", flush=True)
+        print(json.dumps(server.runtime_status(), indent=2, ensure_ascii=False), flush=True)
         server.stop_manager()
         return
     print("Manager connected to WS bridge!", flush=True)
@@ -78,7 +91,7 @@ async def main() -> None:
         {
             "base_url": "<TARGET_INFOBASE_URL>",
             "username": "",
-            "password": "",
+            "password": "***",
             "port": 1538,
             "onec_path": "/opt/1cv8/x86_64/8.5.1.1150/1cv8c",
             "host": "localhost",

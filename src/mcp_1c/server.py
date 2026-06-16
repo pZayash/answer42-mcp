@@ -37,12 +37,20 @@ def _default_inbox_dir() -> Path:
 def _resolve_paths(
     platform_dir: str,
     db_path: str,
+    ibsrv_address: str,
+    ibsrv_port: int,
+    ibsrv_http_base: str,
     processor: str,
 ) -> runtime.ManagerRuntime:
     return runtime.ManagerRuntime(
         infobase=runtime.InfobaseSpec(db_path=Path(db_path)),
+        server=runtime.StandaloneServerSpec(
+            address=ibsrv_address,
+            port=ibsrv_port,
+            http_base=ibsrv_http_base,
+        ),
         manager=runtime.TestManagerSpec(
-            onec_path=os.path.join(platform_dir, "1cv8"),
+            onec_path=os.path.join(platform_dir, "1cv8c"),
             processor=processor,
         ),
     )
@@ -56,12 +64,21 @@ def bridge_status() -> dict[str, Any]:
 
 @mcp.tool()
 def runtime_status() -> dict[str, Any]:
-    """Report the live state of the test-manager process."""
+    """Report the live state of the autonomous server + test-manager processes."""
     if _RUNTIME is None:
         return {"running": False}
     return {
         "running": True,
         "infobase": str(_RUNTIME.infobase.db_path),
+        "server": {
+            "pid": _RUNTIME.server_process.pid if _RUNTIME.server_process else None,
+            "alive": _RUNTIME.server_process.poll() is None if _RUNTIME.server_process else False,
+            "address": _RUNTIME.server.address,
+            "port": _RUNTIME.server.port,
+            "listening": runtime.is_port_listening(
+                _RUNTIME.server.address, _RUNTIME.server.port
+            ),
+        },
         "manager": {
             "pid": _RUNTIME.manager_process.pid if _RUNTIME.manager_process else None,
             "alive": _RUNTIME.manager_process.poll() is None if _RUNTIME.manager_process else False,
@@ -72,49 +89,111 @@ def runtime_status() -> dict[str, Any]:
 
 @mcp.tool()
 def launch_manager(
-    platform_dir: Annotated[str, "1C platform directory (contains 1cv8 + ibcmd)"] = "/opt/1cv8/x86_64/8.5.1.1150",
-    db_path: Annotated[str, "File infobase path for the test-manager"] = "/tmp/onec-mcp/ib",
+    platform_dir: Annotated[str, "1C platform directory (contains 1cv8/1cv8c/ibcmd/ibsrv)"] = "/opt/1cv8/x86_64/8.5.1.1150",
+    db_path: Annotated[str, "File infobase path"] = "/tmp/onec-mcp/ib",
+    server_data_dir: Annotated[str, "Standalone server data directory"] = "/tmp/onec-mcp/ibsrv-data",
+    ibsrv_address: Annotated[str, "Standalone server listen address"] = "127.0.0.1",
+    ibsrv_port: Annotated[int, "Standalone server HTTP port"] = 8314,
+    ibsrv_http_base: Annotated[str, "Standalone server HTTP base path"] = "/",
     processor: Annotated[str, "Path to MCPTestManager.epf"] = "build/MCPTestManager.epf",
     create_infobase: Annotated[bool, "(Re)create the file infobase before launching"] = True,
+    load_configuration: Annotated[bool, "Load a .cf template into the infobase after creation"] = True,
+    cf_path: Annotated[str, "Path to .cf file used to populate the configuration"] = runtime.DEFAULT_CF_TEMPLATE,
+    start_standalone: Annotated[bool, "Start the autonomous 1C server (ibsrv)"] = True,
+    use_thin_client: Annotated[bool, "Use 1cv8c /WS ws://... instead of 1cv8 /F <ib>"] = True,
     extra_args: Annotated[str, "Extra raw 1C command-line arguments"] = "",
 ) -> dict[str, Any]:
-    """Launch the 1C test-manager (thick client, /TESTMANAGER mode).
+    """Launch the 1C test infrastructure: ibcmd → ibsrv → 1cv8c /WS /TESTMANAGER.
 
-    The test-manager is a thick client (`1cv8`) opened against a local
-    file infobase. The infobase is created via `ibcmd infobase create`,
-    then the manager is started in /TESTMANAGER mode with the EPF executed
-    automatically. The EPF opens the WebSocket bridge and waits for
-    commands from this MCP server.
+    The default pipeline is:
+
+    1. `1cv8 CREATEINFOBASE File=<db>` creates the file IB on disk.
+    2. `ibcmd config load --db-path=<db> <cf>` populates the configuration
+       tree (mandatory: a fresh file DB has no configuration, so the
+       thin client refuses to log in otherwise).
+    3. `ibsrv` is launched in its default form and listens on the
+       configured HTTP port.
+    4. `1cv8c ENTERPRISE /WS ws://host:port/ /TESTMANAGER /Execute <epf>
+       /C <ws-bridge>` opens the EPF inside the thin client.
+
+    Set `use_thin_client=False` to fall back to the thick-client
+    `/F <ib>` form while the HTTP-gate integration is being stabilised.
     """
     global _RUNTIME
 
     if _RUNTIME is not None:
         stop_manager()
 
-    runtime_state = _resolve_paths(platform_dir, db_path, processor)
+    runtime_state = _resolve_paths(
+        platform_dir=platform_dir,
+        db_path=db_path,
+        ibsrv_address=ibsrv_address,
+        ibsrv_port=ibsrv_port,
+        ibsrv_http_base=ibsrv_http_base,
+        processor=processor,
+    )
     log_dir = runtime_state.log_dir
     log_dir.mkdir(parents=True, exist_ok=True)
 
     onec_thick = os.path.join(platform_dir, "1cv8")
+    onec_thin = os.path.join(platform_dir, "1cv8c")
+    ibcmd = os.path.join(platform_dir, "ibcmd")
+    ibsrv = os.path.join(platform_dir, "ibsrv")
+
     if create_infobase:
         runtime.create_file_infobase(onec_thick, runtime_state.infobase.db_path)
 
-    argv = runtime.build_test_manager_argv(
-        onec_path=runtime_state.manager.onec_path,
-        db_path=str(runtime_state.infobase.db_path),
-        processor=runtime_state.manager.processor,
-        websocket_url=bridge.url,
-    )
+    if load_configuration and cf_path:
+        runtime.load_configuration(ibcmd, runtime_state.infobase.db_path, cf_path)
+
+    if start_standalone:
+        server_proc = runtime.start_standalone_server(
+            ibsrv=ibsrv,
+            address=ibsrv_address,
+            port=ibsrv_port,
+            http_base=ibsrv_http_base,
+            data_dir=Path(server_data_dir),
+            log_dir=log_dir,
+        )
+        runtime_state.server_process = server_proc
+
+    if use_thin_client:
+        ws_url = f"ws://{ibsrv_address}:{ibsrv_port}{ibsrv_http_base}"
+        argv = runtime.build_thin_test_manager_argv(
+            onec_path=onec_thin,
+            ws_url=ws_url,
+            username="",
+            password="",
+            processor=processor,
+            websocket_url=bridge.url,
+        )
+        manager_proc = runtime.start_thin_test_manager(
+            onec_path=onec_thin,
+            ws_url=ws_url,
+            username="",
+            password="",
+            processor=processor,
+            websocket_url=bridge.url,
+            log_dir=log_dir,
+        )
+    else:
+        argv = runtime.build_test_manager_argv(
+            onec_path=onec_thick,
+            db_path=str(runtime_state.infobase.db_path),
+            processor=processor,
+            websocket_url=bridge.url,
+        )
+        manager_proc = runtime.start_test_manager(
+            onec_path=onec_thick,
+            db_path=str(runtime_state.infobase.db_path),
+            processor=processor,
+            websocket_url=bridge.url,
+            log_dir=log_dir,
+        )
+
     if extra_args:
         argv.extend(shlex.split(extra_args))
 
-    manager_proc = runtime.start_test_manager(
-        onec_path=runtime_state.manager.onec_path,
-        db_path=str(runtime_state.infobase.db_path),
-        processor=runtime_state.manager.processor,
-        websocket_url=bridge.url,
-        log_dir=log_dir,
-    )
     runtime_state.manager_process = manager_proc
     _RUNTIME = runtime_state
 
@@ -122,19 +201,21 @@ def launch_manager(
         "pid": manager_proc.pid,
         "argv": argv,
         "websocket_url": bridge.url,
+        "ws_url": f"ws://{ibsrv_address}:{ibsrv_port}{ibsrv_http_base}" if use_thin_client else None,
         "log_dir": str(log_dir),
     }
 
 
 @mcp.tool()
 def stop_manager() -> dict[str, Any]:
-    """Tear down the manager started by launch_manager."""
+    """Tear down the manager + autonomous server started by launch_manager."""
     global _RUNTIME
     if _RUNTIME is None:
         return {"stopped": False, "reason": "no runtime"}
     rt = _RUNTIME
     _RUNTIME = None
     runtime.kill_process(rt.manager_process, "test-manager")
+    runtime.kill_process(rt.server_process, "ibsrv")
     return {"stopped": True}
 
 
@@ -328,6 +409,7 @@ async def _run() -> None:
     finally:
         if _RUNTIME is not None:
             runtime.kill_process(_RUNTIME.manager_process, "test-manager")
+            runtime.kill_process(_RUNTIME.server_process, "ibsrv")
         await bridge.stop()
 
 

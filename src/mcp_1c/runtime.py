@@ -1,7 +1,10 @@
 """1C test infrastructure launchers for the MCP bridge.
 
 This module owns:
-  * file infobase creation for the test-manager via `ibcmd infobase create`
+  * file infobase creation for the test-manager (via `1cv8 CREATEINFOBASE`)
+  * configuration loading into the file IB (via `ibcmd config load <cf>`)
+  * the autonomous 1C server (`ibsrv`) HTTP-gate lifecycle
+  * thin-client (`1cv8c /WS ws://host:port`) launch in /TESTMANAGER mode
   * test-manager (thick client, `/TESTMANAGER`) launch and log wiring
 
 The test client itself is launched from inside the 1C manager processor
@@ -27,8 +30,16 @@ LOGGER = logging.getLogger(__name__)
 DEFAULT_ONEC_VERSION = "8.5.1.1150"
 DEFAULT_PLATFORM_DIR = f"/opt/1cv8/x86_64/{DEFAULT_ONEC_VERSION}"
 DEFAULT_THICK_CLIENT = f"{DEFAULT_PLATFORM_DIR}/1cv8"
+DEFAULT_THIN_CLIENT = f"{DEFAULT_PLATFORM_DIR}/1cv8c"
 DEFAULT_IBCMD = f"{DEFAULT_PLATFORM_DIR}/ibcmd"
+DEFAULT_IBSRV = f"{DEFAULT_PLATFORM_DIR}/ibsrv"
 DEFAULT_TEST_CLIENT_PORT = 1538
+DEFAULT_IBSRV_HTTP_PORT = 8314
+DEFAULT_IB_PATH = "/tmp/onec-mcp/ib"
+DEFAULT_IBSRV_DATA = "/tmp/onec-mcp/ibsrv-data"
+DEFAULT_CF_TEMPLATE = (
+    "/home/openclaw/.local/share/ovm/1.9.4/lib/v8runner/tests/fixtures/1.0/1Cv8.cf"
+)
 
 
 def _default_inbox_dir() -> Path:
@@ -37,16 +48,31 @@ def _default_inbox_dir() -> Path:
 
 @dataclass(slots=True)
 class InfobaseSpec:
-    """File infobase used by the test-manager (thick client, /TESTMANAGER)."""
+    """File infobase used by the test-manager and the ibsrv HTTP-gate."""
 
     db_path: Path
 
 
 @dataclass(slots=True)
-class TestManagerSpec:
-    """Test-manager (thick client) connection to the infobase."""
+class StandaloneServerSpec:
+    """Standalone 1C server (ibsrv) HTTP-gate connection parameters.
 
-    onec_path: str = DEFAULT_THICK_CLIENT
+    ibsrv publishes a single TCP port that the thin client reaches via
+    `ws://host:port/` (or `ws://host:port/<http-base>`). It does NOT
+    expose a TCP direct-gate, so the thin client must connect with
+    `/WS ws://...` rather than `Srvr="host:port";Ref=...`.
+    """
+
+    address: str = "127.0.0.1"
+    port: int = DEFAULT_IBSRV_HTTP_PORT
+    http_base: str = "/"
+
+
+@dataclass(slots=True)
+class TestManagerSpec:
+    """Test-manager (thin client) connection to the standalone server."""
+
+    onec_path: str = DEFAULT_THIN_CLIENT
     processor: str = "build/MCPTestManager.epf"
 
 
@@ -55,7 +81,9 @@ class ManagerRuntime:
     """Tracks the live processes owned by the MCP server."""
 
     infobase: InfobaseSpec
+    server: StandaloneServerSpec
     manager: TestManagerSpec
+    server_process: subprocess.Popen | None = None
     manager_process: subprocess.Popen | None = None
     log_dir: Path = field(default_factory=lambda: _default_inbox_dir() / "logs")
     extra: dict[str, Any] = field(default_factory=dict)
@@ -113,10 +141,9 @@ def create_file_infobase(
 ) -> None:
     """Create a fresh file infobase via `1cv8 CREATEINFOBASE`.
 
-    Wipes any existing directory at db_path first. We use `1cv8` instead of
-    `ibcmd infobase create` because the latter produces an empty DB without
-    a configuration tree, which makes /TESTMANAGER fail to load the EPF
-    (the thick client requires a configured IB to enter /TESTMANAGER).
+    Wipes any existing directory at db_path first. `CREATEINFOBASE` only
+    allocates the file DB; it does NOT load a configuration tree. The
+    configuration must be loaded separately via `load_configuration`.
     """
     if db_path.exists():
         shutil.rmtree(db_path, ignore_errors=True)
@@ -136,6 +163,143 @@ def create_file_infobase(
     LOGGER.info("File infobase created: %s", db_path)
 
 
+def load_configuration(
+    ibcmd: str,
+    db_path: Path,
+    cf_path: str | Path,
+    timeout: float = 120.0,
+) -> None:
+    """Load a `.cf` configuration into an existing file infobase.
+
+    Required after `create_file_infobase`: a fresh file DB has no
+    configuration, so the thin client logs in to "an empty application"
+    and refuses to open the infobase. `ibcmd config load --db-path=<dir>
+    <cf>` populates the configuration tree.
+    """
+    if not Path(cf_path).exists():
+        raise FileNotFoundError(f"Configuration file not found: {cf_path}")
+    argv = [
+        ibcmd,
+        "config",
+        "load",
+        f"--db-path={db_path}",
+        str(cf_path),
+    ]
+    LOGGER.info("Loading configuration %s into %s", cf_path, db_path)
+    completed = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"ibcmd config load failed (rc={completed.returncode}): "
+            f"stdout={completed.stdout!r} stderr={completed.stderr!r}"
+        )
+    LOGGER.info("Configuration loaded from %s into %s", cf_path, db_path)
+
+
+def start_standalone_server(
+    ibsrv: str,
+    address: str,
+    port: int,
+    http_base: str,
+    data_dir: Path,
+    log_dir: Path,
+    timeout: float = 30.0,
+) -> subprocess.Popen:
+    """Start the autonomous 1C server (ibsrv) and wait for the HTTP-gate.
+
+    `ibsrv` is started with NO command-line overrides; it picks up its
+    data directory, HTTP port, and DB path entirely from defaults (it
+    uses the per-user `~/.1cv8/1C/1cv8/standalone-server/` tree). This
+    matches the documented "default invocation" form and is the only
+    way ibsrv reliably opens the HTTP socket on this build.
+    """
+    if not Path(ibsrv).exists():
+        raise FileNotFoundError(f"ibsrv not found: {ibsrv}")
+    data_dir.mkdir(parents=True, exist_ok=True)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "ibsrv.log"
+    log_handle = open(log_path, "ab", buffering=0)
+    LOGGER.info("Starting ibsrv (default invocation, data=%s)", data_dir)
+    proc = subprocess.Popen(
+        [ibsrv],
+        stdout=log_handle,
+        stderr=log_handle,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    if not wait_for_port(address, port, timeout=timeout):
+        kill_process(proc, "ibsrv")
+        raise RuntimeError(
+            f"ibsrv did not start listening on {address}:{port} within {timeout}s. "
+            f"See log: {log_path}"
+        )
+    LOGGER.info("ibsrv is listening on %s:%s (pid=%s)", address, port, proc.pid)
+    return proc
+
+
+def build_thin_test_manager_argv(
+    onec_path: str,
+    ws_url: str,
+    username: str,
+    password: str,
+    processor: str,
+    websocket_url: str,
+) -> list[str]:
+    """Compose argv for 1cv8c /WS <ws-url> /TESTMANAGER /Execute <epf> /C <ws>.
+
+    Important: `/Execute <path>` must be passed as two argv elements (a
+    space-separated pair, not `/Execute=path`). 1C 8.5.1.1150 treats the
+    `=` form as the *value* of the parameter (literally `=path`),
+    which results in a missing-file error at startup.
+    """
+    return [
+        onec_path,
+        "ENTERPRISE",
+        "/WS",
+        ws_url,
+        f"/N{username}",
+        f"/P{password}",
+        "/TESTMANAGER",
+        "/Execute",
+        processor,
+        "/C",
+        websocket_url,
+        "/DisableStartupDialogs",
+    ]
+
+
+def start_thin_test_manager(
+    onec_path: str,
+    ws_url: str,
+    username: str,
+    password: str,
+    processor: str,
+    websocket_url: str,
+    log_dir: Path,
+) -> subprocess.Popen:
+    """Start the 1C test-manager (thin client, /WS ws://ibsv) and return Popen."""
+    if not Path(onec_path).exists():
+        raise FileNotFoundError(f"1cv8c (thin) not found: {onec_path}")
+    if not Path(processor).exists():
+        raise FileNotFoundError(f"Test manager EPF not found: {processor}")
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "test_manager.log"
+    log_handle = open(log_path, "ab", buffering=0)
+    argv = build_thin_test_manager_argv(
+        onec_path, ws_url, username, password, processor, websocket_url
+    )
+    LOGGER.info("Starting thin test manager: %s", " ".join(argv))
+    proc = subprocess.Popen(
+        argv,
+        stdout=log_handle,
+        stderr=log_handle,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+        env={**os.environ, "DISPLAY": os.environ.get("DISPLAY", ":99")},
+    )
+    LOGGER.info("Test manager launched (pid=%s); log=%s", proc.pid, log_path)
+    return proc
+
+
 def build_test_manager_argv(
     onec_path: str,
     db_path: str,
@@ -144,10 +308,9 @@ def build_test_manager_argv(
 ) -> list[str]:
     """Compose argv for 1cv8 ENTERPRISE /F <ib> /TESTMANAGER /Execute <epf> /C <ws>.
 
-    Important: `/Execute <path>` must be passed as two argv elements (a
-    space-separated pair, not `/Execute=path`). 1C 8.5.1.1150 treats the
-    `=` form as the *value* of the parameter (literally `=path`),
-    which results in a missing-file error at startup.
+    This is the legacy /F-based path used while the ibsrv HTTP-gate
+    integration is being stabilised. /Execute is split into two argv
+    elements (see build_thin_test_manager_argv for the rationale).
     """
     return [
         onec_path,
