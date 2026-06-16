@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# 1C temporary files
+*.pfl
+*.log
+*.lgp
+*.tmp
+
+# GSD autopilot transient files
+.planning/autopilot.sh
+.planning/autopilot.lock
+.planning/logs/
+.planning/checkpoints/
