@@ -98,7 +98,7 @@ def launch_manager(
     processor: Annotated[str, "Path to MCPTestManager.epf"] = "build/MCPTestManager.epf",
     create_infobase: Annotated[bool, "(Re)create the file infobase before launching"] = True,
     load_configuration: Annotated[bool, "Load a .cf template into the infobase after creation"] = True,
-    cf_path: Annotated[str, "Path to .cf file used to populate the configuration"] = runtime.DEFAULT_CF_TEMPLATE,
+    cf_path: Annotated[str, "Path to .cf file used to populate the configuration"] = runtime.DEFAULT_CF_BUILT,
     start_standalone: Annotated[bool, "Start the autonomous 1C server (ibsrv)"] = True,
     use_thin_client: Annotated[bool, "Use 1cv8c /WS ws://... instead of 1cv8 /F <ib>"] = True,
     extra_args: Annotated[str, "Extra raw 1C command-line arguments"] = "",
@@ -141,7 +141,7 @@ def launch_manager(
     ibsrv = os.path.join(platform_dir, "ibsrv")
 
     if create_infobase:
-        runtime.create_file_infobase(onec_thick, runtime_state.infobase.db_path)
+        runtime.create_file_infobase(ibcmd, runtime_state.infobase.db_path)
 
     if load_configuration and cf_path:
         runtime.load_configuration(ibcmd, runtime_state.infobase.db_path, cf_path)
@@ -162,15 +162,11 @@ def launch_manager(
         argv = runtime.build_thin_test_manager_argv(
             onec_path=onec_thin,
             ws_url=ws_url,
-            username="",
-            password="",
             websocket_url=bridge.url,
         )
         manager_proc = runtime.start_thin_test_manager(
             onec_path=onec_thin,
             ws_url=ws_url,
-            username="",
-            password="",
             websocket_url=bridge.url,
             log_dir=log_dir,
         )

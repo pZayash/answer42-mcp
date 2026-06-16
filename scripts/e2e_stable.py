@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""E2E test of the autonomous-server pipeline (ibcmd → ibsrv → 1cv8c /WS).
+"""E2E test of the autonomous-server pipeline (ibcmd infobase create → ibcmd config load MCPTestManager.cf → ibsrv → 1cv8c /WS /TESTMANAGER).
 
 Validates that:
   1. `launch_manager(create_infobase=True, load_configuration=True, start_standalone=True)`
-     creates the file IB, loads a .cf into it, and starts ibsrv.
+     creates a file IB via ibcmd, loads the built MCPTestManager.cf, and
+     starts ibsrv.
   2. `launch_manager(use_thin_client=True)` starts the thin test-manager
-     via `1cv8c /WS ws://.../TESTMANAGER /Execute <epf> /C <ws>`.
+     via `1cv8c /WS"http://..." /TESTMANAGER /C <ws-bridge>` (no /N/P
+     because the infobase has no user accounts).
   3. The manager connects to the WebSocket bridge.
   4. `connect_test_client` launches 1cv8c /TESTCLIENT and connects.
   5. `disconnect_test_client` cleanly tears down.
@@ -56,7 +58,7 @@ async def main() -> None:
     await server.bridge.start()
     print(f"Bridge URL: {server.bridge.url}", flush=True)
 
-    print("=== launch_manager (CREATEINFOBASE → ibcmd config load → ibsrv → 1cv8c /WS) ===", flush=True)
+    print("=== launch_manager (ibcmd infobase create → ibcmd config load MCPTestManager.cf → ibsrv → 1cv8c /WS /TESTMANAGER) ===", flush=True)
     result = server.launch_manager(
         platform_dir="/opt/1cv8/x86_64/8.5.1.1150",
         db_path=str(IB_PATH),
@@ -67,7 +69,7 @@ async def main() -> None:
         processor="build/MCPTestManager.epf",
         create_infobase=True,
         load_configuration=True,
-        cf_path=runtime.DEFAULT_CF_TEMPLATE,
+        cf_path=runtime.DEFAULT_CF_BUILT,
         start_standalone=True,
         use_thin_client=True,
     )

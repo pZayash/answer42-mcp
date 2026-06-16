@@ -1,8 +1,8 @@
 """1C test infrastructure launchers for the MCP bridge.
 
 This module owns:
-  * file infobase creation for the test-manager (via `1cv8 CREATEINFOBASE`)
-  * configuration loading into the file IB (via `ibcmd config load <cf>`)
+  * file infobase creation via `ibcmd infobase create`
+  * .cf configuration loading (`ibcmd config load`)
   * the autonomous 1C server (`ibsrv`) HTTP-gate lifecycle
   * thin-client (`1cv8c /WS ws://host:port`) launch in /TESTMANAGER mode
   * test-manager (thick client, `/TESTMANAGER`) launch and log wiring
@@ -37,9 +37,7 @@ DEFAULT_TEST_CLIENT_PORT = 1538
 DEFAULT_IBSRV_HTTP_PORT = 8314
 DEFAULT_IB_PATH = "/tmp/onec-mcp/ib"
 DEFAULT_IBSRV_DATA = "/tmp/onec-mcp/ibsrv-data"
-DEFAULT_CF_TEMPLATE = (
-    "/home/openclaw/.local/share/ovm/1.9.4/lib/v8runner/tests/fixtures/1.0/1Cv8.cf"
-)
+DEFAULT_CF_BUILT = "build/MCPTestManager.cf"
 
 
 def _default_inbox_dir() -> Path:
@@ -70,16 +68,6 @@ class StandaloneServerSpec:
     address: str = "127.0.0.1"
     port: int = DEFAULT_IBSRV_HTTP_PORT
     name: str = "mcp"
-
-
-def build_thin_client_ws_url(address: str, port: int) -> str:
-    """Build the `/WS` argument value for `1cv8c` against the ibsrv HTTP-gate.
-
-    The format is `/WS"http://host:port"` (no trailing slash). The
-    infobase name is selected by `--name=<mcp>` on the ibsrv side; the
-    thin client does not need to specify it here.
-    """
-    return f'"http://{address}:{port}"'
 
 
 @dataclass(slots=True)
@@ -149,29 +137,31 @@ def kill_process(proc: subprocess.Popen | None, label: str) -> None:
 
 
 def create_file_infobase(
-    onec_path: str,
+    ibcmd: str,
     db_path: Path,
     timeout: float = 60.0,
 ) -> None:
-    """Create a fresh file infobase via `1cv8 CREATEINFOBASE`.
+    """Create a fresh file infobase via `ibcmd infobase create --create-database`.
 
-    Wipes any existing directory at db_path first. `CREATEINFOBASE` only
-    allocates the file DB; it does NOT load a configuration tree. The
-    configuration must be loaded separately via `load_configuration`.
+    Wipes any existing directory at db_path first. The DB is created
+    without a configuration — a .cf is loaded into it next via
+    `load_configuration`.
     """
     if db_path.exists():
         shutil.rmtree(db_path, ignore_errors=True)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     argv = [
-        onec_path,
-        "CREATEINFOBASE",
-        f"File={db_path}",
+        ibcmd,
+        "infobase",
+        "create",
+        "--db-path=" + str(db_path),
+        "--create-database",
     ]
-    LOGGER.info("Creating file infobase at %s via %s", db_path, onec_path)
+    LOGGER.info("Creating file infobase at %s via %s", db_path, ibcmd)
     completed = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
     if completed.returncode != 0:
         raise RuntimeError(
-            f"1cv8 CREATEINFOBASE failed (rc={completed.returncode}): "
+            f"ibcmd infobase create failed (rc={completed.returncode}): "
             f"stdout={completed.stdout!r} stderr={completed.stderr!r}"
         )
     LOGGER.info("File infobase created: %s", db_path)
@@ -185,10 +175,11 @@ def load_configuration(
 ) -> None:
     """Load a `.cf` configuration into an existing file infobase.
 
-    Required after `create_file_infobase`: a fresh file DB has no
-    configuration, so the thin client logs in to "an empty application"
-    and refuses to open the infobase. `ibcmd config load --db-path=<dir>
-    <cf>` populates the configuration tree.
+    The default flow uses the built-in `MCPTestManager.cf` which
+    embeds the MCP processor in the configuration and registers a
+    `ПриНачалеРаботыСистемы` handler that opens it. A legacy path
+    loads a bare `.cf` template (e.g. v8runner's empty 1Cv8.cf) and
+    relies on an externally-loaded EPF instead.
     """
     if not Path(cf_path).exists():
         raise FileNotFoundError(f"Configuration file not found: {cf_path}")
@@ -253,30 +244,37 @@ def start_standalone_server(
     return proc
 
 
+def build_thin_client_ws_url(address: str, port: int) -> str:
+    """Build the `/WS` argument value for `1cv8c` against the ibsrv HTTP-gate.
+
+    The format is `/WS"http://host:port"` (no trailing slash). The
+    infobase name is selected by `--name=<mcp>` on the ibsrv side; the
+    thin client does not need to specify it here.
+    """
+    return f'"http://{address}:{port}"'
+
+
 def build_thin_test_manager_argv(
     onec_path: str,
     ws_url: str,
-    username: str,
-    password: str,
     websocket_url: str,
 ) -> list[str]:
     """Compose argv for 1cv8c /WS <ws-url> /TESTMANAGER /C <ws-bridge>.
 
-    The test manager EPF is NOT opened via `/Execute` here — that
-    argument is silently ignored (or crashes the client) in 1cv8c
-    /TESTMANAGER mode against the autonomous server. The EPF is
-    loaded into the infobase once and then opened via
-    `e1cib/command/...` from the WS-bridge.
+    The MCP test-manager infobase is intentionally built without any
+    user accounts (see the configuration's application module), so
+    `/N`/`/P` are not passed: the thin client starts directly in the
+    test-manager form. The MCP processor is opened automatically by
+    the application module's `ПриНачалеРаботыСистемы` handler.
 
-    `/Execute` is split into a single dash-prefixed form to keep
-    1cv8c happy across versions.
+    `/Execute` is intentionally not used here — the processor lives
+    inside the configuration and is started by the application module
+    rather than by the client command line.
     """
     return [
         onec_path,
         "ENTERPRISE",
         f"/WS{ws_url}",
-        f"/N{username}",
-        f"/P{password}",
         "/TESTMANAGER",
         "/C",
         websocket_url,
@@ -287,8 +285,6 @@ def build_thin_test_manager_argv(
 def start_thin_test_manager(
     onec_path: str,
     ws_url: str,
-    username: str,
-    password: str,
     websocket_url: str,
     log_dir: Path,
 ) -> subprocess.Popen:
@@ -299,7 +295,7 @@ def start_thin_test_manager(
     log_path = log_dir / "test_manager.log"
     log_handle = open(log_path, "ab", buffering=0)
     argv = build_thin_test_manager_argv(
-        onec_path, ws_url, username, password, websocket_url
+        onec_path, ws_url, websocket_url
     )
     LOGGER.info("Starting thin test manager: %s", " ".join(argv))
     proc = subprocess.Popen(
@@ -322,9 +318,9 @@ def build_test_manager_argv(
 ) -> list[str]:
     """Compose argv for 1cv8 ENTERPRISE /F <ib> /TESTMANAGER /Execute <epf> /C <ws>.
 
-    This is the legacy /F-based path used while the ibsrv HTTP-gate
-    integration is being stabilised. /Execute is split into two argv
-    elements (see build_thin_test_manager_argv for the rationale).
+    Legacy /F-based path used while the ibsrv HTTP-gate integration
+    is being stabilised. /Execute is split into two argv elements
+    (see build_thin_test_manager_argv for the rationale).
     """
     return [
         onec_path,
