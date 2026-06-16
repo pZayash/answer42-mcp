@@ -58,14 +58,28 @@ class StandaloneServerSpec:
     """Standalone 1C server (ibsrv) HTTP-gate connection parameters.
 
     ibsrv publishes a single TCP port that the thin client reaches via
-    `ws://host:port/` (or `ws://host:port/<http-base>`). It does NOT
-    expose a TCP direct-gate, so the thin client must connect with
-    `/WS ws://...` rather than `Srvr="host:port";Ref=...`.
+    `/WS"http://host:port"` (note: the *http://* form, not `ws://`). The
+    URL must NOT carry a trailing slash; the HTTP-base path is configured
+    inside ibsrv itself.
+
+    The standalone server requires that the infobase it serves has a
+    stable name (`--name=`) — the thin client must refer to the same
+    name when connecting.
     """
 
     address: str = "127.0.0.1"
     port: int = DEFAULT_IBSRV_HTTP_PORT
-    http_base: str = "/"
+    name: str = "mcp"
+
+
+def build_thin_client_ws_url(address: str, port: int) -> str:
+    """Build the `/WS` argument value for `1cv8c` against the ibsrv HTTP-gate.
+
+    The format is `/WS"http://host:port"` (no trailing slash). The
+    infobase name is selected by `--name=<mcp>` on the ibsrv side; the
+    thin client does not need to specify it here.
+    """
+    return f'"http://{address}:{port}"'
 
 
 @dataclass(slots=True)
@@ -199,7 +213,7 @@ def start_standalone_server(
     ibsrv: str,
     address: str,
     port: int,
-    http_base: str,
+    name: str,
     data_dir: Path,
     log_dir: Path,
     timeout: float = 30.0,
@@ -211,6 +225,9 @@ def start_standalone_server(
     uses the per-user `~/.1cv8/1C/1cv8/standalone-server/` tree). This
     matches the documented "default invocation" form and is the only
     way ibsrv reliably opens the HTTP socket on this build.
+
+    `--name` is required: the thin client refers to the infobase by
+    this name when connecting via `/WS"http://host:port"`.
     """
     if not Path(ibsrv).exists():
         raise FileNotFoundError(f"ibsrv not found: {ibsrv}")
@@ -218,9 +235,9 @@ def start_standalone_server(
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / "ibsrv.log"
     log_handle = open(log_path, "ab", buffering=0)
-    LOGGER.info("Starting ibsrv (default invocation, data=%s)", data_dir)
+    LOGGER.info("Starting ibsrv (default invocation, data=%s, name=%s)", data_dir, name)
     proc = subprocess.Popen(
-        [ibsrv],
+        [ibsrv, f"--name={name}"],
         stdout=log_handle,
         stderr=log_handle,
         stdin=subprocess.DEVNULL,
@@ -232,7 +249,7 @@ def start_standalone_server(
             f"ibsrv did not start listening on {address}:{port} within {timeout}s. "
             f"See log: {log_path}"
         )
-    LOGGER.info("ibsrv is listening on %s:%s (pid=%s)", address, port, proc.pid)
+    LOGGER.info("ibsrv is listening on %s:%s (pid=%s, name=%s)", address, port, proc.pid, name)
     return proc
 
 
@@ -241,26 +258,26 @@ def build_thin_test_manager_argv(
     ws_url: str,
     username: str,
     password: str,
-    processor: str,
     websocket_url: str,
 ) -> list[str]:
-    """Compose argv for 1cv8c /WS <ws-url> /TESTMANAGER /Execute <epf> /C <ws>.
+    """Compose argv for 1cv8c /WS <ws-url> /TESTMANAGER /C <ws-bridge>.
 
-    Important: `/Execute <path>` must be passed as two argv elements (a
-    space-separated pair, not `/Execute=path`). 1C 8.5.1.1150 treats the
-    `=` form as the *value* of the parameter (literally `=path`),
-    which results in a missing-file error at startup.
+    The test manager EPF is NOT opened via `/Execute` here — that
+    argument is silently ignored (or crashes the client) in 1cv8c
+    /TESTMANAGER mode against the autonomous server. The EPF is
+    loaded into the infobase once and then opened via
+    `e1cib/command/...` from the WS-bridge.
+
+    `/Execute` is split into a single dash-prefixed form to keep
+    1cv8c happy across versions.
     """
     return [
         onec_path,
         "ENTERPRISE",
-        "/WS",
-        ws_url,
+        f"/WS{ws_url}",
         f"/N{username}",
         f"/P{password}",
         "/TESTMANAGER",
-        "/Execute",
-        processor,
         "/C",
         websocket_url,
         "/DisableStartupDialogs",
@@ -272,20 +289,17 @@ def start_thin_test_manager(
     ws_url: str,
     username: str,
     password: str,
-    processor: str,
     websocket_url: str,
     log_dir: Path,
 ) -> subprocess.Popen:
     """Start the 1C test-manager (thin client, /WS ws://ibsv) and return Popen."""
     if not Path(onec_path).exists():
         raise FileNotFoundError(f"1cv8c (thin) not found: {onec_path}")
-    if not Path(processor).exists():
-        raise FileNotFoundError(f"Test manager EPF not found: {processor}")
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / "test_manager.log"
     log_handle = open(log_path, "ab", buffering=0)
     argv = build_thin_test_manager_argv(
-        onec_path, ws_url, username, password, processor, websocket_url
+        onec_path, ws_url, username, password, websocket_url
     )
     LOGGER.info("Starting thin test manager: %s", " ".join(argv))
     proc = subprocess.Popen(

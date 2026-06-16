@@ -63,7 +63,7 @@ async def main() -> None:
         server_data_dir=str(SRV_DATA),
         ibsrv_address="127.0.0.1",
         ibsrv_port=8314,
-        ibsrv_http_base="/",
+        ibsrv_name="mcp",
         processor="build/MCPTestManager.epf",
         create_infobase=True,
         load_configuration=True,

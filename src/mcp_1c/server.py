@@ -39,7 +39,7 @@ def _resolve_paths(
     db_path: str,
     ibsrv_address: str,
     ibsrv_port: int,
-    ibsrv_http_base: str,
+    ibsrv_name: str,
     processor: str,
 ) -> runtime.ManagerRuntime:
     return runtime.ManagerRuntime(
@@ -47,7 +47,7 @@ def _resolve_paths(
         server=runtime.StandaloneServerSpec(
             address=ibsrv_address,
             port=ibsrv_port,
-            http_base=ibsrv_http_base,
+            name=ibsrv_name,
         ),
         manager=runtime.TestManagerSpec(
             onec_path=os.path.join(platform_dir, "1cv8c"),
@@ -94,7 +94,7 @@ def launch_manager(
     server_data_dir: Annotated[str, "Standalone server data directory"] = "/tmp/onec-mcp/ibsrv-data",
     ibsrv_address: Annotated[str, "Standalone server listen address"] = "127.0.0.1",
     ibsrv_port: Annotated[int, "Standalone server HTTP port"] = 8314,
-    ibsrv_http_base: Annotated[str, "Standalone server HTTP base path"] = "/",
+    ibsrv_name: Annotated[str, "Standalone server infobase name (--name)"] = "mcp",
     processor: Annotated[str, "Path to MCPTestManager.epf"] = "build/MCPTestManager.epf",
     create_infobase: Annotated[bool, "(Re)create the file infobase before launching"] = True,
     load_configuration: Annotated[bool, "Load a .cf template into the infobase after creation"] = True,
@@ -129,7 +129,7 @@ def launch_manager(
         db_path=db_path,
         ibsrv_address=ibsrv_address,
         ibsrv_port=ibsrv_port,
-        ibsrv_http_base=ibsrv_http_base,
+        ibsrv_name=ibsrv_name,
         processor=processor,
     )
     log_dir = runtime_state.log_dir
@@ -151,20 +151,19 @@ def launch_manager(
             ibsrv=ibsrv,
             address=ibsrv_address,
             port=ibsrv_port,
-            http_base=ibsrv_http_base,
+            name=runtime_state.server.name,
             data_dir=Path(server_data_dir),
             log_dir=log_dir,
         )
         runtime_state.server_process = server_proc
 
     if use_thin_client:
-        ws_url = f"ws://{ibsrv_address}:{ibsrv_port}{ibsrv_http_base}"
+        ws_url = runtime.build_thin_client_ws_url(ibsrv_address, ibsrv_port)
         argv = runtime.build_thin_test_manager_argv(
             onec_path=onec_thin,
             ws_url=ws_url,
             username="",
             password="",
-            processor=processor,
             websocket_url=bridge.url,
         )
         manager_proc = runtime.start_thin_test_manager(
@@ -172,7 +171,6 @@ def launch_manager(
             ws_url=ws_url,
             username="",
             password="",
-            processor=processor,
             websocket_url=bridge.url,
             log_dir=log_dir,
         )
@@ -201,7 +199,7 @@ def launch_manager(
         "pid": manager_proc.pid,
         "argv": argv,
         "websocket_url": bridge.url,
-        "ws_url": f"ws://{ibsrv_address}:{ibsrv_port}{ibsrv_http_base}" if use_thin_client else None,
+        "ws_url": ws_url if use_thin_client else None,
         "log_dir": str(log_dir),
     }
 
