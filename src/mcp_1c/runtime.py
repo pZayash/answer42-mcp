@@ -276,9 +276,6 @@ def build_thin_test_manager_argv(
         "ENTERPRISE",
         f"/WS{ws_url}",
         "/TESTMANAGER",
-        "/C",
-        websocket_url,
-        "/DisableStartupDialogs",
     ]
 
 
