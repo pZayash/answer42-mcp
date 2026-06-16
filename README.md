@@ -1,93 +1,104 @@
-# AI-Sandbox
+# 1C Test Client MCP
 
+MCP-сервер для управления **1С:Предприятием** в режиме клиента тестирования.
 
+Проект состоит из двух частей:
 
-## Getting started
+1. Python MCP server — публикует MCP tools и поднимает WebSocket-сервер.
+2. Внешняя обработка 1С `MCPTestManager` — запускается в служебной/пустой базе в режиме `/TESTMANAGER`, подключается к WebSocket и управляет тестируемым клиентом 1С через `ТестируемоеПриложение`.
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+Подробная схема: [`docs/architecture.md`](docs/architecture.md).
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+## Статус
 
-## Add your files
+Первый прототип:
 
-* [Create](https://docs.gitlab.com/user/project/repository/web_editor/#create-a-file) or [upload](https://docs.gitlab.com/user/project/repository/web_editor/#upload-a-file) files
-* [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
+- MCP tools и WebSocket bridge реализованы в `src/mcp_1c/`.
+- Исходники внешней обработки 1С лежат в `src/1c/`.
+- EPF успешно собирается локальной платформой 1С 8.5 под Xvfb: `build/MCPTestManager.epf`.
+- Базовые команды: подключение клиента тестирования, активное окно, дерево UI, командная панель, нажатие кнопки, скриншот.
 
+## Требования
+
+- Python 3.11+
+- Пакеты Python из `pyproject.toml`: `mcp`, `websockets`, `pydantic`
+- Для скриншотов: extra `screenshot` (`mss`)
+- 1С:Предприятие 8.5+ с поддержкой WebSocket-клиентов и режима тестирования
+- GUI/Xvfb для запуска клиента 1С на headless-сервере
+
+## Установка
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -e '.[screenshot,dev]'
 ```
-cd existing_repo
-git remote add origin https://gitlab.com/platform42/ai-sandbox.git
-git branch -M beta
-git push -uf origin beta
+
+## Запуск MCP-сервера
+
+```bash
+mcp-1c-test-manager --ws-host 127.0.0.1 --ws-port 8765
 ```
 
-## Integrate with your tools
+MCP transport — stdio. WebSocket URL для обработки 1С по умолчанию:
 
-* [Set up project integrations](https://gitlab.com/platform42/ai-sandbox/-/settings/integrations)
+```text
+ws://127.0.0.1:8765/bridge
+```
 
-## Collaborate with your team
+## Сборка обработки 1С
 
-* [Invite team members and collaborators](https://docs.gitlab.com/user/project/members/)
-* [Create a new merge request](https://docs.gitlab.com/user/project/merge_requests/creating_merge_requests/)
-* [Automatically close issues from merge requests](https://docs.gitlab.com/user/project/issues/managing_issues/#closing-issues-automatically)
-* [Enable merge request approvals](https://docs.gitlab.com/user/project/merge_requests/approvals/)
-* [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
+Используется skill `epf-build`/скрипт сборки XML external data processor.
 
-## Test and Deploy
+На Linux/headless нужен `DISPLAY`, например существующий Xvfb `:99`:
 
-Use the built-in continuous integration in GitLab.
+```bash
+DISPLAY=:99 python3 /home/openclaw/.openclaw/workspace/cc-1c-skills/.claude/skills/epf-build/scripts/epf-build.py \
+  -V8Path /opt/1cv8/x86_64/8.5.1.1150/1cv8 \
+  -SourceFile src/1c/MCPTestManager.xml \
+  -OutputFile build/MCPTestManager.epf
+```
 
-* [Get started with GitLab CI/CD](https://docs.gitlab.com/ci/quick_start/)
-* [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/user/application_security/sast/)
-* [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/topics/autodevops/requirements/)
-* [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/user/clusters/agent/)
-* [Set up protected environments](https://docs.gitlab.com/ci/environments/protected_environments/)
+## Запуск менеджера тестирования 1С
 
-***
+Через MCP tool `launch_manager` или вручную:
 
-# Editing this README
+```bash
+/opt/1cv8/x86_64/8.5.1.1150/1cv8 ENTERPRISE \
+  /F /path/to/empty-manager-infobase \
+  /TESTMANAGER \
+  /Execute build/MCPTestManager.epf \
+  /C ws://127.0.0.1:8765/bridge
+```
 
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
+Для автономного сервера/служебной базы передавайте актуальные параметры подключения 1С через `launch_manager.extra_args` или запускайте 1С вручную с тем же `/TESTMANAGER /Execute ... /C ...`.
 
-## Suggestions for a good README
+## Подключение тестируемой базы
 
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
+MCP tool `connect_test_client` по умолчанию использует тестовый стенд:
 
-## Name
-Choose a self-explaining name for your project.
+- URL: `<TARGET_INFOBASE_URL>`
+- user: `<USERNAME>`
+- password: `<PASSWORD>`
+- test client port: `1538`
 
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
+Команда на стороне 1С стартует тест-клиент с `/TESTCLIENT -TPort<port>`, затем создает `ТестируемоеПриложение` и вызывает `УстановитьСоединение()`.
 
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
+## MCP tools
 
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
+- `bridge_status()` — статус WebSocket bridge.
+- `launch_manager(onec_path, infobase, processor, extra_args)` — старт менеджера тестирования.
+- `connect_test_client(base_url, username, password, port, onec_path)` — подключить тест-клиент.
+- `disconnect_test_client()` — отключить тест-клиент.
+- `active_window()` — активное окно.
+- `ui_tree(max_depth)` — дерево UI.
+- `command_bar()` — командный интерфейс/панель.
+- `click_button(name, search_by_title)` — нажать кнопку.
+- `screenshot(path)` — снять скриншот экрана MCP-хоста.
 
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
+## Ограничения и TODO
 
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
-
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
-
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
-
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
-
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
-
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
-
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
-
-## License
-For open source projects, say how it is licensed.
-
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+- Сейчас поддерживается одно активное подключение обработки 1С.
+- Скриншот делается Python-стороной через `mss`; для удаленного GUI нужен общий DISPLAY/VNC/Xvfb.
+- Параметры запуска опубликованных HTTP/WS баз 1С могут потребовать уточнения под конкретный стенд.
+- Следующий шаг — прогнать полный E2E: MCP server → 1С manager → WebSocket hello → connect test client на dev-06.

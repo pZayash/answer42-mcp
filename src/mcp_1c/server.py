@@ -1,0 +1,145 @@
+from __future__ import annotations
+
+import argparse
+import asyncio
+import base64
+import logging
+import os
+import shlex
+import subprocess
+from pathlib import Path
+from typing import Annotated, Any
+
+from mcp.server.fastmcp import FastMCP
+
+from .bridge import OneCBridgeServer
+
+DEFAULT_TEST_BASE = "<TARGET_INFOBASE_URL>"
+DEFAULT_TEST_USER = ""
+DEFAULT_TEST_PASSWORD = ""
+
+mcp = FastMCP("1c-test-manager")
+bridge = OneCBridgeServer(
+    host=os.getenv("ONEC_MCP_WS_HOST", "127.0.0.1"),
+    port=int(os.getenv("ONEC_MCP_WS_PORT", "8765")),
+    request_timeout=float(os.getenv("ONEC_MCP_REQUEST_TIMEOUT", "60")),
+)
+
+
+@mcp.tool()
+def bridge_status() -> dict[str, Any]:
+    """Return WebSocket bridge status and URL for the 1C manager processor."""
+    return bridge.status()
+
+
+@mcp.tool()
+def launch_manager(
+    onec_path: Annotated[str, "Path to 1cv8/1cv8c executable"] = "/opt/1cv8/x86_64/8.5.1.1150/1cv8",
+    infobase: Annotated[str, "File infobase path"] = "",
+    processor: Annotated[str, "Path to MCPTestManager.epf"] = "build/MCPTestManager.epf",
+    extra_args: Annotated[str, "Extra raw 1C command-line arguments"] = "",
+) -> dict[str, Any]:
+    """Launch 1C test manager client with the bridge URL passed through /C."""
+    argv = [onec_path, "ENTERPRISE"]
+    if infobase:
+        argv.extend(["/F", infobase])
+    argv.extend(["/TESTMANAGER", "/Execute", processor, "/C", bridge.url])
+    if extra_args:
+        argv.extend(shlex.split(extra_args))
+
+    process = subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    return {"pid": process.pid, "argv": argv, "websocket_url": bridge.url}
+
+
+@mcp.tool()
+async def connect_test_client(
+    base_url: Annotated[str, "1C infobase URL to open as test client"] = DEFAULT_TEST_BASE,
+    username: Annotated[str, "1C username"] = DEFAULT_TEST_USER,
+    password: Annotated[str, "1C password"] = DEFAULT_TEST_PASSWORD,
+    port: Annotated[int, "Test client TCP port"] = 1538,
+    onec_path: Annotated[str, "Path to 1cv8/1cv8c executable as seen by 1C manager host"] = "/opt/1cv8/x86_64/8.5.1.1150/1cv8",
+) -> Any:
+    """Start or connect to a 1C test client and establish TestManager connection."""
+    return await bridge.call(
+        "connect_test_client",
+        {"base_url": base_url, "username": username, "password": password, "port": port, "onec_path": onec_path},
+    )
+
+
+@mcp.tool()
+async def disconnect_test_client() -> Any:
+    """Disconnect the active 1C test client."""
+    return await bridge.call("disconnect_test_client", {})
+
+
+@mcp.tool()
+async def active_window() -> Any:
+    """Return active 1C test client window state."""
+    return await bridge.call("active_window", {})
+
+
+@mcp.tool()
+async def ui_tree(max_depth: Annotated[int, "Maximum UI tree depth"] = 4) -> Any:
+    """Return a serialized tree of the active window/forms/elements."""
+    return await bridge.call("ui_tree", {"max_depth": max_depth})
+
+
+@mcp.tool()
+async def command_bar() -> Any:
+    """Return command interface/panel information for the active window/form when available."""
+    return await bridge.call("command_bar", {})
+
+
+@mcp.tool()
+async def click_button(
+    name: Annotated[str, "Button name or title text"],
+    search_by_title: Annotated[bool, "If true, match visible title instead of object name"] = False,
+) -> Any:
+    """Find a button in the active UI tree and press it."""
+    return await bridge.call("click_button", {"name": name, "search_by_title": search_by_title})
+
+
+@mcp.tool()
+def screenshot(path: Annotated[str, "Output image path"] = "build/screenshots/screenshot.png") -> dict[str, Any]:
+    """Capture a desktop screenshot from the MCP host."""
+    output_path = Path(path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        import mss  # type: ignore
+        import mss.tools  # type: ignore
+
+        with mss.mss() as sct:
+            monitor = sct.monitors[0]
+            image = sct.grab(monitor)
+            mss.tools.to_png(image.rgb, image.size, output=str(output_path))
+    except ImportError as exc:
+        raise RuntimeError("Install screenshot extra: pip install '.[screenshot]' or mss") from exc
+
+    data = output_path.read_bytes()
+    return {"path": str(output_path), "bytes": len(data), "base64": base64.b64encode(data).decode("ascii")}
+
+
+async def _run() -> None:
+    await bridge.start()
+    try:
+        await mcp.run_stdio_async()
+    finally:
+        await bridge.stop()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="MCP server for 1C:Enterprise test manager")
+    parser.add_argument("--ws-host", default=os.getenv("ONEC_MCP_WS_HOST", "127.0.0.1"))
+    parser.add_argument("--ws-port", type=int, default=int(os.getenv("ONEC_MCP_WS_PORT", "8765")))
+    parser.add_argument("--log-level", default=os.getenv("ONEC_MCP_LOG_LEVEL", "INFO"))
+    args = parser.parse_args()
+
+    logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO))
+    bridge.host = args.ws_host
+    bridge.port = args.ws_port
+    asyncio.run(_run())
+
+
+if __name__ == "__main__":
+    main()
