@@ -57,7 +57,7 @@ async def connect_test_client(
     username: Annotated[str, "1C username"] = DEFAULT_TEST_USER,
     password: Annotated[str, "1C password"] = DEFAULT_TEST_PASSWORD,
     port: Annotated[int, "Test client TCP port"] = 1538,
-    onec_path: Annotated[str, "Path to 1cv8/1cv8c executable as seen by 1C manager host"] = "/opt/1cv8/x86_64/8.5.1.1150/1cv8",
+    onec_path: Annotated[str, "Path to 1cv8/1cv8c executable as seen by 1C manager host"] = "1cv8c",
 ) -> Any:
     """Start or connect to a 1C test client and establish TestManager connection."""
     return await bridge.call(
