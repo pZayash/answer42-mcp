@@ -20,6 +20,9 @@ dist/
 *.lgp
 *.tmp
 
+# BSL Language Server report (created at repo root)
+bsl-json.json
+
 # GSD autopilot transient files
 .planning/autopilot.sh
 .planning/autopilot.lock
