@@ -5,8 +5,12 @@ __pycache__/
 venv/
 .env
 
-# Build artifacts
-build/
+# Build artefacts: ignore the heavy noise, keep the source CF
+build/bslls-report/
+build/cf-build/
+build/screenshots/
+build/*.png
+build/*.json
 dist/
 *.egg-info/
 
