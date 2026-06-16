@@ -12,6 +12,7 @@ from typing import Annotated, Any
 
 from mcp.server.fastmcp import FastMCP
 
+from . import runtime
 from .bridge import OneCBridgeServer
 
 DEFAULT_TEST_BASE = "<TARGET_INFOBASE_URL>"
@@ -25,6 +26,27 @@ bridge = OneCBridgeServer(
     request_timeout=float(os.getenv("ONEC_MCP_REQUEST_TIMEOUT", "60")),
 )
 
+# Single-instance runtime state for the manager process.
+_RUNTIME: runtime.ManagerRuntime | None = None
+
+
+def _default_inbox_dir() -> Path:
+    return Path(os.environ.get("ONEC_MCP_DATA_DIR", "/tmp/onec-mcp"))
+
+
+def _resolve_paths(
+    platform_dir: str,
+    db_path: str,
+    processor: str,
+) -> runtime.ManagerRuntime:
+    return runtime.ManagerRuntime(
+        infobase=runtime.InfobaseSpec(db_path=Path(db_path)),
+        manager=runtime.TestManagerSpec(
+            onec_path=os.path.join(platform_dir, "1cv8"),
+            processor=processor,
+        ),
+    )
+
 
 @mcp.tool()
 def bridge_status() -> dict[str, Any]:
@@ -33,22 +55,87 @@ def bridge_status() -> dict[str, Any]:
 
 
 @mcp.tool()
+def runtime_status() -> dict[str, Any]:
+    """Report the live state of the test-manager process."""
+    if _RUNTIME is None:
+        return {"running": False}
+    return {
+        "running": True,
+        "infobase": str(_RUNTIME.infobase.db_path),
+        "manager": {
+            "pid": _RUNTIME.manager_process.pid if _RUNTIME.manager_process else None,
+            "alive": _RUNTIME.manager_process.poll() is None if _RUNTIME.manager_process else False,
+        },
+        "log_dir": str(_RUNTIME.log_dir),
+    }
+
+
+@mcp.tool()
 def launch_manager(
-    onec_path: Annotated[str, "Path to 1cv8/1cv8c executable"] = "/opt/1cv8/x86_64/8.5.1.1150/1cv8",
-    infobase: Annotated[str, "File infobase path"] = "",
+    platform_dir: Annotated[str, "1C platform directory (contains 1cv8 + ibcmd)"] = "/opt/1cv8/x86_64/8.5.1.1150",
+    db_path: Annotated[str, "File infobase path for the test-manager"] = "/tmp/onec-mcp/ib",
     processor: Annotated[str, "Path to MCPTestManager.epf"] = "build/MCPTestManager.epf",
+    create_infobase: Annotated[bool, "(Re)create the file infobase before launching"] = True,
     extra_args: Annotated[str, "Extra raw 1C command-line arguments"] = "",
 ) -> dict[str, Any]:
-    """Launch 1C test manager client with the bridge URL passed through /C."""
-    argv = [onec_path, "ENTERPRISE"]
-    if infobase:
-        argv.extend(["/F", infobase])
-    argv.extend(["/TESTMANAGER", "/Execute", processor, "/C", bridge.url])
+    """Launch the 1C test-manager (thick client, /TESTMANAGER mode).
+
+    The test-manager is a thick client (`1cv8`) opened against a local
+    file infobase. The infobase is created via `ibcmd infobase create`,
+    then the manager is started in /TESTMANAGER mode with the EPF executed
+    automatically. The EPF opens the WebSocket bridge and waits for
+    commands from this MCP server.
+    """
+    global _RUNTIME
+
+    if _RUNTIME is not None:
+        stop_manager()
+
+    runtime_state = _resolve_paths(platform_dir, db_path, processor)
+    log_dir = runtime_state.log_dir
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    onec_thick = os.path.join(platform_dir, "1cv8")
+    if create_infobase:
+        runtime.create_file_infobase(onec_thick, runtime_state.infobase.db_path)
+
+    argv = runtime.build_test_manager_argv(
+        onec_path=runtime_state.manager.onec_path,
+        db_path=str(runtime_state.infobase.db_path),
+        processor=runtime_state.manager.processor,
+        websocket_url=bridge.url,
+    )
     if extra_args:
         argv.extend(shlex.split(extra_args))
 
-    process = subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
-    return {"pid": process.pid, "argv": argv, "websocket_url": bridge.url}
+    manager_proc = runtime.start_test_manager(
+        onec_path=runtime_state.manager.onec_path,
+        db_path=str(runtime_state.infobase.db_path),
+        processor=runtime_state.manager.processor,
+        websocket_url=bridge.url,
+        log_dir=log_dir,
+    )
+    runtime_state.manager_process = manager_proc
+    _RUNTIME = runtime_state
+
+    return {
+        "pid": manager_proc.pid,
+        "argv": argv,
+        "websocket_url": bridge.url,
+        "log_dir": str(log_dir),
+    }
+
+
+@mcp.tool()
+def stop_manager() -> dict[str, Any]:
+    """Tear down the manager started by launch_manager."""
+    global _RUNTIME
+    if _RUNTIME is None:
+        return {"stopped": False, "reason": "no runtime"}
+    rt = _RUNTIME
+    _RUNTIME = None
+    runtime.kill_process(rt.manager_process, "test-manager")
+    return {"stopped": True}
 
 
 @mcp.tool()
@@ -56,13 +143,26 @@ async def connect_test_client(
     base_url: Annotated[str, "1C infobase URL to open as test client"] = DEFAULT_TEST_BASE,
     username: Annotated[str, "1C username"] = DEFAULT_TEST_USER,
     password: Annotated[str, "1C password"] = DEFAULT_TEST_PASSWORD,
-    port: Annotated[int, "Test client TCP port"] = 1538,
-    onec_path: Annotated[str, "Path to 1cv8/1cv8c executable as seen by 1C manager host"] = "1cv8c",
+    port: Annotated[int, "Test client TCP port"] = runtime.DEFAULT_TEST_CLIENT_PORT,
+    onec_path: Annotated[str, "Path to 1cv8c executable as seen by 1C manager host"] = "/opt/1cv8/x86_64/8.5.1.1150/1cv8c",
+    host: Annotated[str, "Host where the test client runs"] = "localhost",
 ) -> Any:
-    """Start or connect to a 1C test client and establish TestManager connection."""
+    """Launch 1cv8c /TESTCLIENT inside the manager processor and connect.
+
+    The actual subprocess is started by the 1C manager via `КомандаСистемы`
+    to keep the child process lifetime tied to the manager. This call
+    simply forwards the parameters to the manager.
+    """
     return await bridge.call(
         "connect_test_client",
-        {"base_url": base_url, "username": username, "password": password, "port": port, "onec_path": onec_path},
+        {
+            "base_url": base_url,
+            "username": username,
+            "password": password,
+            "port": port,
+            "onec_path": onec_path,
+            "host": host,
+        },
     )
 
 
@@ -173,6 +273,34 @@ async def tabular_document_text(
 
 
 @mcp.tool()
+async def set_field_value(
+    field_name: Annotated[str, "Field technical name or title"],
+    value: Annotated[str, "Value to set"],
+    search_by_title: Annotated[bool, "If true, match visible title instead of object name"] = False,
+) -> Any:
+    """Set a value in a form field by name or title."""
+    return await bridge.call("set_field_value", {"field_name": field_name, "value": value, "search_by_title": search_by_title})
+
+
+@mcp.tool()
+async def create_new_item() -> Any:
+    """Create a new item in the active form (e.g. new catalog/dictionary entry)."""
+    return await bridge.call("create_new_item", {})
+
+
+@mcp.tool()
+async def save_form() -> Any:
+    """Save/write the active form."""
+    return await bridge.call("save_form", {})
+
+
+@mcp.tool()
+async def close_form() -> Any:
+    """Close the active form."""
+    return await bridge.call("close_form", {})
+
+
+@mcp.tool()
 def screenshot(path: Annotated[str, "Output image path"] = "build/screenshots/screenshot.png") -> dict[str, Any]:
     """Capture a desktop screenshot from the MCP host."""
     output_path = Path(path)
@@ -198,6 +326,8 @@ async def _run() -> None:
     try:
         await mcp.run_stdio_async()
     finally:
+        if _RUNTIME is not None:
+            runtime.kill_process(_RUNTIME.manager_process, "test-manager")
         await bridge.stop()
 
 
