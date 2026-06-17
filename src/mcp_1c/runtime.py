@@ -378,6 +378,8 @@ def build_thin_test_manager_argv(
         "/Lru",
         "/VLru_RU",
         "/TESTMANAGER",
+        "/C",
+        websocket_url,
     ]
 
 
