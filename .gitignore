@@ -5,12 +5,8 @@ __pycache__/
 venv/
 .env
 
-# Build artefacts: ignore the heavy noise, keep the source CF
-build/bslls-report/
-build/cf-build/
-build/screenshots/
-build/*.png
-build/*.json
+# Build artefacts
+build/
 dist/
 *.egg-info/
 
@@ -23,10 +19,3 @@ dist/
 # BSL Language Server report (created at repo root)
 bsl-json.json
 
-# GSD autopilot transient files
-.planning/autopilot.sh
-.planning/autopilot.lock
-.planning/logs/
-.planning/checkpoints/
-
-build/rag/

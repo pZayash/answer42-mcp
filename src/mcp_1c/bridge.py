@@ -27,7 +27,7 @@ class ConnectedBridge:
 
 
 class OneCBridgeServer:
-    """JSON-RPC-like WebSocket server for the 1C external processor."""
+    """JSON-RPC-like WebSocket server for the embedded 1C manager processor."""
 
     def __init__(self, host: str = "127.0.0.1", port: int = 8765, request_timeout: float = 60.0):
         self.host = host
@@ -65,7 +65,7 @@ class OneCBridgeServer:
     async def call(self, method: str, params: dict[str, Any] | None = None) -> Any:
         bridge = self._bridge
         if bridge is None:
-            raise BridgeError("1C bridge is not connected. Start 1C manager processor first.")
+            raise BridgeError("1C bridge is not connected. Start the 1C manager first.")
 
         request_id = str(uuid.uuid4())
         future: asyncio.Future[BridgeResponse] = asyncio.get_running_loop().create_future()

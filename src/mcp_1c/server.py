@@ -22,7 +22,7 @@ DEFAULT_TEST_BASE = "<TARGET_INFOBASE_URL>"
 DEFAULT_TEST_USER = ""
 DEFAULT_TEST_PASSWORD = ""
 
-mcp = FastMCP("1c-test-manager")
+mcp = FastMCP("testclient-bridge")
 bridge = OneCBridgeServer(
     host=os.getenv("ONEC_MCP_WS_HOST", "127.0.0.1"),
     port=int(os.getenv("ONEC_MCP_WS_PORT", "8765")),
@@ -44,7 +44,6 @@ def _resolve_paths(
     ibsrv_address: str,
     ibsrv_port: int,
     ibsrv_name: str,
-    processor: str,
 ) -> runtime.ManagerRuntime:
     return runtime.ManagerRuntime(
         infobase=runtime.InfobaseSpec(db_path=Path(db_path)),
@@ -56,7 +55,6 @@ def _resolve_paths(
         ),
         manager=runtime.TestManagerSpec(
             onec_path=os.path.join(platform_dir, "1cv8c"),
-            processor=processor,
         ),
     )
 
@@ -173,7 +171,6 @@ def launch_manager(
     ibsrv_address: Annotated[str, "Standalone server listen address"] = "127.0.0.1",
     ibsrv_port: Annotated[int, "Standalone server HTTP port"] = 8314,
     ibsrv_name: Annotated[str, "Standalone server infobase name (--name)"] = "mcp",
-    processor: Annotated[str, "Path to MCPTestManager.epf"] = "build/MCPTestManager.epf",
     create_infobase: Annotated[bool, "(Re)create the file infobase before launching"] = True,
     load_configuration: Annotated[bool, "Load a .cf template into the infobase after creation"] = True,
     cf_path: Annotated[str, "Path to .cf file used to populate the configuration"] = runtime.DEFAULT_CF_BUILT,
@@ -208,7 +205,6 @@ def launch_manager(
         ibsrv_address=ibsrv_address,
         ibsrv_port=ibsrv_port,
         ibsrv_name=ibsrv_name,
-        processor=processor,
     )
     runtime_state.server.data_dir = Path(server_data_dir)
     log_dir = runtime_state.log_dir
@@ -251,19 +247,7 @@ def launch_manager(
             log_dir=log_dir,
         )
     else:
-        argv = runtime.build_test_manager_argv(
-            onec_path=onec_thick,
-            db_path=str(runtime_state.infobase.db_path),
-            processor=processor,
-            websocket_url=bridge.url,
-        )
-        manager_proc = runtime.start_test_manager(
-            onec_path=onec_thick,
-            db_path=str(runtime_state.infobase.db_path),
-            processor=processor,
-            websocket_url=bridge.url,
-            log_dir=log_dir,
-        )
+        raise ValueError("Thick-client EPF fallback was removed; use the thin /WS /TESTMANAGER flow")
 
     if extra_args:
         argv.extend(shlex.split(extra_args))

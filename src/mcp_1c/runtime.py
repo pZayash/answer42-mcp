@@ -5,7 +5,7 @@ This module owns:
   * .cf configuration loading (`ibcmd config load`)
   * the autonomous 1C server (`ibsrv`) HTTP-gate lifecycle
   * thin-client (`1cv8c /WS ws://host:port`) launch in /TESTMANAGER mode
-  * test-manager (thick client, `/TESTMANAGER`) launch and log wiring
+  * test-manager (thin client, `/TESTMANAGER`) launch and log wiring
 
 The test client itself is launched from inside the 1C manager processor
 (BSL `КомандаСистемы`/`НачатьЗапускПриложения`) so this module does not
@@ -76,7 +76,6 @@ class TestManagerSpec:
     """Test-manager (thin client) connection to the standalone server."""
 
     onec_path: str = DEFAULT_THIN_CLIENT
-    processor: str = "build/MCPTestManager.epf"
 
 
 @dataclass(slots=True)
@@ -176,11 +175,8 @@ def load_configuration(
 ) -> None:
     """Load a `.cf` configuration into an existing file infobase.
 
-    The default flow uses the built-in `MCPTestManager.cf` which
-    embeds the MCP processor in the configuration and registers a
-    `ПриНачалеРаботыСистемы` handler that opens it. A legacy path
-    loads a bare `.cf` template (e.g. v8runner's empty 1Cv8.cf) and
-    relies on an externally-loaded EPF instead.
+    The default flow uses `MCPTestManager.cf` which embeds the MCP
+    processor in the configuration.
     """
     if not Path(cf_path).exists():
         raise FileNotFoundError(f"Configuration file not found: {cf_path}")
@@ -412,64 +408,3 @@ def start_thin_test_manager(
     LOGGER.info("Test manager launched (pid=%s); log=%s", proc.pid, log_path)
     return proc
 
-
-def build_test_manager_argv(
-    onec_path: str,
-    db_path: str,
-    processor: str,
-    websocket_url: str,
-) -> list[str]:
-    """Compose argv for 1cv8 ENTERPRISE /F <ib> /TESTMANAGER /Execute <epf> /C <ws>.
-
-    Legacy /F-based path used while the ibsrv HTTP-gate integration
-    is being stabilised. /Execute is split into two argv elements
-    (see build_thin_test_manager_argv for the rationale).
-    """
-    return [
-        onec_path,
-        "ENTERPRISE",
-        "/F",
-        db_path,
-        "/Lru",
-        "/VLru_RU",
-        "/TESTMANAGER",
-        "/Execute",
-        processor,
-        "/C",
-        websocket_url,
-        "/DisableStartupDialogs",
-    ]
-
-
-def start_test_manager(
-    onec_path: str,
-    db_path: str,
-    processor: str,
-    websocket_url: str,
-    log_dir: Path,
-) -> subprocess.Popen:
-    """Start the 1C test-manager (thick client) and return the Popen.
-
-    The thick client runs in /TESTMANAGER mode, opens the EPF in its own
-    form module, and the EPF opens the WebSocket bridge. The MCP caller
-    is responsible for waiting on the WS bridge to know the manager is up.
-    """
-    if not Path(onec_path).exists():
-        raise FileNotFoundError(f"1cv8 (thick) not found: {onec_path}")
-    if not Path(processor).exists():
-        raise FileNotFoundError(f"Test manager EPF not found: {processor}")
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / "test_manager.log"
-    log_handle = open(log_path, "ab", buffering=0)
-    argv = build_test_manager_argv(onec_path, db_path, processor, websocket_url)
-    LOGGER.info("Starting test manager: %s", " ".join(argv))
-    proc = subprocess.Popen(
-        argv,
-        stdout=log_handle,
-        stderr=log_handle,
-        stdin=subprocess.DEVNULL,
-        start_new_session=True,
-        env={**os.environ, "DISPLAY": os.environ.get("DISPLAY", ":99")},
-    )
-    LOGGER.info("Test manager launched (pid=%s); log=%s", proc.pid, log_path)
-    return proc

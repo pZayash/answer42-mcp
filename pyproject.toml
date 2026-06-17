@@ -1,7 +1,7 @@
 [project]
-name = "mcp-1c-test-manager"
-version = "0.1.0"
-description = "MCP server for controlling 1C:Enterprise test clients through a 1C test manager bridge"
+name = "testclient-bridge"
+version = "0.2.0"
+description = "MCP bridge to 1C:Enterprise test client — UI automation, diagnostics, RAG metadata index"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = ["mcp>=1.9.0", "websockets>=12.0", "pydantic>=2.0"]
@@ -11,7 +11,7 @@ screenshot = ["mss>=9.0.0"]
 dev = ["pytest>=8.0", "ruff>=0.5"]
 
 [project.scripts]
-mcp-1c-test-manager = "mcp_1c.server:main"
+testclient-bridge = "mcp_1c.server:main"
 
 [tool.ruff]
 line-length = 100
