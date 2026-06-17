@@ -398,6 +398,15 @@ async def tabular_document_text(
 
 
 @mcp.tool()
+async def toggle_field(
+    field_name: Annotated[str, "Field technical name"],
+    value: Annotated[bool, "Desired checkbox value"] = False,
+) -> Any:
+    """Set a checkbox-like field using the 1C test client API."""
+    return await bridge.call("toggle_field", {"field_name": field_name, "value": value})
+
+
+@mcp.tool()
 async def set_field_value(
     field_name: Annotated[str, "Field technical name or title"],
     value: Annotated[str, "Value to set"],
@@ -486,6 +495,14 @@ async def table_set_field(
 ) -> Any:
     """Set a field in the currently edited row of a form table."""
     return await bridge.call("table_set_field", {"table": table, "field": field, "value": value, "search_by_title": search_by_title})
+
+
+@mcp.tool()
+async def table_edit_info(
+    table: Annotated[str, "Table technical name"] = "ДополнительнаяИнформация",
+) -> Any:
+    """Return diagnostics for currently edited table row and its child fields."""
+    return await bridge.call("table_edit_info", {"table": table})
 
 
 @mcp.tool()
