@@ -290,3 +290,40 @@ Snapshot = base + extensions (в порядке слоёв).
 | `ONEC_MCP_SERVER_DATA_DIR` | Данные ibsrv | `/tmp/onec-mcp/ibsrv-data` |
 | `MCP_1C_RAG_DB` | Путь к RAG SQLite | `build/rag/onec-rag.sqlite` |
 | `DISPLAY` | X11 display | `:99` |
+
+## Dynamic lists and evidence recording
+
+The bridge exposes first-class tools for 1C dynamic-list workflows:
+
+- `dynamic_list_set_order(column_title, name="Список")` — calls the tested table/list method
+  `УстановитьПорядок(<ЗаголовокКолонки>)` through the 1C test-client API.
+- `dynamic_list_output()` — runs the standard **Вывести список** command and returns detected
+  tabular documents, including text when the platform exposes it through the test API.
+- `dynamic_list_open_settings()` — opens the standard **Настроить список** dialog used for
+  filter/order/conditional-formatting/grouping setup.
+- `dynamic_list_clear_settings()` — tries common standard commands for resetting list settings
+  back to defaults.
+- `dynamic_list_open_form_settings()` — opens **Изменить форму** for form customization.
+
+The exact command names can differ between configurations and languages; each tool accepts an
+optional `command` parameter to force the exact command name if the generic candidates do not work.
+
+Evidence recording is implemented on the MCP side. `recording_start()` enables capture; every
+recorded bridge tool call saves a screenshot and an SVG slide containing:
+
+- the screenshot of the 1C UI (or whole display);
+- the tool name;
+- parameters;
+- a short JSON/text summary of the result.
+
+`recording_stop()` writes `manifest.json` and builds `recording.gif` / `recording.mp4` with ffmpeg.
+If ImageMagick (`magick` or `convert`) is available, it also builds `recording.pdf`.
+
+Window maximization uses `maximize_test_client_external_window()` with priority:
+
+1. `wmctrl` when installed;
+2. `xdotool` when installed;
+3. `python-xlib` fallback.
+
+The window-control helpers only move/resize/activate OS windows. They do not click or type inside
+1C; business interactions remain through the 1C test-client API.

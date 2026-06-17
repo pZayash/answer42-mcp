@@ -17,6 +17,8 @@ from mcp.server.fastmcp import FastMCP
 from . import runtime
 from .bridge import OneCBridgeServer
 from .rag import RagService
+from .window_control import maximize_test_client_window as maximize_external_window
+from .recorder import RecordingSession
 
 DEFAULT_TEST_BASE = "<TARGET_INFOBASE_URL>"
 DEFAULT_TEST_USER = ""
@@ -32,10 +34,30 @@ bridge = OneCBridgeServer(
 # Single-instance runtime state for the manager process.
 _RUNTIME: runtime.ManagerRuntime | None = None
 _RAG = RagService()
+_RECORDER = RecordingSession()
 
 
 def _default_inbox_dir() -> Path:
     return Path(os.environ.get("ONEC_MCP_DATA_DIR", "/tmp/onec-mcp"))
+
+
+
+
+def _record_tool(action: str, params: dict[str, Any], result: Any) -> Any:
+    try:
+        _RECORDER.capture(_screenshot_for_recorder, action, params, result)
+    except Exception as exc:
+        logging.debug("recording capture failed for %s: %s", action, exc)
+    return result
+
+
+async def _bridge_call_recorded(method: str, params: dict[str, Any]) -> Any:
+    result = await bridge.call(method, params)
+    return _record_tool(method, params, result)
+
+
+def _screenshot_for_recorder(path: str, window: bool, display: str) -> dict[str, Any]:
+    return screenshot(path=path, window=window, display=display)
 
 
 def _resolve_paths(
@@ -67,7 +89,7 @@ def _resolve_paths(
 @mcp.tool()
 def rag_source_detect(path: Annotated[str, "Path to 1C source directory"]) -> dict[str, Any]:
     """Detect 1C source format: EDT-style or Configurator XML dump."""
-    return _RAG.detect_source(path)
+    return _record_tool("rag_source_detect", {"path": path}, _RAG.detect_source(path))
 
 
 @mcp.tool()
@@ -78,7 +100,7 @@ def rag_source_add(
     format: Annotated[str, "auto | edt | designer_xml"] = "auto",
 ) -> dict[str, Any]:
     """Register or update a 1C source tree for RAG indexing."""
-    return _RAG.add_source(name=name, path=path, kind=kind, format=format)
+    return _record_tool("rag_source_add", {"name": name, "path": path, "kind": kind, "format": format}, _RAG.add_source(name=name, path=path, kind=kind, format=format))
 
 
 @mcp.tool()
@@ -119,7 +141,7 @@ def rag_lookup_object(
     snapshot: Annotated[str | None, "Optional snapshot name/id"] = None,
 ) -> dict[str, Any]:
     """Look up an indexed 1C metadata object, including navigation, fields and forms."""
-    return _RAG.lookup_object(object=object, snapshot=snapshot)
+    return _record_tool("rag_lookup_object", {"object": object, "snapshot": snapshot}, _RAG.lookup_object(object=object, snapshot=snapshot))
 
 
 @mcp.tool()
@@ -318,6 +340,7 @@ async def connect_test_client(
     port: Annotated[int, "Test client TCP port"] = runtime.DEFAULT_TEST_CLIENT_PORT,
     onec_path: Annotated[str, "Path to 1cv8c executable as seen by 1C manager host"] = "/opt/1cv8/x86_64/8.5.1.1150/1cv8c",
     host: Annotated[str, "Host where the test client runs"] = "localhost",
+    extra_args: Annotated[str, "Extra raw 1C command-line arguments, e.g. /Execute <epf>"] = "",
 ) -> Any:
     """Launch 1cv8c /TESTCLIENT inside the manager processor and connect.
 
@@ -325,7 +348,7 @@ async def connect_test_client(
     to keep the child process lifetime tied to the manager. This call
     simply forwards the parameters to the manager.
     """
-    return await bridge.call(
+    return await _bridge_call_recorded(
         "connect_test_client",
         {
             "base_url": base_url,
@@ -334,6 +357,7 @@ async def connect_test_client(
             "port": port,
             "onec_path": onec_path,
             "host": host,
+            "extra_args": extra_args,
         },
     )
 
@@ -341,25 +365,47 @@ async def connect_test_client(
 @mcp.tool()
 async def disconnect_test_client() -> Any:
     """Disconnect the active 1C test client."""
-    return await bridge.call("disconnect_test_client", {})
+    return await _bridge_call_recorded("disconnect_test_client", {})
 
 
 @mcp.tool()
 async def active_window() -> Any:
     """Return active 1C test client window state."""
-    return await bridge.call("active_window", {})
+    return await _bridge_call_recorded("active_window", {})
+
+
+@mcp.tool()
+async def maximize_test_client_window() -> Any:
+    """Activate and maximize the active 1C test client window via the 1C test-client API."""
+    return await _bridge_call_recorded("maximize_test_client_window", {})
+
+
+@mcp.tool()
+def maximize_test_client_external_window(
+    title_contains: Annotated[str, "Window title substring; empty means choose likely 1C test-client window"] = "",
+    display: Annotated[str, "X11 display, e.g. :99"] = "",
+    width: Annotated[int, "Target width; 0 means display width"] = 0,
+    height: Annotated[int, "Target height; 0 means display height"] = 0,
+) -> dict[str, Any]:
+    """Maximize/resize the 1C test-client OS window: wmctrl -> xdotool -> Xlib fallback."""
+    return maximize_external_window(
+        title_contains=title_contains,
+        display=display or None,
+        width=width or None,
+        height=height or None,
+    )
 
 
 @mcp.tool()
 async def ui_tree(max_depth: Annotated[int, "Maximum UI tree depth"] = 4) -> Any:
     """Return a serialized tree of the active window/forms/elements."""
-    return await bridge.call("ui_tree", {"max_depth": max_depth})
+    return await _bridge_call_recorded("ui_tree", {"max_depth": max_depth})
 
 
 @mcp.tool()
 async def command_bar() -> Any:
     """Return command interface/panel information for the active window/form when available."""
-    return await bridge.call("command_bar", {})
+    return await _bridge_call_recorded("command_bar", {})
 
 
 @mcp.tool()
@@ -368,7 +414,7 @@ async def click_button(
     search_by_title: Annotated[bool, "If true, match visible title instead of object name"] = False,
 ) -> Any:
     """Find a button in the active UI tree and press it."""
-    return await bridge.call("click_button", {"name": name, "search_by_title": search_by_title})
+    return await _bridge_call_recorded("click_button", {"name": name, "search_by_title": search_by_title})
 
 
 @mcp.tool()
@@ -379,7 +425,7 @@ async def find_object(
     max_depth: Annotated[int, "Maximum search depth"] = 8,
 ) -> Any:
     """Find an object in the active UI hierarchy by name, title, or test object type."""
-    return await bridge.call("find_object", {"name": name, "title": title, "type": type, "max_depth": max_depth})
+    return await _bridge_call_recorded("find_object", {"name": name, "title": title, "type": type, "max_depth": max_depth})
 
 
 @mcp.tool()
@@ -391,7 +437,7 @@ async def get_object(
     max_depth: Annotated[int, "Children depth to serialize"] = 2,
 ) -> Any:
     """Call TestedApplication.GetObject with optional wildcard name/title."""
-    return await bridge.call("get_object", {"name": name, "title": title, "type": type, "timeout": timeout, "max_depth": max_depth})
+    return await _bridge_call_recorded("get_object", {"name": name, "title": title, "type": type, "timeout": timeout, "max_depth": max_depth})
 
 
 @mcp.tool()
@@ -402,19 +448,19 @@ async def activate_object(
     max_depth: Annotated[int, "Maximum search depth"] = 8,
 ) -> Any:
     """Find and activate a UI object in the active test client window."""
-    return await bridge.call("activate_object", {"name": name, "title": title, "type": type, "max_depth": max_depth})
+    return await _bridge_call_recorded("activate_object", {"name": name, "title": title, "type": type, "max_depth": max_depth})
 
 
 @mcp.tool()
 async def execute_window_command(command: Annotated[str, "Command name to execute in the active window"]) -> Any:
     """Execute a command in the active 1C test client window."""
-    return await bridge.call("execute_window_command", {"command": command})
+    return await _bridge_call_recorded("execute_window_command", {"command": command})
 
 
 @mcp.tool()
 async def current_element() -> Any:
     """Return the current active form element."""
-    return await bridge.call("current_element", {})
+    return await _bridge_call_recorded("current_element", {})
 
 
 @mcp.tool()
@@ -424,7 +470,7 @@ async def table_current_row(
     max_depth: Annotated[int, "Maximum search depth"] = 8,
 ) -> Any:
     """Return current row of a tested table as key/value text mapping."""
-    return await bridge.call("table_current_row", {"name": name, "title": title, "max_depth": max_depth})
+    return await _bridge_call_recorded("table_current_row", {"name": name, "title": title, "max_depth": max_depth})
 
 
 @mcp.tool()
@@ -434,7 +480,7 @@ async def table_selected_rows(
     max_depth: Annotated[int, "Maximum search depth"] = 8,
 ) -> Any:
     """Return selected rows of a tested table as key/value text mappings."""
-    return await bridge.call("table_selected_rows", {"name": name, "title": title, "max_depth": max_depth})
+    return await _bridge_call_recorded("table_selected_rows", {"name": name, "title": title, "max_depth": max_depth})
 
 
 @mcp.tool()
@@ -443,7 +489,7 @@ async def tabular_documents(
     max_depth: Annotated[int, "Maximum search depth"] = 8,
 ) -> Any:
     """List tabular document fields in the active window; optionally include their text."""
-    return await bridge.call("tabular_documents", {"include_text": include_text, "max_depth": max_depth})
+    return await _bridge_call_recorded("tabular_documents", {"include_text": include_text, "max_depth": max_depth})
 
 
 @mcp.tool()
@@ -453,7 +499,7 @@ async def tabular_document_text(
     max_depth: Annotated[int, "Maximum search depth"] = 8,
 ) -> Any:
     """Return text and dimensions of a tabular document field in the active window."""
-    return await bridge.call("tabular_document_text", {"name": name, "title": title, "max_depth": max_depth})
+    return await _bridge_call_recorded("tabular_document_text", {"name": name, "title": title, "max_depth": max_depth})
 
 
 @mcp.tool()
@@ -462,7 +508,7 @@ async def toggle_field(
     value: Annotated[bool, "Desired checkbox value"] = False,
 ) -> Any:
     """Set a checkbox-like field using the 1C test client API."""
-    return await bridge.call("toggle_field", {"field_name": field_name, "value": value})
+    return await _bridge_call_recorded("toggle_field", {"field_name": field_name, "value": value})
 
 
 @mcp.tool()
@@ -472,7 +518,7 @@ async def set_field_value(
     search_by_title: Annotated[bool, "If true, match visible title instead of object name"] = False,
 ) -> Any:
     """Set a value in a form field by name or title."""
-    return await bridge.call("set_field_value", {"field_name": field_name, "value": value, "search_by_title": search_by_title})
+    return await _bridge_call_recorded("set_field_value", {"field_name": field_name, "value": value, "search_by_title": search_by_title})
 
 
 @mcp.tool()
@@ -481,7 +527,7 @@ async def activate_field(
     search_by_title: Annotated[bool, "If true, match visible title instead of object name"] = False,
 ) -> Any:
     """Activate/focus a form field by name or title."""
-    return await bridge.call("activate_field", {"field_name": field_name, "search_by_title": search_by_title})
+    return await _bridge_call_recorded("activate_field", {"field_name": field_name, "search_by_title": search_by_title})
 
 
 @mcp.tool()
@@ -490,7 +536,7 @@ async def choose_field_from_list(
     search_by_title: Annotated[bool, "If true, match visible title instead of object name"] = False,
 ) -> Any:
     """Open the standard selection form for a reference field."""
-    return await bridge.call("choose_field_from_list", {"field_name": field_name, "search_by_title": search_by_title})
+    return await _bridge_call_recorded("choose_field_from_list", {"field_name": field_name, "search_by_title": search_by_title})
 
 
 @mcp.tool()
@@ -499,7 +545,7 @@ async def choose_field_first_row(
     search_by_title: Annotated[bool, "If true, match visible title instead of object name"] = False,
 ) -> Any:
     """Open reference selection form and press its standard Choose button."""
-    return await bridge.call("choose_field_first_row", {"field_name": field_name, "search_by_title": search_by_title})
+    return await _bridge_call_recorded("choose_field_first_row", {"field_name": field_name, "search_by_title": search_by_title})
 
 
 @mcp.tool()
@@ -507,7 +553,7 @@ async def choose_current_row(
     name: Annotated[str, "Table technical name"] = "Список",
 ) -> Any:
     """Choose the current row in the active selection/list form."""
-    return await bridge.call("choose_current_row", {"name": name})
+    return await _bridge_call_recorded("choose_current_row", {"name": name})
 
 
 @mcp.tool()
@@ -518,7 +564,7 @@ async def table_rows(
     max_depth: Annotated[int, "Maximum search depth"] = 8,
 ) -> Any:
     """Return rows of a tested table as key/value mappings."""
-    return await bridge.call("table_rows", {"name": name, "title": title, "limit": limit, "max_depth": max_depth})
+    return await _bridge_call_recorded("table_rows", {"name": name, "title": title, "limit": limit, "max_depth": max_depth})
 
 
 @mcp.tool()
@@ -530,7 +576,7 @@ async def table_find_row(
     max_depth: Annotated[int, "Maximum search depth"] = 8,
 ) -> Any:
     """Find a tested table row containing text."""
-    return await bridge.call("table_find_row", {"name": name, "title": title, "text": text, "limit": limit, "max_depth": max_depth})
+    return await _bridge_call_recorded("table_find_row", {"name": name, "title": title, "text": text, "limit": limit, "max_depth": max_depth})
 
 
 @mcp.tool()
@@ -542,7 +588,7 @@ async def table_goto_row(
     max_depth: Annotated[int, "Maximum search depth"] = 8,
 ) -> Any:
     """Move cursor to the first tested table row containing text."""
-    return await bridge.call("table_goto_row", {"name": name, "title": title, "text": text, "limit": limit, "max_depth": max_depth})
+    return await _bridge_call_recorded("table_goto_row", {"name": name, "title": title, "text": text, "limit": limit, "max_depth": max_depth})
 
 
 @mcp.tool()
@@ -553,7 +599,7 @@ async def table_set_field(
     search_by_title: Annotated[bool, "If true, match visible title instead of object name"] = False,
 ) -> Any:
     """Set a field in the currently edited row of a form table."""
-    return await bridge.call("table_set_field", {"table": table, "field": field, "value": value, "search_by_title": search_by_title})
+    return await _bridge_call_recorded("table_set_field", {"table": table, "field": field, "value": value, "search_by_title": search_by_title})
 
 
 @mcp.tool()
@@ -561,25 +607,70 @@ async def table_edit_info(
     table: Annotated[str, "Table technical name"] = "ДополнительнаяИнформация",
 ) -> Any:
     """Return diagnostics for currently edited table row and its child fields."""
-    return await bridge.call("table_edit_info", {"table": table})
+    return await _bridge_call_recorded("table_edit_info", {"table": table})
+
+
+@mcp.tool()
+async def dynamic_list_set_order(
+    column_title: Annotated[str, "Visible column title to sort by using 1C УстановитьПорядок(<ЗаголовокКолонки>)"],
+    name: Annotated[str, "Dynamic list/table technical name"] = "Список",
+    title: Annotated[str, "Dynamic list/table visible title"] = "",
+    max_depth: Annotated[int, "Maximum search depth"] = 8,
+) -> Any:
+    """Sort a dynamic list by visible column title via the 1C test-client API."""
+    return await _bridge_call_recorded("dynamic_list_set_order", {"name": name, "title": title, "column_title": column_title, "max_depth": max_depth})
+
+
+@mcp.tool()
+async def dynamic_list_output(
+    command: Annotated[str, "Optional exact 1C command name; empty tries common Вывести список names"] = "",
+    wait_seconds: Annotated[int, "Seconds to wait for the tabular document form"] = 2,
+    max_depth: Annotated[int, "Maximum UI search depth"] = 8,
+) -> Any:
+    """Run dynamic list 'Вывести список' and return detected tabular document(s), including text when possible."""
+    return await _bridge_call_recorded("dynamic_list_output", {"command": command, "wait_seconds": wait_seconds, "max_depth": max_depth})
+
+
+@mcp.tool()
+async def dynamic_list_open_settings(
+    command: Annotated[str, "Optional exact 1C command name; empty tries common Настроить список names"] = "",
+) -> Any:
+    """Open dynamic-list settings (filter/order/conditional formatting/grouping) via 'Настроить список'."""
+    return await _bridge_call_recorded("dynamic_list_open_settings", {"command": command})
+
+
+@mcp.tool()
+async def dynamic_list_clear_settings(
+    command: Annotated[str, "Optional exact 1C command name; empty tries common reset/clear settings names"] = "",
+) -> Any:
+    """Quickly reset/clear dynamic-list filter/order/conditional formatting/grouping settings."""
+    return await _bridge_call_recorded("dynamic_list_clear_settings", {"command": command})
+
+
+@mcp.tool()
+async def dynamic_list_open_form_settings(
+    command: Annotated[str, "Optional exact 1C command name; empty tries Изменить форму names"] = "",
+) -> Any:
+    """Open form customization via 'Изменить форму'."""
+    return await _bridge_call_recorded("dynamic_list_open_form_settings", {"command": command})
 
 
 @mcp.tool()
 async def create_new_item() -> Any:
     """Create a new item in the active form (e.g. new catalog/dictionary entry)."""
-    return await bridge.call("create_new_item", {})
+    return await _bridge_call_recorded("create_new_item", {})
 
 
 @mcp.tool()
 async def save_form() -> Any:
     """Save/write the active form."""
-    return await bridge.call("save_form", {})
+    return await _bridge_call_recorded("save_form", {})
 
 
 @mcp.tool()
 async def close_form() -> Any:
     """Close the active form."""
-    return await bridge.call("close_form", {})
+    return await _bridge_call_recorded("close_form", {})
 
 
 def _active_x11_window_geometry(display: str | None = None) -> dict[str, int] | None:
@@ -625,6 +716,32 @@ def _active_x11_window_geometry(display: str | None = None) -> dict[str, int] | 
         return None
     candidates.sort(key=lambda item: item[0], reverse=True)
     return candidates[0][1]
+
+
+@mcp.tool()
+def recording_start(
+    output_dir: Annotated[str, "Directory for frames/slides/media"] = "build/recordings/session",
+    display: Annotated[str, "X11 display to capture"] = "",
+    window: Annotated[bool, "Capture best 1C window instead of whole display"] = False,
+) -> dict[str, Any]:
+    """Start automatic evidence recording: each recorded tool call gets screenshot + annotated slide."""
+    return _RECORDER.start(output_dir=output_dir, display=display, window=window)
+
+
+@mcp.tool()
+def recording_capture(
+    action: Annotated[str, "Manual step/action label"],
+    note: Annotated[str, "Text to put into the slide"] = "",
+) -> dict[str, Any]:
+    """Manually capture a screenshot/slide in the active recording session."""
+    event = _RECORDER.capture(_screenshot_for_recorder, action, {"note": note}, {"note": note})
+    return event or {"active": False}
+
+
+@mcp.tool()
+def recording_stop() -> dict[str, Any]:
+    """Stop recording and build PDF/GIF/MP4 from captured slides."""
+    return _RECORDER.stop()
 
 
 @mcp.tool()

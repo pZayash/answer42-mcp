@@ -175,3 +175,26 @@ python3 scripts/rag_cli.py lookup РегистрСведений.Резервн�
 ## Лицензия
 
 MIT
+
+### Dynamic list tools
+
+`testclient-bridge` includes tools for dynamic lists:
+
+- `dynamic_list_set_order` — sort by visible column title (`УстановитьПорядок(<ЗаголовокКолонки>)`);
+- `dynamic_list_output` — run **Вывести список** and return the produced tabular document text when available;
+- `dynamic_list_open_settings` — open **Настроить список** (filters, order, conditional formatting, grouping);
+- `dynamic_list_clear_settings` — reset/clear dynamic-list settings;
+- `dynamic_list_open_form_settings` — open **Изменить форму**.
+
+### Evidence recording
+
+Use `recording_start(output_dir, display, window)` before a workflow. Recorded tool calls create
+screenshots and annotated slides. Finish with `recording_stop()` to build:
+
+- `manifest.json`
+- `recording.gif`
+- `recording.mp4`
+- `recording.pdf` when ImageMagick is installed
+
+For OS window maximization use `maximize_test_client_external_window()`. It tries `wmctrl`, then
+`xdotool`, then the built-in `python-xlib` fallback.
