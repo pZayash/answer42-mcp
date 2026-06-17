@@ -324,6 +324,18 @@ async def find_object(
 
 
 @mcp.tool()
+async def get_object(
+    name: Annotated[str, "Object name pattern"] = "",
+    title: Annotated[str, "Object title pattern"] = "",
+    type: Annotated[str, "1C tested object type name, optional"] = "",
+    timeout: Annotated[int, "Search timeout in seconds"] = 0,
+    max_depth: Annotated[int, "Children depth to serialize"] = 2,
+) -> Any:
+    """Call TestedApplication.GetObject with optional wildcard name/title."""
+    return await bridge.call("get_object", {"name": name, "title": title, "type": type, "timeout": timeout, "max_depth": max_depth})
+
+
+@mcp.tool()
 async def activate_object(
     name: Annotated[str, "Object technical name"] = "",
     title: Annotated[str, "Object visible title/caption"] = "",
@@ -405,6 +417,32 @@ async def activate_field(
 
 
 @mcp.tool()
+async def choose_field_from_list(
+    field_name: Annotated[str, "Reference field technical name or title"],
+    search_by_title: Annotated[bool, "If true, match visible title instead of object name"] = False,
+) -> Any:
+    """Open the standard selection form for a reference field."""
+    return await bridge.call("choose_field_from_list", {"field_name": field_name, "search_by_title": search_by_title})
+
+
+@mcp.tool()
+async def choose_field_first_row(
+    field_name: Annotated[str, "Reference field technical name or title"],
+    search_by_title: Annotated[bool, "If true, match visible title instead of object name"] = False,
+) -> Any:
+    """Open reference selection form and press its standard Choose button."""
+    return await bridge.call("choose_field_first_row", {"field_name": field_name, "search_by_title": search_by_title})
+
+
+@mcp.tool()
+async def choose_current_row(
+    name: Annotated[str, "Table technical name"] = "Список",
+) -> Any:
+    """Choose the current row in the active selection/list form."""
+    return await bridge.call("choose_current_row", {"name": name})
+
+
+@mcp.tool()
 async def table_rows(
     name: Annotated[str, "Table technical name"] = "",
     title: Annotated[str, "Table visible title"] = "",
@@ -437,6 +475,17 @@ async def table_goto_row(
 ) -> Any:
     """Move cursor to the first tested table row containing text."""
     return await bridge.call("table_goto_row", {"name": name, "title": title, "text": text, "limit": limit, "max_depth": max_depth})
+
+
+@mcp.tool()
+async def table_set_field(
+    table: Annotated[str, "Table technical name"],
+    field: Annotated[str, "Column field technical name or title"],
+    value: Annotated[str, "Value to set"],
+    search_by_title: Annotated[bool, "If true, match visible title instead of object name"] = False,
+) -> Any:
+    """Set a field in the currently edited row of a form table."""
+    return await bridge.call("table_set_field", {"table": table, "field": field, "value": value, "search_by_title": search_by_title})
 
 
 @mcp.tool()
