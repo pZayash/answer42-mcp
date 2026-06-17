@@ -8,6 +8,7 @@ import os
 from datetime import datetime
 import shlex
 import subprocess
+import re
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -395,6 +396,50 @@ async def set_field_value(
 
 
 @mcp.tool()
+async def activate_field(
+    field_name: Annotated[str, "Field technical name or title"],
+    search_by_title: Annotated[bool, "If true, match visible title instead of object name"] = False,
+) -> Any:
+    """Activate/focus a form field by name or title."""
+    return await bridge.call("activate_field", {"field_name": field_name, "search_by_title": search_by_title})
+
+
+@mcp.tool()
+async def table_rows(
+    name: Annotated[str, "Table technical name"] = "",
+    title: Annotated[str, "Table visible title"] = "",
+    limit: Annotated[int, "Maximum rows to return"] = 50,
+    max_depth: Annotated[int, "Maximum search depth"] = 8,
+) -> Any:
+    """Return rows of a tested table as key/value mappings."""
+    return await bridge.call("table_rows", {"name": name, "title": title, "limit": limit, "max_depth": max_depth})
+
+
+@mcp.tool()
+async def table_find_row(
+    text: Annotated[str, "Substring to search in serialized row values"],
+    name: Annotated[str, "Table technical name"] = "",
+    title: Annotated[str, "Table visible title"] = "",
+    limit: Annotated[int, "Maximum rows to scan"] = 200,
+    max_depth: Annotated[int, "Maximum search depth"] = 8,
+) -> Any:
+    """Find a tested table row containing text."""
+    return await bridge.call("table_find_row", {"name": name, "title": title, "text": text, "limit": limit, "max_depth": max_depth})
+
+
+@mcp.tool()
+async def table_goto_row(
+    text: Annotated[str, "Substring to search in serialized row values"],
+    name: Annotated[str, "Table technical name"] = "",
+    title: Annotated[str, "Table visible title"] = "",
+    limit: Annotated[int, "Maximum rows to scan"] = 200,
+    max_depth: Annotated[int, "Maximum search depth"] = 8,
+) -> Any:
+    """Move cursor to the first tested table row containing text."""
+    return await bridge.call("table_goto_row", {"name": name, "title": title, "text": text, "limit": limit, "max_depth": max_depth})
+
+
+@mcp.tool()
 async def create_new_item() -> Any:
     """Create a new item in the active form (e.g. new catalog/dictionary entry)."""
     return await bridge.call("create_new_item", {})
@@ -412,9 +457,58 @@ async def close_form() -> Any:
     return await bridge.call("close_form", {})
 
 
+def _active_x11_window_geometry(display: str | None = None) -> dict[str, int] | None:
+    env = os.environ.copy()
+    if display:
+        env["DISPLAY"] = display
+    try:
+        tree = subprocess.run(
+            ["xwininfo", "-root", "-tree"],
+            env=env,
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=10,
+        ).stdout
+    except (subprocess.SubprocessError, FileNotFoundError):
+        return None
+
+    candidates: list[tuple[int, dict[str, int]]] = []
+    for line in tree.splitlines():
+        if '("1cv8c" "1cv8c")' not in line and '("1cv8" "1cv8")' not in line:
+            continue
+        match = re.search(r'0x[0-9a-f]+ "([^"]*)".*?(\d+)x(\d+)\+(-?\d+)\+(-?\d+)', line)
+        if not match:
+            continue
+        title = match.group(1)
+        width, height, left, top = map(int, match.groups()[1:])
+        if width < 300 or height < 150:
+            continue
+        if left < 0 or top < 0:
+            continue
+        priority = 0
+        if title and title not in {"1cv8c", "1cv8", "Конфигурация"}:
+            priority += 100
+        if "1С:Предприятие" in title:
+            priority += 50
+        if any(word in title for word in ("создание", "Инструменты", "Шаблон", "Сессия", "DEV-AREA")):
+            priority += 25
+        priority += min(width * height // 10000, 50)
+        candidates.append((priority, {"left": left, "top": top, "width": width, "height": height, "title": title}))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates[0][1]
+
+
 @mcp.tool()
-def screenshot(path: Annotated[str, "Output image path"] = "build/screenshots/screenshot.png") -> dict[str, Any]:
-    """Capture a desktop screenshot from the MCP host."""
+def screenshot(
+    path: Annotated[str, "Output image path"] = "build/screenshots/screenshot.png",
+    window: Annotated[bool, "Capture the best visible 1C window instead of the whole virtual display"] = True,
+    display: Annotated[str, "X11 display to inspect/capture"] = "",
+) -> dict[str, Any]:
+    """Capture a screenshot from the MCP host. Defaults to the active visible 1C window."""
     output_path = Path(path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -422,15 +516,21 @@ def screenshot(path: Annotated[str, "Output image path"] = "build/screenshots/sc
         import mss  # type: ignore
         import mss.tools  # type: ignore
 
+        if display:
+            os.environ["DISPLAY"] = display
+        geometry = _active_x11_window_geometry(display or None) if window else None
         with mss.mss() as sct:
-            monitor = sct.monitors[0]
+            monitor = geometry or sct.monitors[0]
             image = sct.grab(monitor)
             mss.tools.to_png(image.rgb, image.size, output=str(output_path))
     except ImportError as exc:
         raise RuntimeError("Install screenshot extra: pip install '.[screenshot]' or mss") from exc
 
     data = output_path.read_bytes()
-    return {"path": str(output_path), "bytes": len(data), "base64": base64.b64encode(data).decode("ascii")}
+    result = {"path": str(output_path), "bytes": len(data), "base64": base64.b64encode(data).decode("ascii")}
+    if window:
+        result["window_geometry"] = geometry
+    return result
 
 
 async def _run() -> None:
