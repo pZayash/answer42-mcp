@@ -75,19 +75,47 @@ class RecordingSession:
         pattern = str(self.slides_dir / "*.svg")
         run(["ffmpeg", "-y", "-framerate", "0.8", "-pattern_type", "glob", "-i", pattern, "-vf", "fps=12,scale=1280:-1:flags=lanczos,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse", str(gif)])
         run(["ffmpeg", "-y", "-framerate", "0.8", "-pattern_type", "glob", "-i", pattern, "-vf", "fps=24,scale=1920:1080:flags=lanczos,format=yuv420p", "-movflags", "+faststart", str(mp4)])
-        # PDF if ImageMagick exists; otherwise leave blank.
-        converter = first_existing(["magick", "convert"])
-        if converter:
-            if converter.endswith("magick"):
-                run([converter, *map(str, slides), str(pdf)])
-            else:
-                run([converter, *map(str, slides), str(pdf)])
-        return {"gif": str(gif) if gif.exists() else "", "mp4": str(mp4) if mp4.exists() else "", "pdf": str(pdf) if pdf.exists() else ""}
+        html_deck = self.output_dir / "recording.html"
+        html_deck.write_text(make_html_deck(slides), encoding="utf-8")
+        browser = first_existing(["google-chrome", "chromium", "chromium-browser"])
+        if browser:
+            run([
+                browser,
+                "--headless=new",
+                "--no-sandbox",
+                "--disable-gpu",
+                f"--print-to-pdf={pdf.resolve()}",
+                str(html_deck.resolve()),
+            ], timeout=240)
+        if not pdf.exists():
+            converter = first_existing(["magick", "convert"])
+            if converter:
+                run([converter, *map(str, slides), str(pdf)], timeout=240)
+        return {
+            "gif": str(gif) if gif.exists() else "",
+            "mp4": str(mp4) if mp4.exists() else "",
+            "pdf": str(pdf) if pdf.exists() else "",
+            "html": str(html_deck) if html_deck.exists() else "",
+        }
 
 
-def run(args: list[str]) -> None:
+def make_html_deck(slides: list[Path]) -> str:
+    pages = []
+    for slide in slides:
+        data = slide.read_text(encoding="utf-8")
+        pages.append(f'<section class="page">{data}</section>')
+    return '''<!doctype html>
+<html><head><meta charset="utf-8"><style>
+@page { size: 16in 9in; margin: 0; }
+html, body { margin: 0; padding: 0; background: #111827; }
+.page { width: 16in; height: 9in; page-break-after: always; overflow: hidden; }
+.page svg { width: 16in; height: 9in; display: block; }
+</style></head><body>''' + "\n".join(pages) + "</body></html>"
+
+
+def run(args: list[str], timeout: int = 180) -> None:
     try:
-        subprocess.run(args, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=180)
+        subprocess.run(args, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=timeout)
     except Exception:
         pass
 
