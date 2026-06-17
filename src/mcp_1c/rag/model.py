@@ -40,6 +40,7 @@ class Attribute:
     synonym: str | None = None
     required: bool | None = None
     source_path: str | None = None
+    role: str = "attribute"
     raw: dict[str, Any] = field(default_factory=dict)
 
 
@@ -88,6 +89,20 @@ class FormElement:
 
 
 @dataclass(slots=True)
+class DataCompositionField:
+    object_full_name: str
+    schema_name: str
+    data_path: str
+    source_field: str | None = None
+    title: str | None = None
+    expression: str | None = None
+    dataset_name: str | None = None
+    field_type: str | None = None
+    source_path: str | None = None
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
 class ParsedSource:
     source: SourceInfo
     objects: list[MetadataObject] = field(default_factory=list)
@@ -96,3 +111,4 @@ class ParsedSource:
     table_part_columns: list[TablePartColumn] = field(default_factory=list)
     forms: list[Form] = field(default_factory=list)
     form_elements: list[FormElement] = field(default_factory=list)
+    data_composition_fields: list[DataCompositionField] = field(default_factory=list)

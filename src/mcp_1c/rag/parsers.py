@@ -8,6 +8,7 @@ from typing import Iterable
 from .detect import detect_source_format
 from .model import (
     Attribute,
+    DataCompositionField,
     Form,
     FormElement,
     MetadataObject,
@@ -26,6 +27,8 @@ KIND_DIRS = {
     "CommonModules": "ОбщийМодуль",
     "InformationRegisters": "РегистрСведений",
     "AccumulationRegisters": "РегистрНакопления",
+    "AccountingRegisters": "РегистрБухгалтерии",
+    "CalculationRegisters": "РегистрРасчета",
 }
 
 
@@ -38,6 +41,37 @@ def _text(elem: ET.Element | None) -> str | None:
         return None
     value = elem.text.strip()
     return value or None
+
+
+def _local_string_text(elem: ET.Element | None) -> str | None:
+    if elem is None:
+        return None
+    direct = _text(elem)
+    if direct:
+        return direct
+    ru_value: str | None = None
+    any_value: str | None = None
+    for item in elem.iter():
+        if _strip_ns(item.tag).lower() != "item":
+            continue
+        lang: str | None = None
+        content: str | None = None
+        for child in list(item):
+            tag = _strip_ns(child.tag).lower()
+            if tag in {"lang", "key"}:
+                lang = _text(child)
+            elif tag in {"content", "value"}:
+                content = _text(child)
+        if content:
+            any_value = content
+            if lang == "ru":
+                ru_value = content
+    if ru_value or any_value:
+        return ru_value or any_value
+    for child in elem.iter():
+        if _strip_ns(child.tag).lower() in {"content", "value"}:
+            any_value = _text(child) or any_value
+    return any_value
 
 
 def _first_text(root: ET.Element, names: Iterable[str]) -> str | None:
@@ -95,6 +129,19 @@ def _type_text(elem: ET.Element) -> str | None:
     return ", ".join(dict.fromkeys(v for v in values if v)) or None
 
 
+def _metadata_field_role(tag: str) -> str | None:
+    tag = tag.lower()
+    if tag in {"attribute", "attributes", "requisite", "requisites"}:
+        return "attribute"
+    if tag in {"dimension", "dimensions"}:
+        return "dimension"
+    if tag in {"resource", "resources"}:
+        return "resource"
+    if tag in {"standardattribute", "standardattributes"}:
+        return "standard_attribute"
+    return None
+
+
 def parse_source(source: SourceInfo) -> ParsedSource:
     fmt = source.format if source.format != "unknown" else detect_source_format(source.path)
     source = SourceInfo(
@@ -133,6 +180,7 @@ def parse_edt_source(source: SourceInfo) -> ParsedSource:
             if root is not None:
                 _extract_metadata_children(parsed, root, full, mdo)
             _extract_forms(parsed, mdo.parent, full)
+            _extract_data_composition_schemas(parsed, mdo.parent, full)
     return parsed
 
 
@@ -163,6 +211,7 @@ def parse_designer_xml_source(source: SourceInfo) -> ParsedSource:
                 _extract_metadata_children(parsed, root, full, xml)
             object_dir = xml.parent if xml.parent != base else base / xml.stem
             _extract_forms(parsed, object_dir, full)
+            _extract_data_composition_schemas(parsed, object_dir, full)
     return parsed
 
 
@@ -179,17 +228,18 @@ def _extract_metadata_children(parsed: ParsedSource, root: ET.Element, full: str
 
     for elem in root.iter():
         tag = _strip_ns(elem.tag).lower()
-        if tag in {"attribute", "attributes", "requisite", "requisites"} and id(elem) not in table_part_descendants:
+        role = _metadata_field_role(tag)
+        if role is not None and id(elem) not in table_part_descendants:
             name = _direct_text(elem, ["name", "Name"])
             if name:
-                parsed.attributes.append(Attribute(full, name, _type_text(elem), _synonym_text(elem), None, str(source_path)))
+                parsed.attributes.append(Attribute(full, name, _type_text(elem), _synonym_text(elem), None, str(source_path), role))
         elif tag in {"tabularsection", "tabularsections", "tablepart", "tableparts"}:
             name = _direct_text(elem, ["name", "Name"])
             if name:
                 parsed.table_parts.append(TablePart(full, name, _synonym_text(elem), str(source_path)))
                 for col in elem.iter():
                     ctag = _strip_ns(col.tag).lower()
-                    if ctag in {"attribute", "attributes", "requisite", "requisites"}:
+                    if _metadata_field_role(ctag) is not None:
                         cname = _direct_text(col, ["name", "Name"])
                         if cname and cname != name:
                             parsed.table_part_columns.append(TablePartColumn(full, name, cname, _type_text(col), _synonym_text(col), None, str(source_path)))
@@ -233,6 +283,45 @@ def _extract_form_elements(parsed: ParsedSource, root: ET.Element, full: str, fo
                 str(source_path),
             )
         )
+
+
+def _extract_data_composition_schemas(parsed: ParsedSource, object_dir: Path, full: str) -> None:
+    templates_dir = object_dir / "Templates"
+    if not templates_dir.exists():
+        return
+    for dcs in sorted(templates_dir.glob("*/Template.dcs")):
+        root = _xml_root(dcs)
+        if root is None:
+            continue
+        schema_name = dcs.parent.name
+        dataset_name: str | None = None
+        for elem in root.iter():
+            tag = _strip_ns(elem.tag)
+            low = tag.lower()
+            if low == "dataset":
+                dataset_name = _direct_text(elem, ["name", "Name"]) or dataset_name
+            if low not in {"field", "calculatedfield", "totalfield"}:
+                continue
+            data_path = _direct_text(elem, ["dataPath", "DataPath"]) or _direct_text(elem, ["name", "Name"])
+            field = _direct_text(elem, ["field", "Field"])
+            title_elem = next((child for child in list(elem) if _strip_ns(child.tag).lower() in {"title", "caption"}), None)
+            title = _local_string_text(title_elem)
+            expression = _direct_text(elem, ["expression", "Expression"])
+            if not data_path and not field and not title:
+                continue
+            parsed.data_composition_fields.append(
+                DataCompositionField(
+                    full,
+                    schema_name,
+                    data_path or field or title or "",
+                    field,
+                    title,
+                    expression,
+                    dataset_name,
+                    tag,
+                    str(dcs),
+                )
+            )
 
 
 def navigation_for_object(full_name: str, kind: str) -> tuple[str, str] | None:

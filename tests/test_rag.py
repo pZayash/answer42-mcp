@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from textwrap import dedent
 
 from mcp_1c.rag import RagService
 from mcp_1c.rag.detect import detect_source_format
@@ -40,3 +41,73 @@ def test_index_designer_xml(tmp_path: Path):
     obj = svc.lookup_object("Обработка.MCPTestManager", snapshot="MCP-only")
     assert obj["matches"]
     assert obj["matches"][0]["navigation"][0]["url"] == "e1cib/app/Обработка.MCPTestManager"
+
+
+def test_index_register_roles_and_dcs_fields(tmp_path: Path):
+    root = tmp_path / "src"
+    (root / "Configuration").mkdir(parents=True)
+    (root / "Configuration" / "Configuration.mdo").write_text(
+        "<MetaDataObject><Configuration><name>Test</name></Configuration></MetaDataObject>",
+        encoding="utf-8",
+    )
+    reg_dir = root / "InformationRegisters" / "Состояния"
+    reg_dir.mkdir(parents=True)
+    (reg_dir / "Состояния.mdo").write_text(
+        dedent(
+            """
+            <MetaDataObject>
+              <InformationRegister>
+                <name>Состояния</name>
+                <dimensions><name>Объект</name><type><types>CatalogRef.Партнеры</types></type></dimensions>
+                <resources><name>Статус</name><type><types>String</types></type></resources>
+                <attributes><name>Комментарий</name><type><types>String</types></type></attributes>
+              </InformationRegister>
+            </MetaDataObject>
+            """
+        ).strip(),
+        encoding="utf-8",
+    )
+    report_dir = root / "Reports" / "Контроль"
+    (report_dir / "Templates" / "ОсновнаяСхемаКомпоновкиДанных").mkdir(parents=True)
+    (report_dir / "Контроль.mdo").write_text(
+        "<MetaDataObject><Report><name>Контроль</name></Report></MetaDataObject>",
+        encoding="utf-8",
+    )
+    (report_dir / "Templates" / "ОсновнаяСхемаКомпоновкиДанных" / "Template.dcs").write_text(
+        dedent(
+            """
+            <DataCompositionSchema xmlns:v8="http://v8.1c.ru/8.1/data/core">
+              <dataSet>
+                <name>НаборДанных1</name>
+                <field>
+                  <dataPath>Статус</dataPath>
+                  <field>Статус</field>
+                  <title><v8:item><v8:lang>ru</v8:lang><v8:content>Статус объекта</v8:content></v8:item></title>
+                </field>
+              </dataSet>
+              <calculatedField>
+                <dataPath>Длительность</dataPath>
+                <expression>РазностьДат(Начало, Конец, "СЕКУНДА")</expression>
+              </calculatedField>
+            </DataCompositionSchema>
+            """
+        ).strip(),
+        encoding="utf-8",
+    )
+
+    svc = RagService(tmp_path / "rag.sqlite")
+    svc.add_source("SRC", str(root), kind="configuration")
+    svc.create_snapshot("SRC-only", sources=["SRC"])
+    result = svc.build_index(snapshot="SRC-only")
+    assert result["data_composition_fields"] == 2
+
+    reg = svc.lookup_object("РегистрСведений.Состояния", snapshot="SRC-only")["matches"][0]
+    roles = {a["name"]: a["role"] for a in reg["attributes"]}
+    assert roles["Объект"] == "dimension"
+    assert roles["Статус"] == "resource"
+    assert roles["Комментарий"] == "attribute"
+
+    report = svc.lookup_object("Отчет.Контроль", snapshot="SRC-only")["matches"][0]
+    fields = {f["data_path"]: f for f in report["data_composition_fields"]}
+    assert fields["Статус"]["title"] == "Статус объекта"
+    assert fields["Длительность"]["expression"] == 'РазностьДат(Начало, Конец, "СЕКУНДА")'

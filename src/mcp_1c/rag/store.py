@@ -5,7 +5,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class RagStore:
@@ -25,7 +25,7 @@ class RagStore:
                 """
                 CREATE TABLE IF NOT EXISTS schema_info(version INTEGER NOT NULL);
                 DELETE FROM schema_info;
-                INSERT INTO schema_info(version) VALUES (1);
+                INSERT INTO schema_info(version) VALUES (2);
 
                 CREATE TABLE IF NOT EXISTS sources(
                   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -78,6 +78,7 @@ class RagStore:
                   synonym TEXT,
                   required INTEGER,
                   source_path TEXT,
+                  role TEXT NOT NULL DEFAULT 'attribute',
                   raw_json TEXT,
                   FOREIGN KEY(object_id) REFERENCES metadata_objects(id) ON DELETE CASCADE
                 );
@@ -128,6 +129,21 @@ class RagStore:
                   FOREIGN KEY(form_id) REFERENCES forms(id) ON DELETE CASCADE
                 );
 
+                CREATE TABLE IF NOT EXISTS data_composition_fields(
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  object_id INTEGER NOT NULL,
+                  schema_name TEXT NOT NULL,
+                  data_path TEXT NOT NULL,
+                  field TEXT,
+                  title TEXT,
+                  expression TEXT,
+                  dataset_name TEXT,
+                  field_type TEXT,
+                  source_path TEXT,
+                  raw_json TEXT,
+                  FOREIGN KEY(object_id) REFERENCES metadata_objects(id) ON DELETE CASCADE
+                );
+
                 CREATE TABLE IF NOT EXISTS navigation_links(
                   id INTEGER PRIMARY KEY AUTOINCREMENT,
                   object_id INTEGER NOT NULL,
@@ -174,12 +190,27 @@ class RagStore:
                 CREATE INDEX IF NOT EXISTS idx_attrs_object ON attributes(object_id);
                 CREATE INDEX IF NOT EXISTS idx_forms_object ON forms(object_id);
                 CREATE INDEX IF NOT EXISTS idx_form_elements_name ON form_elements(form_id, name);
+                CREATE INDEX IF NOT EXISTS idx_dcs_fields_object ON data_composition_fields(object_id, schema_name);
                 CREATE INDEX IF NOT EXISTS idx_terms_norm ON business_terms(normalized_term);
                 CREATE INDEX IF NOT EXISTS idx_layers_snapshot ON snapshot_layers(snapshot_id, layer_order);
                 """
             )
+            columns = {row["name"] for row in con.execute("PRAGMA table_info(attributes)")}
+            if "role" not in columns:
+                con.execute("ALTER TABLE attributes ADD COLUMN role TEXT NOT NULL DEFAULT 'attribute'")
 
     def clear_index_for_source(self, con: sqlite3.Connection, source_id: int) -> None:
+        con.execute(
+            """
+            DELETE FROM search_fts
+            WHERE chunk_id IN (
+              SELECT rc.id
+              FROM rag_chunks rc JOIN metadata_objects mo ON mo.id=rc.object_id
+              WHERE mo.source_id=?
+            )
+            """,
+            (source_id,),
+        )
         con.execute("DELETE FROM metadata_objects WHERE source_id=?", (source_id,))
 
 

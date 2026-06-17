@@ -117,7 +117,7 @@ class RagService:
                 snapshot_id = None
                 source_rows = [r for r in con.execute("SELECT * FROM sources ORDER BY id")]
             source_rows = [r for r in source_rows if r is not None]
-            counts = {"sources": 0, "objects": 0, "attributes": 0, "table_parts": 0, "forms": 0, "form_elements": 0, "chunks": 0}
+            counts = {"sources": 0, "objects": 0, "attributes": 0, "table_parts": 0, "forms": 0, "form_elements": 0, "data_composition_fields": 0, "chunks": 0}
             for src in source_rows:
                 info = SourceInfo(src["name"], Path(src["path"]), src["kind"], src["format"], src["repo_url"], src["branch"], src["commit_hash"])
                 parsed = parse_source(info)
@@ -150,7 +150,7 @@ class RagService:
                     oid = object_ids.get(attr.object_full_name)
                     if not oid:
                         continue
-                    con.execute("INSERT INTO attributes(object_id,name,type_name,synonym,required,source_path,raw_json) VALUES(?,?,?,?,?,?,?)", (oid, attr.name, attr.type_name, attr.synonym, attr.required, attr.source_path, json_dumps(attr.raw)))
+                    con.execute("INSERT INTO attributes(object_id,name,type_name,synonym,required,source_path,role,raw_json) VALUES(?,?,?,?,?,?,?,?)", (oid, attr.name, attr.type_name, attr.synonym, attr.required, attr.source_path, attr.role, json_dumps(attr.raw)))
                     counts["attributes"] += 1
                 for tp in parsed.table_parts:
                     oid = object_ids.get(tp.object_full_name)
@@ -176,6 +176,20 @@ class RagService:
                         continue
                     con.execute("INSERT INTO form_elements(form_id,name,element_type,title,data_path,command_name,parent_name,source_path,raw_json) VALUES(?,?,?,?,?,?,?,?,?)", (fid, elem.name, elem.element_type, elem.title, elem.data_path, elem.command_name, elem.parent_name, elem.source_path, json_dumps(elem.raw)))
                     counts["form_elements"] += 1
+                for dcs_field in parsed.data_composition_fields:
+                    oid = object_ids.get(dcs_field.object_full_name)
+                    if not oid:
+                        continue
+                    con.execute(
+                        "INSERT INTO data_composition_fields(object_id,schema_name,data_path,field,title,expression,dataset_name,field_type,source_path,raw_json) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                        (oid, dcs_field.schema_name, dcs_field.data_path, dcs_field.source_field, dcs_field.title, dcs_field.expression, dcs_field.dataset_name, dcs_field.field_type, dcs_field.source_path, json_dumps(dcs_field.raw)),
+                    )
+                    counts["data_composition_fields"] += 1
+                    text_parts = [dcs_field.object_full_name, "СКД", dcs_field.schema_name, dcs_field.data_path, dcs_field.source_field or "", dcs_field.title or "", dcs_field.expression or ""]
+                    chunk_text = " ".join(part for part in text_parts if part)
+                    cid = _insert_chunk(con, snapshot_id, oid, "dcs_field", chunk_text, dcs_field.source_path, {"source": src["name"], "schema": dcs_field.schema_name})
+                    con.execute("INSERT INTO search_fts(text, object_full_name, kind, source_path, chunk_id) VALUES(?,?,?,?,?)", (chunk_text, dcs_field.object_full_name, "СКД", dcs_field.source_path, cid))
+                    counts["chunks"] += 1
         return {"db_path": self.db_path, **counts}
 
     def lookup_object(self, object: str, snapshot: str | int | None = None) -> dict[str, Any]:
@@ -194,11 +208,12 @@ class RagService:
             for row in rows:
                 oid = row["id"]
                 row["navigation"] = [dict(r) for r in con.execute("SELECT kind,url FROM navigation_links WHERE object_id=?", (oid,))]
-                row["attributes"] = [dict(r) for r in con.execute("SELECT name,type_name,synonym,required FROM attributes WHERE object_id=? ORDER BY id", (oid,))]
+                row["attributes"] = [dict(r) for r in con.execute("SELECT name,type_name,synonym,required,role FROM attributes WHERE object_id=? ORDER BY id", (oid,))]
                 row["table_parts"] = [dict(r) for r in con.execute("SELECT id,name,synonym FROM table_parts WHERE object_id=? ORDER BY id", (oid,))]
                 for tp in row["table_parts"]:
                     tp["columns"] = [dict(r) for r in con.execute("SELECT name,type_name,synonym,required FROM table_part_columns WHERE table_part_id=? ORDER BY id", (tp["id"],))]
                 row["forms"] = [dict(r) for r in con.execute("SELECT id,name,kind,source_path FROM forms WHERE object_id=? ORDER BY id", (oid,))]
+                row["data_composition_fields"] = [dict(r) for r in con.execute("SELECT schema_name,data_path,field,title,expression,dataset_name,field_type,source_path FROM data_composition_fields WHERE object_id=? ORDER BY id", (oid,))]
             return {"query": object, "snapshot": snapshot, "matches": rows}
 
     def query(self, text: str, snapshot: str | int | None = None, limit: int = 10) -> dict[str, Any]:
