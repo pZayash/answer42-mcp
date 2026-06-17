@@ -12,7 +12,8 @@ Python MCP server (`mcp_1c.server`)
 WebSocket server (`ws://127.0.0.1:8765/bridge`)
         │
         ▼
-1C external processor `MCPTestManager.epf`
+1C test manager thin client (`1cv8c /WS ... /TESTMANAGER`)
+        │ opens embedded processor `MCPTestManager`
         │ 1C test manager API (`ТестируемоеПриложение`)
         ▼
 1C test client (`/TESTCLIENT -TPort1538`)
@@ -45,7 +46,8 @@ Target infobase, e.g. `<TARGET_INFOBASE_URL>`
 ## MCP tools первого прототипа
 
 - `bridge_status` — URL и состояние подключения обработки 1С.
-- `launch_manager` — запуск 1С менеджера тестирования с `/Execute <epf>` и `/C <websocket-url>`.
+- `launch_manager` — создание служебной базы, загрузка `MCPTestManager.cf`, запуск `ibsrv`, затем `1cv8c /WS ... /TESTMANAGER`. Режим `/TESTMANAGER` обязателен: это тонкий клиент с возможностью управления клиентами тестирования.
+- `export_eventlog` — выгрузка журнала регистрации автономного сервера через `ibcmd eventlog export`; основной способ диагностики ошибок 1С в этом сценарии.
 - `connect_test_client` — запуск/подключение тест-клиента к базе.
 - `disconnect_test_client` — разрыв соединения.
 - `active_window` — состояние активного окна.
@@ -59,4 +61,4 @@ Target infobase, e.g. `<TARGET_INFOBASE_URL>`
 - Поддерживается одно активное WebSocket-подключение обработки 1С.
 - Скриншот делается системным способом через Python `mss`, потому что в справке API тестируемого приложения не найден прямой метод снимка экрана.
 - Команда запуска тест-клиента может потребовать правки параметров платформы под конкретный режим публикации/автономного сервера.
-- Исходники обработки созданы как XML external data processor; сборка EPF выполняется локальной платформой 1С.
+- Для автономного сценария используется встроенная в `MCPTestManager.cf` обработка. EPF оставлен как дополнительный артефакт/legacy-вариант, но основной E2E должен идти через `ibsrv` + `/TESTMANAGER`.

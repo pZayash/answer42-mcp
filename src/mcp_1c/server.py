@@ -5,6 +5,7 @@ import asyncio
 import base64
 import logging
 import os
+from datetime import datetime
 import shlex
 import subprocess
 from pathlib import Path
@@ -48,6 +49,7 @@ def _resolve_paths(
             address=ibsrv_address,
             port=ibsrv_port,
             name=ibsrv_name,
+            data_dir=Path(os.environ.get("ONEC_MCP_SERVER_DATA_DIR", runtime.DEFAULT_IBSRV_DATA)),
         ),
         manager=runtime.TestManagerSpec(
             onec_path=os.path.join(platform_dir, "1cv8c"),
@@ -113,8 +115,8 @@ def launch_manager(
        thin client refuses to log in otherwise).
     3. `ibsrv` is launched in its default form and listens on the
        configured HTTP port.
-    4. `1cv8c ENTERPRISE /WS ws://host:port/ /TESTMANAGER /Execute <epf>
-       /C <ws-bridge>` opens the EPF inside the thin client.
+    4. `1cv8c ENTERPRISE /WS"http://host:port" /TESTMANAGER` starts the
+       test manager. The embedded configuration opens MCPTestManager.
 
     Set `use_thin_client=False` to fall back to the thick-client
     `/F <ib>` form while the HTTP-gate integration is being stabilised.
@@ -132,6 +134,7 @@ def launch_manager(
         ibsrv_name=ibsrv_name,
         processor=processor,
     )
+    runtime_state.server.data_dir = Path(server_data_dir)
     log_dir = runtime_state.log_dir
     log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -154,6 +157,7 @@ def launch_manager(
             name=runtime_state.server.name,
             data_dir=Path(server_data_dir),
             log_dir=log_dir,
+            db_path=runtime_state.infobase.db_path,
         )
         runtime_state.server_process = server_proc
 
@@ -198,6 +202,39 @@ def launch_manager(
         "ws_url": ws_url if use_thin_client else None,
         "log_dir": str(log_dir),
     }
+
+
+@mcp.tool()
+def export_eventlog(
+    platform_dir: Annotated[str, "1C platform directory (contains ibcmd)"] = "/opt/1cv8/x86_64/8.5.1.1150",
+    eventlog_dir: Annotated[str, "Path to autonomous-server event log directory"] = "",
+    out_path: Annotated[str, "Output JSON/XML file path"] = "",
+    from_time: Annotated[str, "Start timestamp YYYY-MM-DDThh:mm:ss[.mmmmmm]"] = "",
+    to_time: Annotated[str, "End timestamp YYYY-MM-DDThh:mm:ss[.mmmmmm]"] = "",
+    fmt: Annotated[str, "Export format: json or xml"] = "json",
+) -> dict[str, Any]:
+    """Export the 1C event log via autonomous-server `ibcmd eventlog export`."""
+    ibcmd = os.path.join(platform_dir, "ibcmd")
+    if _RUNTIME is not None and not eventlog_dir:
+        eventlog_path = _RUNTIME.server.data_dir / "log-data"
+        log_dir = _RUNTIME.log_dir
+    else:
+        eventlog_path = Path(eventlog_dir or "/home/openclaw/.1cv8/1C/1cv8/standalone-server/log-data")
+        log_dir = Path("/tmp/onec-mcp/logs")
+    if not out_path:
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        out = log_dir / f"eventlog_{stamp}.{fmt}"
+    else:
+        out = Path(out_path)
+    exported = runtime.export_eventlog(
+        ibcmd=ibcmd,
+        eventlog_dir=eventlog_path,
+        out_path=out,
+        from_time=from_time or None,
+        to_time=to_time or None,
+        fmt=fmt,
+    )
+    return {"path": str(exported), "format": fmt, "eventlog_dir": str(eventlog_path)}
 
 
 @mcp.tool()

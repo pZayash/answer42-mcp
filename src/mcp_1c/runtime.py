@@ -68,6 +68,7 @@ class StandaloneServerSpec:
     address: str = "127.0.0.1"
     port: int = DEFAULT_IBSRV_HTTP_PORT
     name: str = "mcp"
+    data_dir: Path = field(default_factory=lambda: Path(DEFAULT_IBSRV_DATA))
 
 
 @dataclass(slots=True)
@@ -198,6 +199,53 @@ def load_configuration(
             f"stdout={completed.stdout!r} stderr={completed.stderr!r}"
         )
     LOGGER.info("Configuration loaded from %s into %s", cf_path, db_path)
+    apply_configuration(ibcmd=ibcmd, db_path=db_path, timeout=timeout)
+
+
+def apply_configuration(ibcmd: str, db_path: Path, timeout: float = 120.0) -> None:
+    """Apply the loaded configuration to the infobase database configuration."""
+    argv = [
+        ibcmd,
+        "config",
+        "apply",
+        "--db-path=" + str(db_path),
+        "--force",
+        "--dynamic=force",
+        "--session-terminate=force",
+    ]
+    LOGGER.info("Applying configuration to %s", db_path)
+    completed = subprocess.run(argv, input="3\n", capture_output=True, text=True, timeout=timeout)
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"ibcmd config apply failed (rc={completed.returncode}): "
+            f"stdout={completed.stdout!r} stderr={completed.stderr!r}"
+        )
+    LOGGER.info("Configuration applied to %s", db_path)
+
+
+def ensure_standalone_config(
+    data_dir: Path,
+    db_path: Path,
+    address: str,
+    port: int,
+    name: str,
+) -> Path:
+    """Write a minimal standalone-server YAML config for the MCP infobase."""
+    data_dir.mkdir(parents=True, exist_ok=True)
+    config_path = data_dir / "standalone.yaml"
+    config_path.write_text(
+        "server:\n"
+        f"  address: {address}\n"
+        f"  port: {port}\n"
+        "database:\n"
+        f"  path: {db_path}\n"
+        "infobase:\n"
+        f"  name: {name}\n"
+        "http:\n"
+        "  base: /\n",
+        encoding="utf-8",
+    )
+    return config_path
 
 
 def start_standalone_server(
@@ -207,6 +255,7 @@ def start_standalone_server(
     name: str,
     data_dir: Path,
     log_dir: Path,
+    db_path: Path | None = None,
     timeout: float = 30.0,
 ) -> subprocess.Popen:
     """Start the autonomous 1C server (ibsrv) and wait for the HTTP-gate.
@@ -222,13 +271,27 @@ def start_standalone_server(
     """
     if not Path(ibsrv).exists():
         raise FileNotFoundError(f"ibsrv not found: {ibsrv}")
+    if data_dir.exists():
+        shutil.rmtree(data_dir)
     data_dir.mkdir(parents=True, exist_ok=True)
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / "ibsrv.log"
     log_handle = open(log_path, "ab", buffering=0)
-    LOGGER.info("Starting ibsrv (default invocation, data=%s, name=%s)", data_dir, name)
+    LOGGER.info("Starting ibsrv (data=%s, name=%s, address=%s, port=%s)", data_dir, name, address, port)
+    config_path = ensure_standalone_config(
+        data_dir=data_dir,
+        db_path=db_path or Path(DEFAULT_IB_PATH),
+        address=address,
+        port=port,
+        name=name,
+    )
     proc = subprocess.Popen(
-        [ibsrv, f"--name={name}"],
+        [
+            ibsrv,
+            f"--data={data_dir}",
+            f"--config={config_path}",
+            f"--name={name}",
+        ],
         stdout=log_handle,
         stderr=log_handle,
         stdin=subprocess.DEVNULL,
@@ -242,6 +305,47 @@ def start_standalone_server(
         )
     LOGGER.info("ibsrv is listening on %s:%s (pid=%s, name=%s)", address, port, proc.pid, name)
     return proc
+
+
+def export_eventlog(
+    ibcmd: str,
+    eventlog_dir: Path,
+    out_path: Path,
+    from_time: str | None = None,
+    to_time: str | None = None,
+    fmt: str = "json",
+    timeout: float = 30.0,
+) -> Path:
+    """Export the 1C autonomous-server event log to a file.
+
+    The `ibcmd eventlog export` command works directly with the
+    event-log directory and does not connect to the infobase. This is
+    the preferred diagnostic path for manager/client startup errors in
+    the autonomous-server scenario.
+    """
+    if not Path(ibcmd).exists():
+        raise FileNotFoundError(f"ibcmd not found: {ibcmd}")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    argv = [
+        ibcmd,
+        "eventlog",
+        "export",
+        f"--format={fmt}",
+        f"--out={out_path}",
+    ]
+    if from_time:
+        argv.append(f"--from={from_time}")
+    if to_time:
+        argv.append(f"--to={to_time}")
+    argv.append(str(eventlog_dir))
+    LOGGER.info("Exporting 1C event log: %s", " ".join(argv))
+    completed = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"ibcmd eventlog export failed (rc={completed.returncode}): "
+            f"stdout={completed.stdout!r} stderr={completed.stderr!r}"
+        )
+    return out_path
 
 
 def build_thin_client_ws_url(address: str, port: int) -> str:

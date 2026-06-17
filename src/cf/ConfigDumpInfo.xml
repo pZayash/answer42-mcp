@@ -3,6 +3,7 @@
 	<ConfigVersions>
 		<Metadata name="Configuration.Конфигурация" id="000a6b23-9e90-4a09-9ef9-4e74e3d36865" configVersion="3ee790ce3204ac42a479428fb7a5e3c000000000"/>
 		<Metadata name="Configuration.Конфигурация.ParentConfigurations" id="337a8ad3-4fcc-40b2-b64b-4f2d7b616d91.4" configVersion="00d6a7f232b9b640b684175698a8fc1c00000000"/>
+		<Metadata name="Configuration.Конфигурация.ManagedApplicationModule" id="64ca127c-7370-4b21-9cbd-fb1d5b53e65b.6" configVersion="fb9309a000000000000000000000000000000000"/>
 		<Metadata name="Language.Русский" id="129648e0-a492-4829-9b13-09d82bbaf353" configVersion="e043df646287e542ac23d5381e78ad6300000000"/>
 	</ConfigVersions>
 </ConfigDumpInfo>

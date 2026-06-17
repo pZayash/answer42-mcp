@@ -6,8 +6,8 @@ Validates that:
      creates a file IB via ibcmd, loads the built MCPTestManager.cf, and
      starts ibsrv.
   2. `launch_manager(use_thin_client=True)` starts the thin test-manager
-     via `1cv8c /WS"http://..." /TESTMANAGER /C <ws-bridge>` (no /N/P
-     because the infobase has no user accounts).
+     via `1cv8c /WS"http://..." /TESTMANAGER` (no /N/P and no /Execute;
+     the embedded configuration opens MCPTestManager itself).
   3. The manager connects to the WebSocket bridge.
   4. `connect_test_client` launches 1cv8c /TESTCLIENT and connects.
   5. `disconnect_test_client` cleanly tears down.
@@ -55,6 +55,7 @@ async def main() -> None:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
 
     print("=== Starting WebSocket bridge ===", flush=True)
+    server.bridge.request_timeout = 150
     await server.bridge.start()
     print(f"Bridge URL: {server.bridge.url}", flush=True)
 
@@ -81,24 +82,50 @@ async def main() -> None:
         print("=== runtime_status ===", flush=True)
         print(json.dumps(server.runtime_status(), indent=2, ensure_ascii=False), flush=True)
         server.stop_manager()
-        return
+        print("=== exporting autonomous-server event log ===", flush=True)
+        try:
+            eventlog = server.export_eventlog(
+                eventlog_dir=str(SRV_DATA / "log-data"),
+                out_path=str(LOG_DIR / "eventlog_manager_timeout.json"),
+            )
+            print(json.dumps(eventlog, indent=2, ensure_ascii=False), flush=True)
+        except Exception as exc:
+            print(f"eventlog export failed: {exc}", flush=True)
+        raise SystemExit(1)
     print("Manager connected to WS bridge!", flush=True)
 
     ping = await server.bridge.call("ping", {})
     print(f"Ping: {ping}", flush=True)
 
     print("=== connect_test_client (1cv8c /TESTCLIENT against dev-06) ===", flush=True)
-    r = await server.bridge.call(
-        "connect_test_client",
-        {
-            "base_url": "<TARGET_INFOBASE_URL>",
-            "username": "",
-            "password": "***",
-            "port": 1538,
-            "onec_path": "/opt/1cv8/x86_64/8.5.1.1150/1cv8c",
-            "host": "localhost",
-        },
-    )
+    try:
+        r = await server.bridge.call(
+            "connect_test_client",
+            {
+                "base_url": "<TARGET_INFOBASE_URL>",
+                "username": "",
+                "password": "",
+                "port": 1538,
+                "onec_path": "/opt/1cv8/x86_64/8.5.1.1150/1cv8c",
+                "host": "localhost",
+            },
+        )
+    except Exception as exc:
+        print(f"connect_test_client failed: {exc!r}", flush=True)
+        print("=== stop_manager ===", flush=True)
+        stopped = server.stop_manager()
+        print(f"stop_manager: {stopped}", flush=True)
+        print("=== exporting autonomous-server event log ===", flush=True)
+        try:
+            eventlog = server.export_eventlog(
+                eventlog_dir=str(SRV_DATA / "log-data"),
+                out_path=str(LOG_DIR / "eventlog_connect_timeout.json"),
+            )
+            print(json.dumps(eventlog, indent=2, ensure_ascii=False), flush=True)
+        except Exception as eventlog_exc:
+            print(f"eventlog export failed: {eventlog_exc}", flush=True)
+        kill_all_1c()
+        raise
     print(f"connect_test_client: {r}", flush=True)
 
     if isinstance(r, dict) and r.get("connected"):
@@ -117,6 +144,15 @@ async def main() -> None:
     print("=== stop_manager ===", flush=True)
     stopped = server.stop_manager()
     print(f"stop_manager: {stopped}", flush=True)
+
+    try:
+        eventlog = server.export_eventlog(
+            eventlog_dir=str(SRV_DATA / "log-data"),
+            out_path=str(LOG_DIR / "eventlog_e2e.json"),
+        )
+        print(f"eventlog: {eventlog}", flush=True)
+    except Exception as exc:
+        print(f"eventlog export failed: {exc}", flush=True)
 
     kill_all_1c()
 

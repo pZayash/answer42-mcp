@@ -61,17 +61,22 @@ DISPLAY=:99 python3 /home/openclaw/.openclaw/workspace/cc-1c-skills/.claude/skil
 
 ## Запуск менеджера тестирования 1С
 
-Через MCP tool `launch_manager` или вручную:
+Через MCP tool `launch_manager` или вручную по тому же конвейеру:
 
 ```bash
-/opt/1cv8/x86_64/8.5.1.1150/1cv8 ENTERPRISE \
-  /F /path/to/empty-manager-infobase \
-  /TESTMANAGER \
-  /Execute build/MCPTestManager.epf \
-  /C ws://127.0.0.1:8765/bridge
+/opt/1cv8/x86_64/8.5.1.1150/ibcmd infobase create --db-path=/tmp/onec-mcp/ib
+/opt/1cv8/x86_64/8.5.1.1150/ibcmd config load --db-path=/tmp/onec-mcp/ib build/MCPTestManager.cf
+/opt/1cv8/x86_64/8.5.1.1150/ibsrv \
+  --data=/tmp/onec-mcp/ibsrv-data \
+  --address=127.0.0.1 \
+  --port=8314 \
+  --name=mcp
+DISPLAY=:99 /opt/1cv8/x86_64/8.5.1.1150/1cv8c ENTERPRISE \
+  /WS"http://127.0.0.1:8314" \
+  /TESTMANAGER
 ```
 
-Для автономного сервера/служебной базы передавайте актуальные параметры подключения 1С через `launch_manager.extra_args` или запускайте 1С вручную с тем же `/TESTMANAGER /Execute ... /C ...`.
+`/TESTMANAGER` обязателен: это обычный тонкий клиент с включенным режимом управления клиентами тестирования. Обработка `MCPTestManager` встроена в `build/MCPTestManager.cf` и открывается модулем управляемого приложения; `/Execute` в основном сценарии не нужен.
 
 ## Подключение тестируемой базы
 
@@ -87,7 +92,8 @@ MCP tool `connect_test_client` по умолчанию использует те
 ## MCP tools
 
 - `bridge_status()` — статус WebSocket bridge.
-- `launch_manager(onec_path, infobase, processor, extra_args)` — старт менеджера тестирования.
+- `launch_manager(...)` — старт автономного сервера и менеджера тестирования через `1cv8c /WS ... /TESTMANAGER`.
+- `export_eventlog(platform_dir, eventlog_dir, out_path, from_time, to_time, fmt)` — выгрузка журнала регистрации автономного сервера через `ibcmd eventlog export`; использовать для диагностики ошибок запуска/подключения 1С.
 - `connect_test_client(base_url, username, password, port, onec_path)` — подключить тест-клиент.
 - `disconnect_test_client()` — отключить тест-клиент.
 - `active_window()` — активное окно.
