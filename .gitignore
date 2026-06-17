@@ -28,3 +28,5 @@ bsl-json.json
 .planning/autopilot.lock
 .planning/logs/
 .planning/checkpoints/
+
+build/rag/

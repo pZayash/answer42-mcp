@@ -1,0 +1,5 @@
+<Form>
+  <element name="Наименование" title="Наименование" />
+  <element name="ИНН" title="ИНН" />
+  <command name="ФормаЗаписать" title="Записать" />
+</Form>

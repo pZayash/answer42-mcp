@@ -1,0 +1,17 @@
+<MetaDataObject>
+  <Catalog>
+    <name>Партнеры</name>
+    <synonym>Партнеры</synonym>
+    <hierarchical>false</hierarchical>
+    <attributes>
+      <attribute><name>ИНН</name><synonym>ИНН</synonym><type>String</type></attribute>
+      <attribute><name>ЮрФизЛицо</name><synonym>Юр/физ лицо</synonym><type>EnumRef.ЮрФизЛицо</type></attribute>
+    </attributes>
+    <tabularSections>
+      <tabularSection>
+        <name>КонтактнаяИнформация</name>
+        <attributes><attribute><name>Представление</name><type>String</type></attribute></attributes>
+      </tabularSection>
+    </tabularSections>
+  </Catalog>
+</MetaDataObject>

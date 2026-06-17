@@ -16,6 +16,7 @@ from mcp.server.fastmcp import FastMCP
 
 from . import runtime
 from .bridge import OneCBridgeServer
+from .rag import RagService
 
 DEFAULT_TEST_BASE = "<TARGET_INFOBASE_URL>"
 DEFAULT_TEST_USER = ""
@@ -30,6 +31,7 @@ bridge = OneCBridgeServer(
 
 # Single-instance runtime state for the manager process.
 _RUNTIME: runtime.ManagerRuntime | None = None
+_RAG = RagService()
 
 
 def _default_inbox_dir() -> Path:
@@ -57,6 +59,79 @@ def _resolve_paths(
             processor=processor,
         ),
     )
+
+
+# ---------------------------------------------------------------------------
+# 1C configuration RAG / metadata index tools
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def rag_source_detect(path: Annotated[str, "Path to 1C source directory"]) -> dict[str, Any]:
+    """Detect 1C source format: EDT-style or Configurator XML dump."""
+    return _RAG.detect_source(path)
+
+
+@mcp.tool()
+def rag_source_add(
+    name: Annotated[str, "Logical source name, e.g. MS or Platform42"],
+    path: Annotated[str, "Path to 1C source directory"],
+    kind: Annotated[str, "base | extension | configuration | standalone"] = "standalone",
+    format: Annotated[str, "auto | edt | designer_xml"] = "auto",
+) -> dict[str, Any]:
+    """Register or update a 1C source tree for RAG indexing."""
+    return _RAG.add_source(name=name, path=path, kind=kind, format=format)
+
+
+@mcp.tool()
+def rag_sources_list() -> list[dict[str, Any]]:
+    """List registered 1C source trees."""
+    return _RAG.list_sources()
+
+
+@mcp.tool()
+def rag_snapshot_create(
+    name: Annotated[str, "Snapshot name, e.g. MS+Platform42"],
+    base: Annotated[str | None, "Base source name"] = None,
+    extensions: Annotated[list[str] | None, "Extension source names in layer order"] = None,
+    sources: Annotated[list[str] | None, "Standalone ordered source names"] = None,
+) -> dict[str, Any]:
+    """Create/update an effective configuration snapshot from base + extensions."""
+    return _RAG.create_snapshot(name=name, base=base, extensions=extensions, sources=sources)
+
+
+@mcp.tool()
+def rag_snapshots_list() -> list[dict[str, Any]]:
+    """List effective RAG snapshots and their layers."""
+    return _RAG.list_snapshots()
+
+
+@mcp.tool()
+def rag_index_build(
+    snapshot: Annotated[str | None, "Snapshot name/id to index"] = None,
+    source: Annotated[str | None, "Single source name to index"] = None,
+) -> dict[str, Any]:
+    """Build/rebuild the SQLite/FTS RAG index for a source or snapshot."""
+    return _RAG.build_index(snapshot=snapshot, source=source)
+
+
+@mcp.tool()
+def rag_lookup_object(
+    object: Annotated[str, "1C object full name or metadata name"],
+    snapshot: Annotated[str | None, "Optional snapshot name/id"] = None,
+) -> dict[str, Any]:
+    """Look up an indexed 1C metadata object, including navigation, fields and forms."""
+    return _RAG.lookup_object(object=object, snapshot=snapshot)
+
+
+@mcp.tool()
+def rag_query(
+    query: Annotated[str, "Natural-language or metadata search query"],
+    snapshot: Annotated[str | None, "Optional snapshot name/id"] = None,
+    limit: Annotated[int, "Max result count"] = 10,
+) -> dict[str, Any]:
+    """Search business terms and full-text RAG chunks in the local SQLite index."""
+    return _RAG.query(text=query, snapshot=snapshot, limit=limit)
 
 
 @mcp.tool()

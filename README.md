@@ -73,6 +73,7 @@ DISPLAY=:99 python3 /home/openclaw/.openclaw/workspace/cc-1c-skills/.claude/skil
   --name=mcp
 DISPLAY=:99 /opt/1cv8/x86_64/8.5.1.1150/1cv8c ENTERPRISE \
   /WS"http://127.0.0.1:8314" \
+  /Lru /VLru_RU \
   /TESTMANAGER
 ```
 
@@ -101,6 +102,28 @@ MCP tool `connect_test_client` по умолчанию использует те
 - `command_bar()` — командный интерфейс/панель.
 - `click_button(name, search_by_title)` — нажать кнопку.
 - `screenshot(path)` — снять скриншот экрана MCP-хоста.
+
+### RAG/index tools для исходников 1С
+
+MCP также содержит MVP локального SQLite/FTS индекса конфигураций 1С. Индекс поддерживает источники в формате EDT (`*.mdo`) и выгрузки Конфигуратора в XML, а snapshot может состоять из основной конфигурации и нескольких расширений.
+
+- `rag_source_detect(path)` — определить формат исходников (`edt`, `designer_xml`).
+- `rag_source_add(name, path, kind, format)` — зарегистрировать источник (`base`, `extension`, `configuration`, `standalone`).
+- `rag_sources_list()` — список источников.
+- `rag_snapshot_create(name, base, extensions, sources)` — создать effective snapshot из base + extensions или ordered sources.
+- `rag_snapshots_list()` — список snapshot-ов и их слоев.
+- `rag_index_build(snapshot, source)` — построить SQLite/FTS индекс.
+- `rag_lookup_object(object, snapshot)` — найти объект метаданных, навигацию, реквизиты, формы.
+- `rag_query(query, snapshot, limit)` — полнотекстовый поиск по индексу и бизнес-терминам.
+
+CLI-обертка для тех же операций:
+
+```bash
+python3 scripts/rag_cli.py add-source MCP src/cf --kind configuration
+python3 scripts/rag_cli.py snapshot MCP-only --source MCP
+python3 scripts/rag_cli.py build --snapshot MCP-only
+python3 scripts/rag_cli.py lookup Обработка.MCPTestManager --snapshot MCP-only
+```
 
 ## Ограничения и TODO
 
