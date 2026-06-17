@@ -379,6 +379,8 @@ def build_thin_test_manager_argv(
         onec_path,
         "ENTERPRISE",
         f"/WS{ws_url}",
+        "/Lru",
+        "/VLru_RU",
         "/TESTMANAGER",
     ]
 
@@ -428,6 +430,8 @@ def build_test_manager_argv(
         "ENTERPRISE",
         "/F",
         db_path,
+        "/Lru",
+        "/VLru_RU",
         "/TESTMANAGER",
         "/Execute",
         processor,
