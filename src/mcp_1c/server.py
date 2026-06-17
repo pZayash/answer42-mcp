@@ -20,7 +20,7 @@ from .rag import RagService
 from .window_control import maximize_test_client_window as maximize_external_window
 from .recorder import RecordingSession
 
-DEFAULT_TEST_BASE = "<TARGET_INFOBASE_URL>"
+DEFAULT_TEST_BASE = ""
 DEFAULT_TEST_USER = ""
 DEFAULT_TEST_PASSWORD = ""
 
@@ -334,9 +334,9 @@ def stop_manager() -> dict[str, Any]:
 
 @mcp.tool()
 async def connect_test_client(
-    base_url: Annotated[str, "1C infobase URL to open as test client"] = DEFAULT_TEST_BASE,
-    username: Annotated[str, "1C username"] = DEFAULT_TEST_USER,
-    password: Annotated[str, "1C password"] = DEFAULT_TEST_PASSWORD,
+    base_url: Annotated[str, "1C infobase URL to open as test client"] = "",
+    username: Annotated[str, "1C username"] = "",
+    password: Annotated[str, "1C password"] = "",
     port: Annotated[int, "Test client TCP port"] = runtime.DEFAULT_TEST_CLIENT_PORT,
     onec_path: Annotated[str, "Path to 1cv8c executable as seen by 1C manager host"] = "/opt/1cv8/x86_64/8.5.1.1150/1cv8c",
     host: Annotated[str, "Host where the test client runs"] = "localhost",
@@ -348,6 +348,8 @@ async def connect_test_client(
     to keep the child process lifetime tied to the manager. This call
     simply forwards the parameters to the manager.
     """
+    if not base_url or not username:
+        raise ValueError("base_url and username are required; test infobase credentials are not defaulted")
     return await _bridge_call_recorded(
         "connect_test_client",
         {

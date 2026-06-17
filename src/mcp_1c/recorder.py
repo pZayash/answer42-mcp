@@ -53,12 +53,14 @@ class RecordingSession:
             self.events.append(event)
             return event
         slide = self.slides_dir / f"{index:03d}_{safe_name(action)}.svg"
-        slide.write_text(make_slide_svg(frame, action, params, result, index), encoding="utf-8")
+        safe_params = redact(params)
+        safe_result = redact(result)
+        slide.write_text(make_slide_svg(frame, action, safe_params, safe_result, index), encoding="utf-8")
         event = {
             "index": index,
             "action": action,
-            "params": params,
-            "result": summarize(result),
+            "params": safe_params,
+            "result": summarize(safe_result),
             "frame": str(frame),
             "slide": str(slide),
         }
@@ -127,6 +129,23 @@ def first_existing(names: list[str]) -> str:
         if path:
             return path
     return ""
+
+
+SENSITIVE_KEYS = {"password", "pwd", "pass", "secret", "token", "authorization", "auth"}
+
+
+def redact(value: Any) -> Any:
+    if isinstance(value, dict):
+        result = {}
+        for key, item in value.items():
+            if str(key).lower() in SENSITIVE_KEYS or "password" in str(key).lower():
+                result[key] = "***"
+            else:
+                result[key] = redact(item)
+        return result
+    if isinstance(value, list):
+        return [redact(item) for item in value]
+    return value
 
 
 def safe_name(value: str) -> str:
