@@ -350,18 +350,35 @@ async def connect_test_client(
     """
     if not base_url or not username:
         raise ValueError("base_url and username are required; test infobase credentials are not defaulted")
-    return await _bridge_call_recorded(
-        "connect_test_client",
-        {
-            "base_url": base_url,
-            "username": username,
-            "password": password,
-            "port": port,
-            "onec_path": onec_path,
-            "host": host,
-            "extra_args": extra_args,
-        },
-    )
+    params = {
+        "base_url": base_url,
+        "username": username,
+        "password": password,
+        "port": port,
+        "onec_path": onec_path,
+        "host": host,
+        "extra_args": extra_args,
+    }
+    result = await bridge.call("connect_test_client", params)
+
+    # Immediately maximize the test-client OS window after connection, before
+    # recording the tool result. This prevents cropped evidence slides and makes
+    # subsequent table/form operations run against the full-size client window.
+    try:
+        maximize_result = maximize_external_window(
+            title_contains="",
+            display=os.environ.get("DISPLAY") or ":99",
+            width=None,
+            height=None,
+        )
+        if isinstance(result, dict):
+            result["auto_maximize"] = maximize_result
+    except Exception as exc:
+        logging.debug("auto maximize after connect_test_client failed: %s", exc)
+        if isinstance(result, dict):
+            result["auto_maximize_error"] = str(exc)
+
+    return _record_tool("connect_test_client", params, result)
 
 
 @mcp.tool()
@@ -454,8 +471,15 @@ async def activate_object(
 
 
 @mcp.tool()
-async def execute_window_command(command: Annotated[str, "Command name to execute in the active window"]) -> Any:
-    """Execute a command in the active 1C test client window."""
+async def execute_window_command(command: Annotated[str, "Explicit 1C navigation link, e.g. e1cib/list/..."]) -> Any:
+    """Execute an explicit 1C navigation link in the active test-client window.
+
+    This tool intentionally rejects arbitrary form command names such as
+    `ФормаНайти` or `СледующаяСтрока`. Use first-class MCP tools for form
+    actions, table navigation, search/settings, and dynamic-list operations.
+    """
+    if not command.startswith("e1cib/"):
+        raise ValueError(f"execute_window_command accepts only explicit e1cib/... navigation links; rejected: {command}")
     return await _bridge_call_recorded("execute_window_command", {"command": command})
 
 
@@ -483,6 +507,17 @@ async def table_selected_rows(
 ) -> Any:
     """Return selected rows of a tested table as key/value text mappings."""
     return await _bridge_call_recorded("table_selected_rows", {"name": name, "title": title, "max_depth": max_depth})
+
+
+@mcp.tool()
+async def table_cell_text(
+    cell: Annotated[str, "Column name or index; empty returns current cell"] = "",
+    name: Annotated[str, "Table technical name"] = "",
+    title: Annotated[str, "Table visible title"] = "",
+    max_depth: Annotated[int, "Maximum search depth"] = 8,
+) -> Any:
+    """Return cell text from a tested table via GetCellText()."""
+    return await _bridge_call_recorded("table_cell_text", {"name": name, "title": title, "cell": cell, "max_depth": max_depth})
 
 
 @mcp.tool()
@@ -594,6 +629,31 @@ async def table_goto_row(
 
 
 @mcp.tool()
+async def table_move_row(
+    direction: Annotated[str, "first | last | next | previous | expand | collapse | level_down | level_up"] = "next",
+    steps: Annotated[int, "Number of row moves"] = 1,
+    name: Annotated[str, "Table technical name"] = "",
+    title: Annotated[str, "Table visible title"] = "",
+    max_depth: Annotated[int, "Maximum search depth"] = 8,
+) -> Any:
+    """Move current row using official test-client table navigation methods."""
+    return await _bridge_call_recorded(
+        "table_move_row",
+        {"name": name, "title": title, "direction": direction, "steps": steps, "max_depth": max_depth},
+    )
+
+
+@mcp.tool()
+async def table_add_row(
+    name: Annotated[str, "Table technical name"] = "",
+    title: Annotated[str, "Table visible title"] = "",
+    max_depth: Annotated[int, "Maximum UI search depth"] = 8,
+) -> Any:
+    """Add a row to the active tested table via the 1C test-client API (Insert / plus)."""
+    return await _bridge_call_recorded("table_add_row", {"name": name, "title": title, "max_depth": max_depth})
+
+
+@mcp.tool()
 async def table_set_field(
     table: Annotated[str, "Table technical name"],
     field: Annotated[str, "Column field technical name or title"],
@@ -625,36 +685,36 @@ async def dynamic_list_set_order(
 
 @mcp.tool()
 async def dynamic_list_output(
-    command: Annotated[str, "Optional exact 1C command name; empty tries common Вывести список names"] = "",
+    button: Annotated[str, "Optional exact 1C button name/title; empty tries common Вывести список buttons"] = "",
     wait_seconds: Annotated[int, "Seconds to wait for the tabular document form"] = 2,
     max_depth: Annotated[int, "Maximum UI search depth"] = 8,
 ) -> Any:
-    """Run dynamic list 'Вывести список' and return detected tabular document(s), including text when possible."""
-    return await _bridge_call_recorded("dynamic_list_output", {"command": command, "wait_seconds": wait_seconds, "max_depth": max_depth})
+    """Press dynamic list 'Вывести список' button and return detected tabular document(s), including text when possible."""
+    return await _bridge_call_recorded("dynamic_list_output", {"button": button, "wait_seconds": wait_seconds, "max_depth": max_depth})
 
 
 @mcp.tool()
 async def dynamic_list_open_settings(
-    command: Annotated[str, "Optional exact 1C command name; empty tries common Настроить список names"] = "",
+    button: Annotated[str, "Optional exact 1C button name/title; empty tries common Настроить список buttons"] = "",
 ) -> Any:
     """Open dynamic-list settings (filter/order/conditional formatting/grouping) via 'Настроить список'."""
-    return await _bridge_call_recorded("dynamic_list_open_settings", {"command": command})
+    return await _bridge_call_recorded("dynamic_list_open_settings", {"button": button})
 
 
 @mcp.tool()
 async def dynamic_list_clear_settings(
-    command: Annotated[str, "Optional exact 1C command name; empty tries common reset/clear settings names"] = "",
+    button: Annotated[str, "Optional exact 1C button name/title; empty tries common reset/clear settings buttons"] = "",
 ) -> Any:
     """Quickly reset/clear dynamic-list filter/order/conditional formatting/grouping settings."""
-    return await _bridge_call_recorded("dynamic_list_clear_settings", {"command": command})
+    return await _bridge_call_recorded("dynamic_list_clear_settings", {"button": button})
 
 
 @mcp.tool()
 async def dynamic_list_open_form_settings(
-    command: Annotated[str, "Optional exact 1C command name; empty tries Изменить форму names"] = "",
+    button: Annotated[str, "Optional exact 1C button name/title; empty tries Изменить форму buttons"] = "",
 ) -> Any:
     """Open form customization via 'Изменить форму'."""
-    return await _bridge_call_recorded("dynamic_list_open_form_settings", {"command": command})
+    return await _bridge_call_recorded("dynamic_list_open_form_settings", {"button": button})
 
 
 @mcp.tool()

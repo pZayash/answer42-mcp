@@ -111,3 +111,51 @@ def test_index_register_roles_and_dcs_fields(tmp_path: Path):
     fields = {f["data_path"]: f for f in report["data_composition_fields"]}
     assert fields["Статус"]["title"] == "Статус объекта"
     assert fields["Длительность"]["expression"] == 'РазностьДат(Начало, Конец, "СЕКУНДА")'
+
+
+def test_index_embedded_dynamic_list_fields_from_form(tmp_path: Path):
+    root = tmp_path / "src"
+    (root / "Configuration").mkdir(parents=True)
+    (root / "Configuration" / "Configuration.mdo").write_text(
+        "<MetaDataObject><Configuration><name>Test</name></Configuration></MetaDataObject>",
+        encoding="utf-8",
+    )
+    cat_dir = root / "Catalogs" / "Пользователи"
+    (cat_dir / "Forms" / "ФормаСписка" / "Ext").mkdir(parents=True)
+    (cat_dir / "Пользователи.mdo").write_text(
+        "<MetaDataObject><Catalog><name>Пользователи</name></Catalog></MetaDataObject>",
+        encoding="utf-8",
+    )
+    (cat_dir / "Forms" / "ФормаСписка" / "Ext" / "Form.xml").write_text(
+        dedent(
+            """
+            <form:Form xmlns:form="http://g5.1c.ru/v8/dt/form" xmlns:schema="http://g5.1c.ru/v8/dt/data-composition-system/schema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+              <attributes xsi:type="form:DynamicListExtInfo">
+                <name>Список</name>
+                <extInfo>
+                  <fields xsi:type="schema:DataCompositionSchemaDataSetField">
+                    <dataPath>Ссылка</dataPath>
+                    <field>Ссылка</field>
+                  </fields>
+                  <fields xsi:type="schema:DataCompositionSchemaDataSetField">
+                    <dataPath>КонтактнаяИнформация</dataPath>
+                    <field>КонтактнаяИнформация</field>
+                  </fields>
+                </extInfo>
+              </attributes>
+            </form:Form>
+            """
+        ).strip(),
+        encoding="utf-8",
+    )
+
+    svc = RagService(tmp_path / "rag.sqlite")
+    svc.add_source("SRC", str(root), kind="configuration")
+    svc.create_snapshot("SRC-only", sources=["SRC"])
+    result = svc.build_index(snapshot="SRC-only")
+    assert result["data_composition_fields"] == 2
+
+    obj = svc.lookup_object("Справочник.Пользователи", snapshot="SRC-only")["matches"][0]
+    fields = {f["data_path"]: f for f in obj["data_composition_fields"]}
+    assert fields["Ссылка"]["schema_name"] == "ФормаСписка"
+    assert fields["КонтактнаяИнформация"]["source_path"].endswith("Form.xml")

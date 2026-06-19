@@ -259,6 +259,7 @@ def _extract_forms(parsed: ParsedSource, object_dir: Path, full: str) -> None:
             root = _xml_root(form_xml)
             if root is not None:
                 _extract_form_elements(parsed, root, full, form_name, form_xml)
+                _extract_embedded_data_composition_fields(parsed, root, full, form_name, form_xml)
 
 
 def _extract_form_elements(parsed: ParsedSource, root: ET.Element, full: str, form_name: str, source_path: Path) -> None:
@@ -281,6 +282,38 @@ def _extract_form_elements(parsed: ParsedSource, root: ET.Element, full: str, fo
                 elem.attrib.get("commandName") or _first_text(elem, ["commandName", "CommandName"]),
                 None,
                 str(source_path),
+            )
+        )
+
+
+def _extract_embedded_data_composition_fields(parsed: ParsedSource, root: ET.Element, full: str, form_name: str, source_path: Path) -> None:
+    dataset_name: str | None = None
+    for elem in root.iter():
+        tag = _strip_ns(elem.tag)
+        low = tag.lower()
+        if low in {"dataset", "datasetquery"}:
+            dataset_name = _direct_text(elem, ["name", "Name"]) or dataset_name
+        if low not in {"fields", "field", "calculatedfield", "totalfield"}:
+            continue
+        data_path = _direct_text(elem, ["dataPath", "DataPath"]) or _direct_text(elem, ["name", "Name"])
+        field = _direct_text(elem, ["field", "Field"])
+        title_elem = next((child for child in list(elem) if _strip_ns(child.tag).lower() in {"title", "caption"}), None)
+        title = _local_string_text(title_elem)
+        expression = _direct_text(elem, ["expression", "Expression"])
+        if not data_path and not field and not title:
+            continue
+        parsed.data_composition_fields.append(
+            DataCompositionField(
+                full,
+                form_name,
+                data_path or field or title or "",
+                field,
+                title,
+                expression,
+                dataset_name,
+                tag,
+                str(source_path),
+                {"embedded_in_form": True},
             )
         )
 
