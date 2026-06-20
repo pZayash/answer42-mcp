@@ -359,11 +359,31 @@ async def connect_test_client(
         "host": host,
         "extra_args": extra_args,
     }
-    result = await bridge.call("connect_test_client", params)
+    result: Any
+    try:
+        result = await bridge.call("connect_test_client", params)
+    except Exception as exc:
+        # The manager-side command can report an empty/late error while the
+        # /TESTCLIENT process has already opened and connected. Still try to
+        # maximize the OS window before propagating the original failure, so a
+        # retry or already-connected client does not leave cropped evidence.
+        try:
+            maximize_external_window(
+                title_contains="",
+                display=os.environ.get("DISPLAY") or ":99",
+                width=None,
+                height=None,
+            )
+        except Exception as maximize_exc:
+            logging.debug("auto maximize after failed connect_test_client failed: %s", maximize_exc)
+        raise exc
 
-    # Immediately maximize the test-client OS window after connection, before
-    # recording the tool result. This prevents cropped evidence slides and makes
-    # subsequent table/form operations run against the full-size client window.
+    _auto_maximize_test_client_result(result)
+    return _record_tool("connect_test_client", params, result)
+
+
+def _auto_maximize_test_client_result(result: Any) -> None:
+    """Maximize the 1C test-client OS window and attach diagnostics to result."""
     try:
         maximize_result = maximize_external_window(
             title_contains="",
@@ -377,8 +397,6 @@ async def connect_test_client(
         logging.debug("auto maximize after connect_test_client failed: %s", exc)
         if isinstance(result, dict):
             result["auto_maximize_error"] = str(exc)
-
-    return _record_tool("connect_test_client", params, result)
 
 
 @mcp.tool()
