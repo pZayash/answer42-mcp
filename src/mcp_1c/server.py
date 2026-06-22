@@ -123,7 +123,7 @@ async def _bridge_call_recorded(
     params: dict[str, Any],
 ) -> Any:
     sess = _session(session_id)
-    result = await sess.bridge_call(method, params)
+    result = await sess.bridge.call(method, params)
     return _record_tool(session_id, method, params, result)
 
 
@@ -256,7 +256,7 @@ def bridge_status(*,
 ) -> dict[str, Any]:
     """Return WebSocket bridge status and URL for the 1C manager processor."""
     sess = _session(session_id)
-    return sess.bridge_status()
+    return sess.bridge.status()
 
 
 @mcp.tool()
@@ -325,7 +325,7 @@ async def start_session(
         data_dir=data_dir, base_url=base_url, username=username, password=password
     )
     sess.xvfb_process = runtime.start_xvfb(display)
-    await sess.bridge_start()
+    await sess.bridge.start()
     logging.info("start_session: bridge listening on ws://127.0.0.1:%s", ws_port)
 
     pipeline_info: dict[str, Any] = {}
@@ -358,7 +358,7 @@ async def start_session(
         ws_url = runtime.build_thin_client_ws_url(ibsrv_address, ibsrv_port)
         manager_proc = runtime.start_thin_test_manager(
             onec_path=sess.onec_thin, ws_url=ws_url,
-            websocket_url=sess.bridge_url, log_dir=log_dir, display=display,
+            websocket_url=sess.bridge.url, log_dir=log_dir, display=display,
         )
         runtime_state.manager_process = manager_proc
         sess.runtime = runtime_state
@@ -370,7 +370,7 @@ async def start_session(
         "platform_dir": str(platform_dir), "display": display,
         "ws_port": ws_port, "ibsrv_port": ibsrv_port,
         "testclient_port": testclient_port, "data_dir": str(data_dir),
-        "bridge_url": sess.bridge_url, **pipeline_info,
+        "bridge_url": sess.bridge.url, **pipeline_info,
     }
 
 
@@ -390,7 +390,7 @@ async def stop_session(
         runtime.kill_process(sess.runtime.server_process, "ibsrv")
         stopped.append("pipeline")
     try:
-        await sess.bridge_stop()
+        await sess.bridge.stop()
         stopped.append("bridge")
     except Exception as exc:
         logging.warning("stop_session: bridge.stop failed: %s", exc)
@@ -453,10 +453,10 @@ def launch_manager(
 
     if use_thin_client:
         ws_url = runtime.build_thin_client_ws_url(ibsrv_address, port)
-        argv = runtime.build_thin_test_manager_argv(onec_thin, ws_url, sess.bridge_url)
+        argv = runtime.build_thin_test_manager_argv(onec_thin, ws_url, sess.bridge.url)
         manager_proc = runtime.start_thin_test_manager(
             onec_path=onec_thin, ws_url=ws_url,
-            websocket_url=sess.bridge_url, log_dir=log_dir, display=sess.display,
+            websocket_url=sess.bridge.url, log_dir=log_dir, display=sess.display,
         )
     else:
         raise ValueError("Thick-client fallback removed; use thin /WS /TESTMANAGER")
@@ -467,7 +467,7 @@ def launch_manager(
     sess.runtime = runtime_state
     return {
         "pid": manager_proc.pid, "argv": argv,
-        "websocket_url": sess.bridge_url, "ws_url": ws_url, "log_dir": str(log_dir),
+        "websocket_url": sess.bridge.url, "ws_url": ws_url, "log_dir": str(log_dir),
     }
 
 
@@ -540,7 +540,7 @@ async def connect_test_client(
               "port": r_port, "onec_path": r_onec, "host": host, "extra_args": extra_args}
     result: Any
     try:
-        result = await sess.bridge_call("connect_test_client", params)
+        result = await sess.bridge.call("connect_test_client", params)
     except Exception as exc:
         _auto_maximize_on_error(sess.display)
         raise exc
@@ -1230,7 +1230,7 @@ async def _run() -> None:
                 runtime.kill_process(sess.runtime.manager_process, "test-manager")
                 runtime.kill_process(sess.runtime.server_process, "ibsrv")
             try:
-                await sess.bridge_stop()
+                await sess.bridge.stop()
             except Exception:
                 pass
             runtime.stop_xvfb(sess.xvfb_process)
