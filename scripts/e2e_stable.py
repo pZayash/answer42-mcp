@@ -1,3 +1,16 @@
+#!/usr/bin/env python3
+"""E2E test of the one-shot session API.
+
+Validates that:
+  1. `start_session(start_pipeline=True)` creates Xvfb, picks ports,
+     creates file IB, loads MCPTestManager.cf, starts ibsrv, starts
+     thin test-manager.
+  2. The manager connects to the WebSocket bridge.
+  3. `connect_test_client` launches 1cv8c /TESTCLIENT and connects.
+  4. `disconnect_test_client` cleanly tears down.
+  5. `stop_session` tears down everything.
+"""
+
 import asyncio
 import json
 import os
@@ -21,8 +34,12 @@ def kill_all_1c() -> None:
 async def wait_for_ws(session_id: str, timeout: float = 30.0) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if server.bridge_status(session_id=session_id)["connected"]:
-            return True
+        try:
+            st = server.bridge_status(session_id=session_id)
+            if st.get("connected"):
+                return True
+        except Exception:
+            pass
         await asyncio.sleep(0.5)
     return False
 
@@ -31,17 +48,12 @@ async def main() -> None:
     print("=== Cleaning up any prior 1C/Xvfb processes ===", flush=True)
     kill_all_1c()
 
-    print("=== Starting WebSocket bridge ===", flush=True)
-    server.bridge.request_timeout = 150
-    await server.bridge.start()
-    print(f"Bridge URL: {server.bridge.url}", flush=True)
-
     print("=== start_session (one-shot: Xvfb + free ports + version detection + ibsrv + test-manager) ===", flush=True)
     result = await server.start_session(
-        base_url=os.environ["TARGET_INFOBASE_URL"],
-        username=os.environ["TARGET_USERNAME"],
+        base_url=os.environ.get("TARGET_INFOBASE_URL", ""),
+        username=os.environ.get("TARGET_USERNAME", ""),
         password=os.environ.get("TARGET_PASSWORD", ""),
-        version="8.5.1.1150",  # опционально, авто-детект из base_url
+        version="8.5.1.1150",
         session_id="e2e-stable",
         start_pipeline=True,
     )
@@ -52,7 +64,11 @@ async def main() -> None:
     if not await wait_for_ws(session_id, 30):
         print("ERROR: manager did not connect to WS bridge within 30s", flush=True)
         print("=== runtime_status ===", flush=True)
-        print(json.dumps(server.runtime_status(session_id=session_id), indent=2, ensure_ascii=False), flush=True)
+        try:
+            print(json.dumps(server.runtime_status(session_id=session_id), indent=2, ensure_ascii=False), flush=True)
+        except Exception as exc:
+            print(f"runtime_status failed: {exc}", flush=True)
+        print("=== stop_session ===", flush=True)
         await server.stop_session(session_id=session_id)
         print("=== exporting autonomous-server event log ===", flush=True)
         try:
@@ -67,7 +83,9 @@ async def main() -> None:
         raise SystemExit(1)
     print("Manager connected to WS bridge!", flush=True)
 
-    ping = await server.bridge_call("ping", {}, session_id=session_id)
+    # Ping via bridge
+    sess = server._session(session_id)
+    ping = await sess.bridge.call("ping", {})
     print(f"Ping: {ping}", flush=True)
 
     print("=== connect_test_client (1cv8c /TESTCLIENT against target infobase) ===", flush=True)
@@ -101,14 +119,14 @@ async def main() -> None:
     print(f"connect_test_client: {r}", flush=True)
 
     if isinstance(r, dict) and r.get("connected"):
-        w = await server.bridge_call("active_window", {}, session_id=session_id)
+        w = await sess.bridge.call("active_window", {})
         print(f"Active window: {w}", flush=True)
     elif isinstance(r, dict) and r.get("error"):
         print(f"Test client connect error: {r}", flush=True)
 
     print("=== disconnect_test_client ===", flush=True)
     try:
-        d = await server.bridge_call("disconnect_test_client", {}, session_id=session_id)
+        d = await sess.bridge.call("disconnect_test_client", {})
         print(f"disconnect: {d}", flush=True)
     except Exception as exc:
         print(f"disconnect error (ignored): {exc}", flush=True)

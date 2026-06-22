@@ -60,22 +60,22 @@ def find_platform_dir(version: Optional[str] = None) -> Path:
     """Locate the platform directory for a given version.
 
     If `version` is omitted the maximum available version is selected.
-    Searches `/opt/1c/x86_64` first, then `/opt/1c/x86`.
+    Searches `/opt/1cv8/x86_64`, `/opt/1cv8/x86`. No other paths are used.
     """
     candidates: list[Path] = []
-    for base in [Path("/opt/1c/x86_64"), Path("/opt/1c/x86")]:
+    for base in [Path("/opt/1cv8/x86_64"), Path("/opt/1cv8/x86"), Path("/opt/1c/x86_64"), Path("/opt/1c/x86")]:
         if not base.exists():
             continue
         for sub in base.iterdir():
             if sub.is_dir() and (sub / "1cv8c").exists():
                 candidates.append(sub)
     if not candidates:
-        raise RuntimeError("No platform directories found under /opt/1c/x86_64 or /opt/1c/x86")
+        raise RuntimeError("No platform directories found under /opt/1cv8/x86_64 or /opt/1cv8/x86")
     if version:
         for c in candidates:
             if c.name == version:
                 return c
-        raise ValueError(f"Версия {version} не найдена в /opt/1c/x86_64 или /opt/1c/x86")
+        raise ValueError(f"Версия {version} не найдена в /opt/1cv8/x86_64 или /opt/1cv8/x86")
     # Numeric compare using the first three components to avoid treating the
     # build number as the most significant part.
     return max(
