@@ -96,14 +96,14 @@ async def main() -> None:
     ping = await server.bridge.call("ping", {})
     print(f"Ping: {ping}", flush=True)
 
-    print("=== connect_test_client (1cv8c /TESTCLIENT against dev-06) ===", flush=True)
+    print("=== connect_test_client (1cv8c /TESTCLIENT against target infobase) ===", flush=True)
     try:
         r = await server.bridge.call(
             "connect_test_client",
             {
-                "base_url": "<TARGET_INFOBASE_URL>",
-                "username": "",
-                "password": "",
+                "base_url": os.environ["TARGET_INFOBASE_URL"],
+                "username": os.environ["TARGET_USERNAME"],
+                "password": os.environ.get("TARGET_PASSWORD", ""),
                 "port": 1538,
                 "onec_path": "/opt/1cv8/x86_64/8.5.1.1150/1cv8c",
                 "host": "localhost",

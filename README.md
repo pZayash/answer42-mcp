@@ -8,6 +8,41 @@ MCP-мост к **1С:Предприятию** через клиент тест�
 2. **Runtime diagnostics** — выгрузка журнала регистрации автономного сервера через `ibcmd eventlog export`.
 3. **RAG metadata index** — локальный SQLite/FTS индекс конфигураций 1С (EDT, XML-выгрузка Конфигуратора, base + extensions).
 
+## Быстрый старт
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -e '.[screenshot,dev,window-control]'
+
+# Запуск MCP-сервера (transport: stdio)
+testclient-bridge --ws-host 127.0.0.1 --ws-port 8765
+```
+
+WebSocket URL для обработки 1С:
+
+```text
+ws://127.0.0.1:8765/bridge
+```
+
+## Требования
+
+- Python 3.11+
+- Пакеты: `mcp`, `websockets`, `pydantic`; для скриншотов — `mss`; для управления OS-окном — `python-xlib`/`wmctrl`/`xdotool`
+- 1С:Предприятие 8.5+ с поддержкой WebSocket-клиентов и режима тестирования
+- GUI/Xvfb для headless-сервера
+
+## Безопасность стендов и учётных данных
+
+В репозитории не должно быть реальных URL стендов, логинов или паролей. Все параметры целевой базы передаются явно при вызове `connect_test_client` или через локальные переменные окружения/секретное хранилище:
+
+- `TARGET_INFOBASE_URL` — URL тестируемой информационной базы;
+- `TARGET_USERNAME` — пользователь тестируемой базы;
+- `TARGET_PASSWORD` — пароль;
+- `TARGET_TESTCLIENT_PORT` — порт клиента тестирования, по умолчанию `1538`.
+
+Примеры в документации используют только плейсхолдеры (`<TARGET_INFOBASE_URL>`, `<USERNAME>`, `<PASSWORD>`). Перед публикацией артефактов записи проверяйте, что параметры вызовов заредактированы: recorder маскирует ключи вроде `password`, но URL и логин тоже не должны попадать в публичные материалы.
+
 ## Архитектура
 
 ```text
@@ -27,37 +62,10 @@ WebSocket server (ws://127.0.0.1:8765/bridge)
 1C test client (/TESTCLIENT -TPort1538)
         │
         ▼
-Target infobase, e.g. <TARGET_INFOBASE_URL>
+Target infobase (<TARGET_INFOBASE_URL>)
 ```
 
 Подробнее: [`docs/architecture.md`](docs/architecture.md).
-
-## Требования
-
-- Python 3.11+
-- Пакеты: `mcp`, `websockets`, `pydantic`; для скриншотов — `mss`
-- 1С:Предприятие 8.5+ с поддержкой WebSocket-клиентов и режима тестирования
-- GUI/Xvfb для headless-сервера
-
-## Установка
-
-```bash
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -e '.[screenshot,dev]'
-```
-
-## Запуск MCP-сервера
-
-```bash
-testclient-bridge --ws-host 127.0.0.1 --ws-port 8765
-```
-
-MCP transport — stdio. WebSocket URL для обработки 1С:
-
-```text
-ws://127.0.0.1:8765/bridge
-```
 
 ## Сборка конфигурации 1С
 
@@ -90,12 +98,17 @@ DISPLAY=:99 /opt/1cv8/x86_64/8.5.1.1150/1cv8c ENTERPRISE \
 
 ## Подключение тестируемой базы
 
-MCP tool `connect_test_client`:
+MCP tool `connect_test_client` требует явные параметры целевой базы. Значения не дефолтятся в коде и не должны коммититься:
 
-- URL: `<TARGET_INFOBASE_URL>`
-- user: `<USERNAME>`
-- password: `<PASSWORD>`
-- test client port: `1538`
+```text
+connect_test_client(
+  base_url="<TARGET_INFOBASE_URL>",
+  username="<USERNAME>",
+  password="<PASSWORD>",
+  port=1538,
+  onec_path="/opt/1cv8/x86_64/8.5.1.1150/1cv8c"
+)
+```
 
 ## MCP tools
 
@@ -145,6 +158,25 @@ MCP tool `connect_test_client`:
 - `choose_field_first_row(field_name)` — выбрать первую строку списка.
 - `choose_current_row()` — выбрать текущую строку.
 
+### Dynamic list tools
+
+- `dynamic_list_set_order` — сортировка по видимому заголовку колонки (`УстановитьПорядок(<ЗаголовокКолонки>)`).
+- `dynamic_list_output` — команда **Вывести список** с возвратом текста табличного документа, когда он доступен.
+- `dynamic_list_open_settings` — открыть **Настроить список**.
+- `dynamic_list_clear_settings` — сбросить настройки динамического списка.
+- `dynamic_list_open_form_settings` — открыть **Изменить форму**.
+
+### Evidence recording
+
+Use `recording_start(output_dir, display, window)` before a workflow. Recorded tool calls create screenshots and annotated slides. Finish with `recording_stop()` to build:
+
+- `manifest.json`
+- `recording.gif`
+- `recording.mp4`
+- `recording.pdf` when ImageMagick is installed
+
+For OS window maximization use `maximize_test_client_external_window()`. It tries `wmctrl`, then `xdotool`, then the built-in `python-xlib` fallback.
+
 ### RAG / metadata index
 
 - `rag_source_detect(path)` — определить формат исходников.
@@ -156,7 +188,7 @@ MCP tool `connect_test_client`:
 - `rag_lookup_object(object, snapshot)` — найти объект метаданных.
 - `rag_query(query, snapshot, limit)` — полнотекстовый поиск.
 
-### CLI-обёртка RAG
+CLI-обёртка:
 
 ```bash
 python3 scripts/rag_cli.py add-source MS /path/to/MS/src --kind base
@@ -176,26 +208,3 @@ python3 scripts/rag_cli.py lookup РегистрСведений.Резервн�
 ## Лицензия
 
 MIT
-
-### Dynamic list tools
-
-`testclient-bridge` includes tools for dynamic lists:
-
-- `dynamic_list_set_order` — sort by visible column title (`УстановитьПорядок(<ЗаголовокКолонки>)`);
-- `dynamic_list_output` — run **Вывести список** and return the produced tabular document text when available;
-- `dynamic_list_open_settings` — open **Настроить список** (filters, order, conditional formatting, grouping);
-- `dynamic_list_clear_settings` — reset/clear dynamic-list settings;
-- `dynamic_list_open_form_settings` — open **Изменить форму**.
-
-### Evidence recording
-
-Use `recording_start(output_dir, display, window)` before a workflow. Recorded tool calls create
-screenshots and annotated slides. Finish with `recording_stop()` to build:
-
-- `manifest.json`
-- `recording.gif`
-- `recording.mp4`
-- `recording.pdf` when ImageMagick is installed
-
-For OS window maximization use `maximize_test_client_external_window()`. It tries `wmctrl`, then
-`xdotool`, then the built-in `python-xlib` fallback.

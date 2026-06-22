@@ -20,7 +20,7 @@ description: "Работа с MCP testclient-bridge для 1С UI automation"
 1. Проверь, что MCP-сервер `testclient-bridge` установлен и доступен.
 2. Запусти инфраструктуру через MCP tool `launch_manager`.
 3. Проверь `bridge_status` и `runtime_status`.
-4. Подключи целевую базу через `connect_test_client`; окно тест-клиента максимизируется автоматически внутри tool-call.
+4. Подключи целевую базу через `connect_test_client`, передавая URL/логин/пароль из защищённого источника, а не из репозитория; окно тест-клиента максимизируется автоматически внутри tool-call.
 5. Работай только через tools testclient-bridge; не кликай X11 руками.
 6. Скриншоты допускаются системно через `screenshot`/`recording_*`.
 7. При ошибках 1С выгружай журнал через `export_eventlog`.
@@ -46,8 +46,8 @@ launch_manager(platform_dir="/opt/1cv8/x86_64/8.5.1.1150")
 bridge_status()
 connect_test_client(
   base_url="<TARGET_INFOBASE_URL>",
-  username="",
-  password="***",
+  username="<USERNAME>",
+  password="<PASSWORD>",
   port=1538
 )
 active_window()
