@@ -28,13 +28,16 @@ from typing import Any
 LOGGER = logging.getLogger(__name__)
 
 DEFAULT_ONEC_VERSION = "8.5.1.1150"
+DEFAULT_WS_PORT = 8765
+DEFAULT_IBSRV_HTTP_PORT = 8314
+DEFAULT_TEST_CLIENT_PORT = 1538
+DEFAULT_DISPLAY_START = 99
+DEFAULT_DISPLAY_RES = "1280x1024x24"
 DEFAULT_PLATFORM_DIR = f"/opt/1cv8/x86_64/{DEFAULT_ONEC_VERSION}"
 DEFAULT_THICK_CLIENT = f"{DEFAULT_PLATFORM_DIR}/1cv8"
 DEFAULT_THIN_CLIENT = f"{DEFAULT_PLATFORM_DIR}/1cv8c"
 DEFAULT_IBCMD = f"{DEFAULT_PLATFORM_DIR}/ibcmd"
 DEFAULT_IBSRV = f"{DEFAULT_PLATFORM_DIR}/ibsrv"
-DEFAULT_TEST_CLIENT_PORT = 1538
-DEFAULT_IBSRV_HTTP_PORT = 8314
 DEFAULT_IB_PATH = "/tmp/onec-mcp/ib"
 DEFAULT_IBSRV_DATA = "/tmp/onec-mcp/ibsrv-data"
 DEFAULT_CF_BUILT = "build/MCPTestManager.cf"
@@ -91,6 +94,52 @@ class ManagerRuntime:
     extra: dict[str, Any] = field(default_factory=dict)
 
 
+def find_free_display(start: int = DEFAULT_DISPLAY_START) -> str:
+    """Find the first free Xvfb display starting from :99."""
+    for n in range(start, 200):
+        path = f"/tmp/.X11-unix/X{n}"
+        if not os.path.exists(path):
+            return f":{n}"
+    raise RuntimeError("No free X display found")
+
+
+def find_free_port(start: int = DEFAULT_WS_PORT, end: int | None = None) -> int:
+    """Find a free TCP port in the range start..start+500 (or start..end)."""
+    end = end or start + 500
+    for port in range(start, end):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind(("", port))
+                return port
+            except OSError:
+                continue
+    raise RuntimeError(f"No free port found in range {start}..{end}")
+
+
+def start_xvfb(display: str, resolution: str = DEFAULT_DISPLAY_RES) -> subprocess.Popen:
+    """Start Xvfb for the given display and return the Popen handle."""
+    num = display.lstrip(":")
+    xvfb_bin = shutil.which("Xvfb") or "/usr/bin/Xvfb"
+    if not Path(xvfb_bin).exists():
+        raise FileNotFoundError("Xvfb not found; install it to run headless sessions")
+    proc = subprocess.Popen(
+        [xvfb_bin, display, "-screen", "0", resolution, "-ac", "+extension", "GLX", "+render", "-noreset"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    # Give Xvfb a moment; caller should poll DISPLAY if needed.
+    time.sleep(0.5)
+    LOGGER.info("Xvfb started on display %s (pid=%s)", display, proc.pid)
+    return proc
+
+
+def stop_xvfb(proc: subprocess.Popen | None) -> None:
+    """Stop the Xvfb process started by start_xvfb."""
+    kill_process(proc, "Xvfb")
+
+
 def is_port_listening(host: str, port: int, timeout: float = 1.0) -> bool:
     """Return True if something accepts TCP connections on host:port."""
     try:
@@ -114,17 +163,24 @@ def kill_process(proc: subprocess.Popen | None, label: str) -> None:
     """Terminate a subprocess, escalating to SIGKILL if needed."""
     if proc is None:
         return
-    if proc.poll() is not None:
+    try:
+        if proc.poll() is not None:
+            return
+    except Exception:
         return
     try:
         os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
     except ProcessLookupError:
         return
+    except Exception:
+        pass
     try:
         proc.wait(timeout=5)
         LOGGER.info("Stopped %s (pid=%s) via SIGTERM", label, proc.pid)
         return
     except subprocess.TimeoutExpired:
+        pass
+    except Exception:
         pass
     try:
         os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
@@ -388,6 +444,7 @@ def start_thin_test_manager(
     ws_url: str,
     websocket_url: str,
     log_dir: Path,
+    display: str = ":99",
 ) -> subprocess.Popen:
     """Start the 1C test-manager (thin client, /WS ws://ibsv) and return Popen."""
     if not Path(onec_path).exists():
@@ -405,7 +462,7 @@ def start_thin_test_manager(
         stderr=log_handle,
         stdin=subprocess.DEVNULL,
         start_new_session=True,
-        env={**os.environ, "DISPLAY": os.environ.get("DISPLAY", ":99")},
+        env={**os.environ, "DISPLAY": display},
     )
     LOGGER.info("Test manager launched (pid=%s); log=%s", proc.pid, log_path)
     return proc

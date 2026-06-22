@@ -1,19 +1,3 @@
-#!/usr/bin/env python3
-"""E2E test of the autonomous-server pipeline (ibcmd infobase create → ibcmd config load MCPTestManager.cf → ibsrv → 1cv8c /WS /TESTMANAGER).
-
-Validates that:
-  1. `launch_manager(create_infobase=True, load_configuration=True, start_standalone=True)`
-     creates a file IB via ibcmd, loads the built MCPTestManager.cf, and
-     starts ibsrv.
-  2. `launch_manager(use_thin_client=True)` starts the thin test-manager
-     via `1cv8c /WS"http://..." /TESTMANAGER` (no /N/P and no /Execute;
-     the embedded configuration opens MCPTestManager itself).
-  3. The manager connects to the WebSocket bridge.
-  4. `connect_test_client` launches 1cv8c /TESTCLIENT and connects.
-  5. `disconnect_test_client` cleanly tears down.
-  6. `stop_manager` tears down manager + ibsrv.
-"""
-
 import asyncio
 import json
 import os
@@ -22,70 +6,60 @@ import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, "/home/openclaw/.openclaw/workspace/ai-sandbox/src")
+sys.path.insert(0, "/home/openclaw/.openclaw/workspace/testclient-bridge/src")
 
 from mcp_1c import server  # noqa: E402
-from mcp_1c import runtime  # noqa: E402
-
-INBOX = Path(os.environ.get("ONEC_MCP_DATA_DIR", "/tmp/onec-mcp"))
-IB_PATH = INBOX / "ib"
-SRV_DATA = INBOX / "ibsrv-data"
-LOG_DIR = INBOX / "logs"
 
 
 def kill_all_1c() -> None:
     subprocess.run(["pkill", "-9", "-f", "1cv8"], check=False)
     subprocess.run(["pkill", "-9", "-f", "ibcmd"], check=False)
+    subprocess.run(["pkill", "-9", "-f", "Xvfb"], check=False)
     time.sleep(1)
 
 
-async def wait_for_ws(timeout: float = 30.0) -> bool:
+async def wait_for_ws(session_id: str, timeout: float = 30.0) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if server.bridge.status()["connected"]:
+        if server.bridge_status(session_id=session_id)["connected"]:
             return True
         await asyncio.sleep(0.5)
     return False
 
 
 async def main() -> None:
-    print("=== Cleaning up any prior 1C processes ===", flush=True)
+    print("=== Cleaning up any prior 1C/Xvfb processes ===", flush=True)
     kill_all_1c()
-    INBOX.mkdir(parents=True, exist_ok=True)
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
 
     print("=== Starting WebSocket bridge ===", flush=True)
     server.bridge.request_timeout = 150
     await server.bridge.start()
     print(f"Bridge URL: {server.bridge.url}", flush=True)
 
-    print("=== launch_manager (ibcmd infobase create → ibcmd config load MCPTestManager.cf → ibsrv → 1cv8c /WS /TESTMANAGER) ===", flush=True)
-    result = server.launch_manager(
-        platform_dir="/opt/1cv8/x86_64/8.5.1.1150",
-        db_path=str(IB_PATH),
-        server_data_dir=str(SRV_DATA),
-        ibsrv_address="127.0.0.1",
-        ibsrv_port=8314,
-        ibsrv_name="mcp",
-        create_infobase=True,
-        load_configuration=True,
-        cf_path=runtime.DEFAULT_CF_BUILT,
-        start_standalone=True,
-        use_thin_client=True,
+    print("=== start_session (one-shot: Xvfb + free ports + version detection + ibsrv + test-manager) ===", flush=True)
+    result = await server.start_session(
+        base_url=os.environ["TARGET_INFOBASE_URL"],
+        username=os.environ["TARGET_USERNAME"],
+        password=os.environ.get("TARGET_PASSWORD", ""),
+        version="8.5.1.1150",  # опционально, авто-детект из base_url
+        session_id="e2e-stable",
+        start_pipeline=True,
     )
     print(json.dumps(result, indent=2, ensure_ascii=False), flush=True)
+    session_id = result["session_id"]
 
     print("=== Waiting for manager to connect to WS bridge ===", flush=True)
-    if not await wait_for_ws(30):
+    if not await wait_for_ws(session_id, 30):
         print("ERROR: manager did not connect to WS bridge within 30s", flush=True)
         print("=== runtime_status ===", flush=True)
-        print(json.dumps(server.runtime_status(), indent=2, ensure_ascii=False), flush=True)
-        server.stop_manager()
+        print(json.dumps(server.runtime_status(session_id=session_id), indent=2, ensure_ascii=False), flush=True)
+        await server.stop_session(session_id=session_id)
         print("=== exporting autonomous-server event log ===", flush=True)
         try:
             eventlog = server.export_eventlog(
-                eventlog_dir=str(SRV_DATA / "log-data"),
-                out_path=str(LOG_DIR / "eventlog_manager_timeout.json"),
+                eventlog_dir=str(Path(result["data_dir"]) / "ibsrv-data" / "log-data"),
+                out_path=str(Path(result["log_dir"]) / "eventlog_manager_timeout.json"),
+                session_id=session_id,
             )
             print(json.dumps(eventlog, indent=2, ensure_ascii=False), flush=True)
         except Exception as exc:
@@ -93,32 +67,31 @@ async def main() -> None:
         raise SystemExit(1)
     print("Manager connected to WS bridge!", flush=True)
 
-    ping = await server.bridge.call("ping", {})
+    ping = await server.bridge_call("ping", {}, session_id=session_id)
     print(f"Ping: {ping}", flush=True)
 
     print("=== connect_test_client (1cv8c /TESTCLIENT against target infobase) ===", flush=True)
     try:
-        r = await server.bridge.call(
-            "connect_test_client",
-            {
-                "base_url": os.environ["TARGET_INFOBASE_URL"],
-                "username": os.environ["TARGET_USERNAME"],
-                "password": os.environ.get("TARGET_PASSWORD", ""),
-                "port": 1538,
-                "onec_path": "/opt/1cv8/x86_64/8.5.1.1150/1cv8c",
-                "host": "localhost",
-            },
+        r = await server.connect_test_client(
+            base_url=os.environ["TARGET_INFOBASE_URL"],
+            username=os.environ["TARGET_USERNAME"],
+            password=os.environ.get("TARGET_PASSWORD", ""),
+            port=result["testclient_port"],
+            onec_path=result["platform_dir"] + "/1cv8c",
+            host="localhost",
+            session_id=session_id,
         )
     except Exception as exc:
         print(f"connect_test_client failed: {exc!r}", flush=True)
-        print("=== stop_manager ===", flush=True)
-        stopped = server.stop_manager()
-        print(f"stop_manager: {stopped}", flush=True)
+        print("=== stop_session ===", flush=True)
+        stopped = await server.stop_session(session_id=session_id)
+        print(f"stop_session: {stopped}", flush=True)
         print("=== exporting autonomous-server event log ===", flush=True)
         try:
             eventlog = server.export_eventlog(
-                eventlog_dir=str(SRV_DATA / "log-data"),
-                out_path=str(LOG_DIR / "eventlog_connect_timeout.json"),
+                eventlog_dir=str(Path(result["data_dir"]) / "ibsrv-data" / "log-data"),
+                out_path=str(Path(result["log_dir"]) / "eventlog_connect_timeout.json"),
+                session_id=session_id,
             )
             print(json.dumps(eventlog, indent=2, ensure_ascii=False), flush=True)
         except Exception as eventlog_exc:
@@ -128,26 +101,27 @@ async def main() -> None:
     print(f"connect_test_client: {r}", flush=True)
 
     if isinstance(r, dict) and r.get("connected"):
-        w = await server.bridge.call("active_window", {})
+        w = await server.bridge_call("active_window", {}, session_id=session_id)
         print(f"Active window: {w}", flush=True)
     elif isinstance(r, dict) and r.get("error"):
         print(f"Test client connect error: {r}", flush=True)
 
     print("=== disconnect_test_client ===", flush=True)
     try:
-        d = await server.bridge.call("disconnect_test_client", {})
+        d = await server.bridge_call("disconnect_test_client", {}, session_id=session_id)
         print(f"disconnect: {d}", flush=True)
     except Exception as exc:
         print(f"disconnect error (ignored): {exc}", flush=True)
 
-    print("=== stop_manager ===", flush=True)
-    stopped = server.stop_manager()
-    print(f"stop_manager: {stopped}", flush=True)
+    print("=== stop_session ===", flush=True)
+    stopped = await server.stop_session(session_id=session_id)
+    print(f"stop_session: {stopped}", flush=True)
 
     try:
         eventlog = server.export_eventlog(
-            eventlog_dir=str(SRV_DATA / "log-data"),
-            out_path=str(LOG_DIR / "eventlog_e2e.json"),
+            eventlog_dir=str(Path(result["data_dir"]) / "ibsrv-data" / "log-data"),
+            out_path=str(Path(result["log_dir"]) / "eventlog_e2e.json"),
+            session_id=session_id,
         )
         print(f"eventlog: {eventlog}", flush=True)
     except Exception as exc:

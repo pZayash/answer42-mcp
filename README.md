@@ -10,6 +10,8 @@ MCP-мост к **1С:Предприятию** через клиент тест�
 
 ## Быстрый старт
 
+### One-shot сессия (рекомендуется)
+
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
@@ -19,11 +21,59 @@ pip install -e '.[screenshot,dev,window-control]'
 testclient-bridge --ws-host 127.0.0.1 --ws-port 8765
 ```
 
-WebSocket URL для обработки 1С:
+Одна сессия через MCP tool:
 
 ```text
-ws://127.0.0.1:8765/bridge
+start_session(
+  base_url="https://your-stand.42clouds.com/ms",
+  username="your-login",
+  password="your-password",
+  version="8.5.1.1150",  # опционально, авто-детект из base_url
+  session_id="my-session",  # опционально, авто-генерация
+  start_pipeline=True  # запустить ibsrv + test-manager
+)
 ```
+
+Возвращает:
+
+```json
+{
+  "session_id": "my-session",
+  "version": "8.5.1.1150",
+  "platform_dir": "/opt/1cv8/x86_64/8.5.1.1150",
+  "display": ":99",
+  "ws_port": 8765,
+  "ibsrv_port": 8314,
+  "testclient_port": 1538,
+  "data_dir": "/tmp/onec-mcp/sessions/my-session",
+  "bridge_url": "ws://127.0.0.1:8765/bridge",
+  "manager_pid": 12345,
+  "ws_url": "http://127.0.0.1:8314",
+  "log_dir": "/tmp/onec-mcp/sessions/my-session/logs"
+}
+```
+
+Подключение тестируемой базы:
+
+```text
+connect_test_client(
+  session_id="my-session",
+  base_url="<TARGET_INFOBASE_URL>",
+  username="<USERNAME>",
+  password="<PASSWORD>",
+  port=1538
+)
+```
+
+Остановка сессии:
+
+```text
+stop_session(session_id="my-session", clean_data=False)
+```
+
+### Low-level запуск (legacy)
+
+Через `launch_manager()` и ручное управление процессами. См. раздел "Запуск менеджера тестирования".
 
 ## Требования
 
@@ -45,6 +95,19 @@ ws://127.0.0.1:8765/bridge
 
 ## Архитектура
 
+### Сессии
+
+Сервер поддерживает **одновременные изолированные сессии** в рамках одного MCP-процесса. Каждая сессия получает:
+
+- Свой `Xvfb` display (автоподбор из `:99`–`:199`)
+- Свои TCP-порты (WebSocket bridge, ibsrv HTTP, test-client)
+- Свою файловую базу (`/tmp/onec-mcp/sessions/{session_id}/ib`)
+- Свои логи (`/tmp/onec-mcp/sessions/{session_id}/logs`)
+
+`session_id` передаётся явным keyword-only параметром во все MCP tools. Если не указан — используется сессия `"default"` (обратная совместимость).
+
+### Компоненты
+
 ```text
 MCP client (LLM/agent)
         │ stdio MCP
@@ -52,14 +115,14 @@ MCP client (LLM/agent)
 Python MCP server (testclient-bridge)
         │ JSON-RPC-like requests
         ▼
-WebSocket server (ws://127.0.0.1:8765/bridge)
+WebSocket server (ws://127.0.0.1:{port}/bridge)
         │
         ▼
 1C test manager (1cv8c /WS ... /TESTMANAGER)
         │ opens embedded processor MCPTestManager
         │ 1C test manager API (ТестируемоеПриложение)
         ▼
-1C test client (/TESTCLIENT -TPort1538)
+1C test client (/TESTCLIENT -TPort{port})
         │
         ▼
 Target infobase (<TARGET_INFOBASE_URL>)
@@ -114,16 +177,18 @@ connect_test_client(
 
 ### Lifecycle
 
-- `bridge_status()` — статус WebSocket bridge.
-- `runtime_status()` — состояние процессов автономного сервера и менеджера.
-- `launch_manager(...)` — полный конвейер: ibcmd → ibsrv → 1cv8c /WS /TESTMANAGER.
-- `stop_manager()` — остановка всех процессов.
+- `start_session(base_url, username, password, version, session_id, start_pipeline)` — one-shot: Xvfb + free ports + version detection + ibsrv + test-manager.
+- `stop_session(session_id, clean_data)` — остановка всех процессов, Xvfb, bridge, опционально удаление data_dir.
+- `bridge_status(session_id)` — статус WebSocket bridge.
+- `runtime_status(session_id)` — состояние процессов автономного сервера и менеджера.
+- `launch_manager(...)` — полный конвейер: ibcmd → ibsrv → 1cv8c /WS /TESTMANAGER (low-level, внутри существующей сессии).
+- `stop_manager(session_id)` — остановка manager + ibsrv (без остановки сессии).
 - `export_eventlog(...)` — выгрузка журнала регистрации через `ibcmd eventlog export`.
 
 ### Test client
 
-- `connect_test_client(base_url, username, password, port, onec_path)` — подключить тест-клиент.
-- `disconnect_test_client()` — отключить.
+- `connect_test_client(base_url, username, password, port, onec_path, session_id)` — подключить тест-клиент.
+- `disconnect_test_client(session_id)` — отключить.
 
 ### UI automation
 

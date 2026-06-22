@@ -8,6 +8,93 @@
 2. **Runtime diagnostics** — выгрузка журнала регистрации автономного сервера.
 3. **RAG metadata index** — локальный SQLite/FTS индекс конфигураций 1С.
 
+## Сессии
+
+Начиная с версии 0.3.0, сервер поддерживает **множественные изолированные сессии** в рамках одного процесса. Это позволяет:
+
+- Запускать несколько независимых тестовых окружений параллельно
+- Изолировать скриншоты через отдельные Xvfb displays
+- Избежать конфликтов портов и файловых баз
+- Управлять жизненным циклом через one-shot API
+
+### SessionState
+
+Каждая сессия описывается классом `SessionState`:
+
+```python
+class SessionState:
+    session_id: str
+    display: str              # Xvfb display, e.g. ":99"
+    platform_dir: Path        # /opt/1cv8/x86_64/8.5.1.1150
+    ws_port: int              # WebSocket bridge port
+    ibsrv_port: int           # ibsrv HTTP-gate port
+    testclient_port: int      # test-client TCP port
+    data_dir: Path            # /tmp/onec-mcp/sessions/{session_id}
+    base_url: str
+    username: str
+    password: str
+    xvfb_process: Popen | None
+    runtime: ManagerRuntime | None
+    bridge: OneCBridgeServer
+    recorder: RecordingSession
+```
+
+### Глобальное состояние
+
+```python
+_SESSIONS: dict[str, SessionState] = {}
+```
+
+Если `session_id` не указан в tool-вызове — используется `"default"`.
+
+### One-shot API
+
+```text
+start_session(
+  base_url="https://your-stand.42clouds.com/ms",
+  username="your-login",
+  password="your-password",
+  version="8.5.1.1150",
+  session_id="my-session",
+  start_pipeline=True
+)
+```
+
+Выполняет:
+
+1. Автоопределение версии платформы (из URL или максимальная установленная)
+2. Подбор свободного DISPLAY (`:99`–`:199`)
+3. Подбор свободных портов (ws, ibsrv, testclient)
+4. Запуск Xvfb
+5. Старт WebSocket bridge
+6. Опционально: создание БД, загрузка .cf, запуск ibsrv, запуск test-manager
+
+Возвращает структуру с session_id, портами, путями, PID менеджера.
+
+```text
+stop_session(session_id="my-session", clean_data=False)
+```
+
+Останавливает:
+
+- test-manager процесс
+- ibsrv процесс
+- Xvfb процесс
+- WebSocket bridge
+- Опционально удаляет data_dir
+
+### Изоляция ресурсов
+
+| Ресурс | Изоляция |
+|--------|----------|
+| Xvfb display | per-session, автоподбор |
+| WebSocket port | per-session, автоподбор |
+| ibsrv HTTP port | per-session, автоподбор |
+| test-client port | per-session, автоподбор |
+| data_dir | `/tmp/onec-mcp/sessions/{session_id}` |
+| log_dir | `{data_dir}/logs` |
+| eventlog | `{server_data_dir}/log-data` |
+
 ## Компоненты
 
 ```text
@@ -20,9 +107,10 @@
 ┌─────────────────────────────────────────────────────────────┐
 │ Python MCP server (testclient-bridge)                      │
 │                                                             │
-│  src/mcp_1c/server.py    — MCP tools, FastMCP               │
-│  src/mcp_1c/bridge.py    — WebSocket server                 │
-│  src/mcp_1c/runtime.py   — 1C process lifecycle             │
+│  src/mcp_1c/server.py    — MCP tools, FastMCP, SessionState      │
+│  src/mcp_1c/bridge.py    — per-session WebSocket server          │
+│  src/mcp_1c/runtime.py   — 1C process lifecycle, Xvfb helpers    │
+│  src/mcp_1c/platform.py  — platform/version/port/display detect  │
 │  src/mcp_1c/protocol.py  — JSON-RPC message types           │
 │  src/mcp_1c/rag/         — RAG index (model, parsers,       │
 │                             store, service, detect)          │
@@ -30,9 +118,9 @@
                │ JSON-RPC-like requests over WebSocket
                ▼
 ┌─────────────────────────────────────────────────────────────┐
-│ WebSocket server (ws://127.0.0.1:8765/bridge)              │
+│ WebSocket server (ws://127.0.0.1:{session.ws_port}/bridge)       │
 │   OneCBridgeServer:                                         │
-│   - single active 1C connection                             │
+│   - one active 1C connection per session                     │
 │   - request/response with UUID correlation                  │
 │   - 60s default timeout                                     │
 └──────────────┬──────────────────────────────────────────────┘
@@ -42,22 +130,22 @@
 │ 1C test manager (1cv8c /WS ... /TESTMANAGER)                │
 │                                                             │
 │  Автономный сервер (ibsrv)                                  │
-│    └─ HTTP-gate на 127.0.0.1:8314                           │
+│    └─ HTTP-gate на 127.0.0.1:{session.ibsrv_port}                │
 │                                                             │
 │  Тонкий клиент (1cv8c)                                      │
-│    └─ /WS"http://127.0.0.1:8314" /TESTMANAGER               │
+│    └─ /WS"http://127.0.0.1:{session.ibsrv_port}" /TESTMANAGER  │
 │                                                             │
 │  Встроенная обработка MCPTestManager                        │
 │    └─ src/cf/DataProcessors/MCPTestManager/                  │
 │       Forms/Форма/Ext/Form/Module.bsl                       │
-│       - WebSocketКлиентСоединения → ws://127.0.0.1:8765     │
+│       - WebSocketКлиентСоединения → ws://127.0.0.1:{session.ws_port}     │
 │       - ТестируемоеПриложение (test manager API)            │
 │       - dispatch: команды → BSL-методы                      │
 └──────────────┬──────────────────────────────────────────────┘
                │ ТестируемоеПриложение.УстановитьСоединение()
                ▼
 ┌─────────────────────────────────────────────────────────────┐
-│ 1C test client (/TESTCLIENT -TPort1538)                     │
+│ 1C test client (/TESTCLIENT -TPort{session.testclient_port})                     │
 │   Подключается к целевой базе                               │
 └──────────────┬──────────────────────────────────────────────┘
                │
@@ -99,7 +187,28 @@
 
 ## Конвейер запуска
 
-`launch_manager()` выполняет:
+### One-shot сессия
+
+`start_session()` выполняет:
+
+1. Автоопределение версии платформы (из `base_url` HTML или максимальная установленная)
+2. Проверка поддержки WebSocket (требуется 1С 8.5+)
+3. Подбор свободного Xvfb display (`:99`–`:199`)
+4. Подбор свободных TCP-портов (ws, ibsrv, testclient)
+5. Запуск Xvfb
+6. Старт WebSocket bridge
+7. Опционально (`start_pipeline=True`):
+   - `ibcmd infobase create --db-path=<data_dir>/ib --create-database`
+   - `ibcmd config load --db-path=<db> build/MCPTestManager.cf`
+   - `ibcmd config apply --db-path=<db> --force --dynamic=force --session-terminate=force`
+   - `ibsrv --data=<data_dir>/ibsrv-data --config=standalone.yaml --name=mcp`
+   - `1cv8c ENTERPRISE /WS"http://127.0.0.1:{ibsrv_port}" /Lru /VLru_RU /TESTMANAGER /C ws://127.0.0.1:{ws_port}/bridge`
+
+Возвращает структуру с `session_id`, `version`, `platform_dir`, `display`, портами, `data_dir`, `bridge_url`, `manager_pid`, `log_dir`.
+
+### Legacy low-level
+
+`launch_manager()` внутри существующей сессии:
 
 1. `ibcmd infobase create --db-path=<db> --create-database` — файловая база.
 2. `ibcmd config load --db-path=<db> <MCPTestManager.cf>` — загрузка конфигурации.
@@ -114,7 +223,7 @@
 Точка входа `testclient-bridge`. Регистрирует все MCP tools через `FastMCP`.
 Содержит три группы инструментов:
 
-- **Lifecycle**: `bridge_status`, `runtime_status`, `launch_manager`, `stop_manager`, `export_eventlog`
+- **Lifecycle**: `start_session`, `stop_session`, `bridge_status`, `runtime_status`, `launch_manager`, `stop_manager`, `export_eventlog`
 - **Test client**: `connect_test_client`, `disconnect_test_client`
 - **UI automation**: `active_window`, `ui_tree`, `command_bar`, `current_element`, `find_object`, `activate_object`, `execute_window_command`, `click_button`, `set_field_value`, `create_new_item`, `save_form`, `close_form`, `screenshot`
 - **Table**: `table_rows`, `table_find_row`, `table_goto_row`, `table_current_row`, `table_selected_rows`, `table_set_field`, `table_edit_info`, `toggle_field`
