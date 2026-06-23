@@ -309,17 +309,13 @@ def start_standalone_server(
     log_dir: Path,
     db_path: Path | None = None,
     timeout: float = 30.0,
+    direct_regport: int | None = None,
 ) -> subprocess.Popen:
     """Start the autonomous 1C server (ibsrv) and wait for the HTTP-gate.
 
-    `ibsrv` is started with NO command-line overrides; it picks up its
-    data directory, HTTP port, and DB path entirely from defaults (it
-    uses the per-user `~/.1cv8/1C/1cv8/standalone-server/` tree). This
-    matches the documented "default invocation" form and is the only
-    way ibsrv reliably opens the HTTP socket on this build.
-
-    `--name` is required: the thin client refers to the infobase by
-    this name when connecting via `/WS"http://host:port"`.
+    `direct_regport` overrides the direct-connect gateway port (default
+    1541 for 8.5.1.x).  When running two ibsrv instances on the same
+    host, each must use a different direct-regport.
     """
     if not Path(ibsrv).exists():
         raise FileNotFoundError(f"ibsrv not found: {ibsrv}")
@@ -329,7 +325,7 @@ def start_standalone_server(
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / "ibsrv.log"
     log_handle = open(log_path, "ab", buffering=0)
-    LOGGER.info("Starting ibsrv (data=%s, name=%s, address=%s, port=%s)", data_dir, name, address, port)
+    LOGGER.info("Starting ibsrv (data=%s, name=%s, address=%s, port=%s, direct_regport=%s)", data_dir, name, address, port, direct_regport or "default")
     config_path = ensure_standalone_config(
         data_dir=data_dir,
         db_path=db_path or Path(DEFAULT_IB_PATH),
@@ -337,13 +333,16 @@ def start_standalone_server(
         port=port,
         name=name,
     )
+    argv = [
+        ibsrv,
+        f"--data={data_dir}",
+        f"--config={config_path}",
+        f"--name={name}",
+    ]
+    if direct_regport is not None:
+        argv.append(f"--direct-regport={direct_regport}")
     proc = subprocess.Popen(
-        [
-            ibsrv,
-            f"--data={data_dir}",
-            f"--config={config_path}",
-            f"--name={name}",
-        ],
+        argv,
         stdout=log_handle,
         stderr=log_handle,
         stdin=subprocess.DEVNULL,
