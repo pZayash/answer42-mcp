@@ -83,6 +83,13 @@ async def wait_for_bridge(session: ClientSession, sid: str, timeout: float = 45.
     raise RuntimeError(f"Manager did not connect to bridge within {timeout}s")
 
 
+async def capture_screenshot(session: ClientSession, sid: str, path: str) -> dict:
+    result = await call_ok(session, "screenshot", {"path": path, "session_id": sid})
+    assert result["bytes"] > 0, result
+    print(f"SCREENSHOT {path}", flush=True)
+    return result
+
+
 async def main() -> None:
     print("=== Autonomous testclient-bridge E2E (MCP protocol) ===", flush=True)
     _kill_all_1c()
@@ -100,6 +107,10 @@ async def main() -> None:
             tools = await session.list_tools()
             tool_names = {tool.name for tool in tools.tools}
             print(f"MCP tools advertised: {len(tool_names)}", flush=True)
+            screenshot_dir = Path("build/e2e-screenshots")
+            screenshot_dir.mkdir(parents=True, exist_ok=True)
+            for old_png in screenshot_dir.glob("*.png"):
+                old_png.unlink()
 
             creds = await call_ok(session, "credentials_list", {})
             assert isinstance(creds, list), creds
@@ -147,6 +158,7 @@ async def main() -> None:
                 await call_ok(session, "active_window", {"session_id": sid})
                 await call_ok(session, "maximize_test_client_window", {"session_id": sid})
                 await call_ok(session, "maximize_test_client_external_window", {"session_id": sid})
+                await capture_screenshot(session, sid, str(screenshot_dir / "01-connected-main-window.png"))
                 await call_ok(session, "ui_tree", {"session_id": sid, "max_depth": 2})
                 await call_ok(session, "command_bar", {"session_id": sid})
                 await call_ok(session, "current_element", {"session_id": sid})
@@ -159,6 +171,7 @@ async def main() -> None:
                     {"command": "e1cib/list/Справочник.Пользователи", "session_id": sid},
                     contains="Не удалось перейти по навигационной ссылке",
                 )
+                await capture_screenshot(session, sid, str(screenshot_dir / "02-navigation-error-dialog.png"))
                 # Close the 1C error dialog opened by the failed navigation; this is
                 # positive coverage for click_button and keeps subsequent negative
                 # object lookups on the main window deterministic.
@@ -210,13 +223,14 @@ async def main() -> None:
                                 raise AssertionError(f"{tool} error lacks {expected!r}: {text}")
                     print(f"COVERED {tool}", flush=True)
 
+                await capture_screenshot(session, sid, str(screenshot_dir / "03-after-tool-coverage.png"))
+
                 rec = await call_ok(session, "recording_start", {"output_dir": "build/recordings/e2e-mcp", "session_id": sid})
                 assert rec.get("active") is True, rec
                 await call_ok(session, "recording_capture", {"action": "e2e", "note": "mcp protocol", "session_id": sid})
                 await call_ok(session, "recording_stop", {"session_id": sid})
 
-                ss = await call_ok(session, "screenshot", {"path": f"{start['data_dir']}/test.png", "session_id": sid})
-                assert ss["bytes"] > 0, ss
+                await capture_screenshot(session, sid, str(screenshot_dir / "04-final-before-disconnect.png"))
 
                 await call_ok(session, "disconnect_test_client", {"session_id": sid})
             finally:
