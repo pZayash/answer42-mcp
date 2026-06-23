@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import websockets
+from websockets.exceptions import ConnectionClosed
 from websockets.server import WebSocketServer, WebSocketServerProtocol
 
 from .protocol import BridgeRequest, BridgeResponse
@@ -95,6 +96,11 @@ class OneCBridgeServer:
         try:
             async for raw_message in websocket:
                 await self._process_message(connected, raw_message)
+        except ConnectionClosed:
+            # Normal during session teardown: 1C process may disappear before the
+            # websocket close frame is exchanged.  Pending callers still get a
+            # BridgeError in finally below.
+            pass
         finally:
             async with self._lock:
                 if self._bridge is connected:
