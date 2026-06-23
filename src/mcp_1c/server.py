@@ -3,8 +3,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import json
 import logging
 import os
+import shutil
+import sys
+import time
+import uuid
 from datetime import datetime
 import shlex
 import subprocess
@@ -24,6 +29,9 @@ from .recorder import RecordingSession
 mcp = FastMCP("testclient-bridge")
 _RAG = RagService()
 DEFAULT_SESSION = "default"
+STATE_FILE = Path(os.getenv("ONEC_MCP_SESSION_STATE", "/tmp/onec-mcp/sessions.json"))
+AUTORELOAD_PID_FILE = Path(os.getenv("ONEC_MCP_AUTORELOAD_PID_FILE", "/tmp/onec-mcp/testclient-bridge-autoreload.pid"))
+AUTORELOAD_LOG_FILE = Path(os.getenv("ONEC_MCP_AUTORELOAD_LOG_FILE", "/tmp/onec-mcp/testclient-bridge-autoreload.log"))
 
 
 class SessionState:
@@ -62,22 +70,38 @@ class SessionState:
             request_timeout=float(os.getenv("ONEC_MCP_REQUEST_TIMEOUT", "60")),
         )
         self.recorder = RecordingSession()
-        self.xvfb_process: subprocess.Popen | None = None
-        self.runtime: runtime.ManagerRuntime | None = None
-        self.bridge = OneCBridgeServer(
-            host="127.0.0.1",
-            port=ws_port,
-            request_timeout=float(os.getenv("ONEC_MCP_REQUEST_TIMEOUT", "60")),
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "session_id": self.session_id,
+            "display": self.display,
+            "platform_dir": str(self.platform_dir),
+            "ws_port": self.ws_port,
+            "ibsrv_port": self.ibsrv_port,
+            "testclient_port": self.testclient_port,
+            "data_dir": str(self.data_dir),
+            "base_url": self.base_url,
+            "username": self.username,
+            # Password is intentionally not persisted.
+            "client_ibsrv_port": self.client_ibsrv_port,
+        }
+
+    @classmethod
+    def from_json(cls, data: dict[str, Any]) -> "SessionState":
+        sess = cls(
+            session_id=str(data["session_id"]),
+            display=str(data["display"]),
+            platform_dir=Path(str(data["platform_dir"])),
+            ws_port=int(data["ws_port"]),
+            ibsrv_port=int(data["ibsrv_port"]),
+            testclient_port=int(data["testclient_port"]),
+            data_dir=Path(str(data["data_dir"])),
+            base_url=str(data.get("base_url", "")),
+            username=str(data.get("username", "")),
+            password="",
         )
-        self.recorder = RecordingSession()
-        self.xvfb_process: subprocess.Popen | None = None
-        self.runtime: runtime.ManagerRuntime | None = None
-        self.bridge = OneCBridgeServer(
-            host="127.0.0.1",
-            port=ws_port,
-            request_timeout=float(os.getenv("ONEC_MCP_REQUEST_TIMEOUT", "60")),
-        )
-        self.recorder = RecordingSession()
+        sess.client_ibsrv_port = int(data.get("client_ibsrv_port") or 0)
+        return sess
 
     @property
     def onec_thin(self) -> str:
@@ -119,6 +143,116 @@ class SessionState:
 _SESSIONS: dict[str, SessionState] = {}
 
 
+def _pid_is_running(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _start_autoreload_watcher() -> None:
+    """Start a detached dev autoreload watcher once per host.
+
+    The watcher must outlive the current stdio MCP process: `openclaw mcp reload`
+    disposes that process, and the next tool call starts a fresh one.  A pid file
+    prevents every MCP start from creating another watcher.
+    """
+
+    if os.getenv("ONEC_MCP_AUTORELOAD", "1").lower() in {"0", "false", "no", "off"}:
+        logging.info("testclient-bridge autoreload watcher disabled by ONEC_MCP_AUTORELOAD")
+        return
+
+    repo_root = Path(__file__).resolve().parents[2]
+    watcher = repo_root / "scripts" / "openclaw_mcp_autoreload.py"
+    if not watcher.exists():
+        logging.warning("Autoreload watcher script not found: %s", watcher)
+        return
+
+    try:
+        if AUTORELOAD_PID_FILE.exists():
+            try:
+                pid = int(AUTORELOAD_PID_FILE.read_text(encoding="utf-8").strip())
+            except ValueError:
+                pid = 0
+            if _pid_is_running(pid):
+                logging.info("Autoreload watcher already running, pid=%s", pid)
+                return
+            AUTORELOAD_PID_FILE.unlink(missing_ok=True)
+
+        AUTORELOAD_PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+        AUTORELOAD_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with AUTORELOAD_LOG_FILE.open("ab") as log:
+            proc = subprocess.Popen(
+                [sys.executable, str(watcher), "--root", str(repo_root), "--pid-file", str(AUTORELOAD_PID_FILE)],
+                cwd=str(repo_root),
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        AUTORELOAD_PID_FILE.write_text(str(proc.pid), encoding="utf-8")
+        logging.info("Started autoreload watcher pid=%s log=%s", proc.pid, AUTORELOAD_LOG_FILE)
+    except Exception as exc:
+        logging.warning("Could not start autoreload watcher: %s", exc)
+
+
+def _persist_sessions() -> None:
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    STATE_FILE.write_text(
+        json.dumps({sid: sess.to_json() for sid, sess in _SESSIONS.items()}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _load_persisted_sessions() -> dict[str, SessionState]:
+    if not STATE_FILE.exists():
+        return {}
+    try:
+        raw = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logging.warning("Could not read session state %s: %s", STATE_FILE, exc)
+        return {}
+    result: dict[str, SessionState] = {}
+    for sid, data in raw.items():
+        try:
+            result[str(sid)] = SessionState.from_json(data)
+        except Exception as exc:
+            logging.warning("Could not restore session %s: %s", sid, exc)
+    return result
+
+
+async def _ensure_restored_session(session_id: str = DEFAULT_SESSION) -> SessionState:
+    if session_id in _SESSIONS:
+        return _SESSIONS[session_id]
+    persisted = _load_persisted_sessions()
+    sess = persisted.get(session_id)
+    if sess is None:
+        raise ValueError(f"Session {session_id!r} not found. Call start_session first.")
+    await sess.bridge.start()
+    _SESSIONS[session_id] = sess
+    logging.info("Restored MCP session %s from %s; bridge=%s", session_id, STATE_FILE, sess.bridge.url)
+    return sess
+
+
+async def _wait_for_bridge_connected(sess: SessionState, timeout: float = 45.0) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        status = sess.bridge.status()
+        if status.get("connected"):
+            return status
+        await asyncio.sleep(0.5)
+    status = sess.bridge.status()
+    raise RuntimeError(
+        f"1C bridge did not connect to {sess.bridge.url} within {timeout:g}s; "
+        f"status={status}. Check test-manager log: {sess.log_dir / 'test_manager.log'}"
+    )
+
+
 def _session(session_id: str = DEFAULT_SESSION) -> SessionState:
     try:
         return _SESSIONS[session_id]
@@ -152,7 +286,8 @@ async def _bridge_call_recorded(
     method: str,
     params: dict[str, Any],
 ) -> Any:
-    sess = _session(session_id)
+    sess = await _ensure_restored_session(session_id)
+    await _wait_for_bridge_connected(sess, timeout=60.0)
     result = await sess.bridge.call(method, params)
     return _record_tool(session_id, method, params, result)
 
@@ -285,6 +420,13 @@ def bridge_status(*,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> dict[str, Any]:
     """Return WebSocket bridge status and URL for the 1C manager processor."""
+    if session_id not in _SESSIONS:
+        persisted = _load_persisted_sessions().get(session_id)
+        if persisted is not None:
+            status = persisted.bridge.status()
+            status["restorable"] = True
+            status["note"] = "Session metadata exists on disk; call an async tool to restore bridge listener."
+            return status
     sess = _session(session_id)
     return sess.bridge.status()
 
@@ -294,7 +436,9 @@ def runtime_status(*,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> dict[str, Any]:
     """Report the live state of the autonomous server + test-manager processes."""
-    sess = _session(session_id)
+    sess = _SESSIONS.get(session_id) or _load_persisted_sessions().get(session_id)
+    if sess is None:
+        return {"running": False, "session_id": session_id, "reason": "session not found"}
     rt = sess.runtime
     if rt is None:
         return {"running": False, "session_id": session_id}
@@ -344,7 +488,7 @@ async def start_session(
     ibsrv_port = runtime.find_free_port(runtime.DEFAULT_IBSRV_HTTP_PORT)
     testclient_port = runtime.find_free_port(runtime.DEFAULT_TEST_CLIENT_PORT)
 
-    sid = session_id or _new_session_id()
+    sid = session_id or DEFAULT_SESSION
     if sid in _SESSIONS:
         raise ValueError(f"Session {sid!r} already exists.")
 
@@ -356,6 +500,8 @@ async def start_session(
     )
     sess.xvfb_process = runtime.start_xvfb(display)
     await sess.bridge.start()
+    _SESSIONS[sid] = sess
+    _persist_sessions()
     logging.info("start_session: bridge listening on ws://127.0.0.1:%s", ws_port)
 
     pipeline_info: dict[str, Any] = {}
@@ -392,6 +538,8 @@ async def start_session(
         )
         runtime_state.manager_process = manager_proc
         sess.runtime = runtime_state
+        await _wait_for_bridge_connected(sess, timeout=60.0)
+        _persist_sessions()
 
         # --- Client ibsrv (second autonomous server for /TESTCLIENT) ---
         client_ibsrv_port = runtime.find_free_port(runtime.DEFAULT_IBSRV_HTTP_PORT + 100)
@@ -406,6 +554,7 @@ async def start_session(
             ibsrv=sess.ibsrv, address=ibsrv_address, port=client_ibsrv_port,
             name=client_ibsrv_name, data_dir=sess.client_server_data_dir,
             log_dir=client_log_dir, db_path=sess.client_db_path,
+            direct_regport=1542,  # different from default 1541 used by manager ibsrv
         )
         sess.client_ibsrv_port = client_ibsrv_port
         sess.client_runtime = runtime.ManagerRuntime(
@@ -426,7 +575,7 @@ async def start_session(
             "client_base_url": f"http://{ibsrv_address}:{client_ibsrv_port}",
         }
 
-    _SESSIONS[sid] = sess
+    _persist_sessions()
     return {
         "session_id": sid, "version": actual_version,
         "platform_dir": str(platform_dir), "display": display,
@@ -443,8 +592,9 @@ async def stop_session(
 ) -> dict[str, Any]:
     """Tear down a session: stop test-manager, ibsrv, Xvfb, bridge."""
     try:
-        sess = _SESSIONS.pop(session_id)
-    except KeyError:
+        sess = await _ensure_restored_session(session_id)
+        _SESSIONS.pop(session_id, None)
+    except ValueError:
         return {"stopped": False, "reason": f"session {session_id!r} not found"}
     stopped: list[str] = []
     if sess.runtime is not None:
@@ -464,6 +614,7 @@ async def stop_session(
     if clean_data and sess.data_dir.exists():
         shutil.rmtree(sess.data_dir, ignore_errors=True)
         stopped.append("data_dir")
+    _persist_sessions()
     return {"stopped": True, "session_id": session_id, "components": stopped}
 
 
@@ -565,12 +716,12 @@ def export_eventlog(
 
 
 @mcp.tool()
-def stop_manager(
+async def stop_manager(
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> dict[str, Any]:
     """Tear down the manager + autonomous server for a session."""
-    sess = _session(session_id)
+    sess = await _ensure_restored_session(session_id)
     if sess.runtime is None:
         return {"stopped": False, "reason": "no runtime"}
     rt = sess.runtime
@@ -582,6 +733,7 @@ def stop_manager(
         client_rt = sess.client_runtime
         sess.client_runtime = None
         runtime.kill_process(client_rt.server_process, "ibsrv-client")
+    _persist_sessions()
     return {"stopped": True}
 
 
@@ -598,7 +750,8 @@ async def connect_test_client(
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
     """Launch 1cv8c /TESTCLIENT inside the manager processor and connect."""
-    sess = _session(session_id)
+    sess = await _ensure_restored_session(session_id)
+    await _wait_for_bridge_connected(sess, timeout=60.0)
     r_base = base_url or sess.base_url
     r_user = username or sess.username
     r_pass = password if password else sess.password
@@ -607,10 +760,10 @@ async def connect_test_client(
     # If no base_url provided, use the local client ibsrv (second autonomous server)
     if not r_base and sess.client_ibsrv_port:
         r_base = f"http://127.0.0.1:{sess.client_ibsrv_port}"
-        r_user = r_user or "Admin"
+        r_user = r_user or ""
         r_pass = r_pass or ""
-    if not r_base or not r_user:
-        raise ValueError("base_url and username are required")
+    if not r_base:
+        raise ValueError("base_url is required")
     params = {"base_url": r_base, "username": r_user, "password": r_pass,
               "port": r_port, "onec_path": r_onec, "host": host, "extra_args": extra_args}
     result: Any
@@ -625,14 +778,14 @@ async def connect_test_client(
 
 def _auto_maximize_on_error(display: str) -> None:
     try:
-        __maximize_external_window(title_contains="", display=display, width=None, height=None)
+        _maximize_external_window(title_contains="", display=display, width=None, height=None)
     except Exception as exc:
         logging.debug("auto maximize after failed connect_test_client failed: %s", exc)
 
 
 def _auto_maximize_test_client_result(result: Any, display: str) -> None:
     try:
-        mr = __maximize_external_window(title_contains="", display=display, width=None, height=None)
+        mr = _maximize_external_window(title_contains="", display=display, width=None, height=None)
         if isinstance(result, dict):
             result["auto_maximize"] = mr
     except Exception as exc:
@@ -1267,7 +1420,7 @@ def recording_stop(*,
 def screenshot(
     path: Annotated[str, "Output image path"] = "build/screenshots/screenshot.png",
     window: Annotated[bool, "Capture the best visible 1C window instead of the whole virtual display"] = True,
-    display: Annotated[str, "X11 display to inspect/capture"] = "",
+    display: Annotated[str, "X11 display to inspect/capture. Defaults to the session's display."] = "",
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> dict[str, Any]:
@@ -1275,17 +1428,29 @@ def screenshot(
     output_path = Path(path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    sess = _session(session_id)
+    resolved_display = display or sess.display
+
     try:
         import mss  # type: ignore
         import mss.tools  # type: ignore
 
-        if display:
-            os.environ["DISPLAY"] = display
-        geometry = _active_x11_window_geometry(display or None) if window else None
-        with mss.mss() as sct:
-            monitor = geometry or sct.monitors[0]
-            image = sct.grab(monitor)
-            mss.tools.to_png(image.rgb, image.size, output=str(output_path))
+        if not resolved_display:
+            raise RuntimeError("Cannot capture screenshot: no display set for session and no display argument provided")
+
+        previous_display = os.environ.get("DISPLAY")
+        os.environ["DISPLAY"] = resolved_display
+        try:
+            geometry = _active_x11_window_geometry(resolved_display) if window else None
+            with mss.mss() as sct:
+                monitor = geometry or sct.monitors[0]
+                image = sct.grab(monitor)
+                mss.tools.to_png(image.rgb, image.size, output=str(output_path))
+        finally:
+            if previous_display is None:
+                os.environ.pop("DISPLAY", None)
+            else:
+                os.environ["DISPLAY"] = previous_display
     except ImportError as exc:
         raise RuntimeError("Install screenshot extra: pip install '.[screenshot]' or mss") from exc
 
@@ -1304,6 +1469,8 @@ async def _run() -> None:
             if sess.runtime is not None:
                 runtime.kill_process(sess.runtime.manager_process, "test-manager")
                 runtime.kill_process(sess.runtime.server_process, "ibsrv")
+            if sess.client_runtime is not None:
+                runtime.kill_process(sess.client_runtime.server_process, "ibsrv-client")
             try:
                 await sess.bridge.stop()
             except Exception:
@@ -1318,6 +1485,7 @@ def main() -> None:
     args = parser.parse_args()
 
     logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO))
+    _start_autoreload_watcher()
     asyncio.run(_run())
 
 
