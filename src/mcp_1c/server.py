@@ -549,7 +549,12 @@ async def start_session(
         client_ibsrv_name = "mcpclient"
 
         runtime.create_file_infobase(sess.ibcmd, sess.client_db_path)
-        runtime.load_configuration(sess.ibcmd, sess.client_db_path, cf_path)
+        # Do not load MCPTestManager.cf into the tested-client infobase:
+        # that configuration contains /TESTMANAGER-only type
+        # `ТестируемоеПриложение` and crashes when run as /TESTCLIENT.
+        # A clean empty infobase is enough for connection/window/screenshot
+        # protocol tests; domain-specific table/form coverage must use a
+        # dedicated tested-client configuration.
 
         client_server_proc = runtime.start_standalone_server(
             ibsrv=sess.ibsrv, address=ibsrv_address, port=client_ibsrv_port,
@@ -844,7 +849,7 @@ def maximize_test_client_external_window(
 ) -> dict[str, Any]:
     """Maximize/resize the 1C test-client OS window: wmctrl -> xdotool -> Xlib fallback."""
     sess = _session(session_id)
-    return __maximize_external_window(
+    return _maximize_external_window(
         title_contains=title_contains,
         display=display or sess.display,
         width=width or None,
@@ -1239,119 +1244,6 @@ async def close_form(*,
 ) -> Any:
     """Close the active form."""
     return await _bridge_call_recorded(session_id, "close_form", {})
-
-
-def _active_x11_window_geometry(display: str | None = None) -> dict[str, int] | None:
-    env = os.environ.copy()
-    if display:
-        env["DISPLAY"] = display
-    try:
-        tree = subprocess.run(
-            ["xwininfo", "-root", "-tree"],
-            env=env,
-            check=True,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=10,
-        ).stdout
-    except (subprocess.SubprocessError, FileNotFoundError):
-        return None
-
-    candidates: list[tuple[int, dict[str, int]]] = []
-    for line in tree.splitlines():
-        if '("1cv8c" "1cv8c")' not in line and '("1cv8" "1cv8")' not in line:
-            continue
-        match = re.search(r'0x[0-9a-f]+ "([^"]*)".*?(\d+)x(\d+)\+(-?\d+)\+(-?\d+)', line)
-        if not match:
-            continue
-        title = match.group(1)
-        width, height, left, top = map(int, match.groups()[1:])
-        if width < 300 or height < 150:
-            continue
-        if left < 0 or top < 0:
-            continue
-        priority = 0
-        if title and title not in {"1cv8c", "1cv8", "Конфигурация"}:
-            priority += 100
-        if "1С:Предприятие" in title:
-            priority += 50
-        if any(word in title for word in ("создание", "Инструменты", "Шаблон", "Сессия", "DEV-AREA")):
-            priority += 25
-        priority += min(width * height // 10000, 50)
-        candidates.append((priority, {"left": left, "top": top, "width": width, "height": height, "title": title}))
-    if not candidates:
-        return None
-    candidates.sort(key=lambda item: item[0], reverse=True)
-    return candidates[0][1]
-
-
-@mcp.tool()
-def recording_start(
-    output_dir: Annotated[str, "Directory for frames/slides/media"] = "build/recordings/session",
-    display: Annotated[str, "X11 display to capture"] = "",
-    window: Annotated[bool, "Capture best 1C window instead of whole display"] = False,
-    *,
-    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
-) -> dict[str, Any]:
-    """Start automatic evidence recording: each recorded tool call gets screenshot + annotated slide."""
-    return _session(session_id).recorder.start(output_dir=output_dir, display=display, window=window)
-
-
-@mcp.tool()
-def recording_capture(
-    action: Annotated[str, "Manual step/action label"],
-    note: Annotated[str, "Text to put into the slide"] = "",
-    *,
-    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
-) -> dict[str, Any]:
-    """Manually capture a screenshot/slide in the active recording session."""
-    event = _session(session_id).recorder.capture(_screenshot_for_recorder, action, {"note": note}, {"note": note})
-    return event or {"active": False}
-
-
-@mcp.tool()
-def recording_stop(*,
-    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
-) -> dict[str, Any]:
-    """Stop recording and build PDF/GIF/MP4 from captured slides."""
-    return _session(session_id).recorder.stop()
-
-
-@mcp.tool()
-def screenshot(
-    path: Annotated[str, "Output image path"] = "build/screenshots/screenshot.png",
-    window: Annotated[bool, "Capture the best visible 1C window instead of the whole virtual display"] = True,
-    display: Annotated[str, "X11 display override (empty = use session's)"] = "",
-    *,
-    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
-) -> dict[str, Any]:
-    """Capture a screenshot from the MCP host."""
-    return _do_screenshot(path, window, display, session_id)
-
-
-def _do_screenshot(path, window, display, session_id=DEFAULT_SESSION):
-    sess = _session(session_id)
-    resolved = display or sess.display
-    output_path = Path(path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        import mss
-        import mss.tools
-        if resolved:
-            os.environ["DISPLAY"] = resolved
-        geometry = _active_x11_window_geometry(resolved) if window else None
-        with mss.mss() as sct:
-            monitor = geometry or sct.monitors[0]
-            image = sct.grab(monitor)
-            mss.tools.to_png(image.rgb, image.size, output=str(output_path))
-    except ImportError as exc:
-        raise RuntimeError("Install screenshot extra: pip install '.[screenshot]' or mss") from exc
-    data = output_path.read_bytes()
-    result = {"path": str(output_path), "bytes": len(data), "base64": base64.b64encode(data).decode("ascii")}
-    if window:
-        result["window_geometry"] = geometry
-    return result
 
 
 def _active_x11_window_geometry(display: str | None = None) -> dict[str, int] | None:
