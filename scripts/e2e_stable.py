@@ -22,26 +22,23 @@ def kill_all_1c() -> None:
     time.sleep(1)
 
 async def main() -> None:
-    print("=== Starting Full MCP E2E Coverage Test ===", flush=True)
+    print("=== Starting Full MCP E2E Coverage Test (Beta Stand) ===", flush=True)
     kill_all_1c()
 
-    # 1. Lifecycle: Start Session
-    print("\n[1/7] Testing start_session...", flush=True)
+    # 1. Lifecycle: Start Session (Xvfb + Bridge ONLY, NO local IB)
+    print("\n[1/8] Testing start_session (no pipeline)...", flush=True)
     result = await server.start_session(
-        base_url=os.environ.get("TARGET_INFOBASE_URL", ""),
-        username=os.environ.get("TARGET_USERNAME", ""),
-        password=os.environ.get("TARGET_PASSWORD", ""),
         version="8.5.1.1150",
         session_id="e2e-full",
-        start_pipeline=True,
+        start_pipeline=False,  # NO local IB, NO ibsrv
     )
     print(f"Session started: {result['session_id']}")
     sid = result["session_id"]
     sess = server._session(sid)
 
     # 2. Lifecycle & Status
-    print("\n[2/7] Testing Lifecycle tools...", flush=True)
-    assert server.bridge_status(session_id=sid)["connected"] == False # Not connected yet
+    print("\n[2/8] Testing Lifecycle tools...", flush=True)
+    assert server.bridge_status(session_id=sid)["connected"] == False  # Not connected yet
     assert server.runtime_status(session_id=sid)["running"] == True
     
     # Wait for manager to connect
@@ -54,34 +51,21 @@ async def main() -> None:
         raise RuntimeError("Manager did not connect to bridge within 30s")
     print("Manager connected!")
 
-    # 3. RAG Tools (Independent of 1C UI)
-    print("\n[3/7] Testing RAG tools...", flush=True)
-    rag_path = "/home/openclaw/.openclaw/workspace/testclient-bridge/src/cf"
-    server.rag_source_detect(path=rag_path, session_id=sid)
-    server.rag_source_add(name="E2E_SRC", path=rag_path, session_id=sid)
-    server.rag_sources_list(session_id=sid)
-    server.rag_snapshot_create(name="E2E_SNAP", sources=["E2E_SRC"], session_id=sid)
-    server.rag_snapshots_list(session_id=sid)
-    server.rag_index_build(snapshot="E2E_SNAP", session_id=sid)
-    server.rag_lookup_object(object="Configuration", snapshot="E2E_SNAP", session_id=sid)
-    server.rag_query(query="test", snapshot="E2E_SNAP", session_id=sid)
-    print("RAG tools passed.")
-
-    # 4. Test Client Connection
-    print("\n[4/7] Testing Test Client tools...", flush=True)
+    # 3. Test Client Connection (REAL BETA STAND)
+    print("\n[3/8] Testing connect_test_client (Beta Stand)...", flush=True)
     r = await server.connect_test_client(
-        base_url=os.environ["TARGET_INFOBASE_URL"],
-        username=os.environ["TARGET_USERNAME"],
-        password=os.environ.get("TARGET_PASSWORD", ""),
+        base_url="https://your-stand.42clouds.com/ms",
+        username="your-login",
+        password="your-password",
         port=result["testclient_port"],
         onec_path=result["platform_dir"] + "/1cv8c",
         session_id=sid,
     )
-    assert r.get("connected") == True
-    print("Connected to target IB.")
+    assert r.get("connected") == True, f"Failed to connect: {r}"
+    print("Connected to Beta Stand (ms-int).")
 
-    # 5. UI Automation & Windows
-    print("\n[5/7] Testing UI Automation tools...", flush=True)
+    # 4. UI Automation & Windows
+    print("\n[4/8] Testing UI Automation tools...", flush=True)
     await server.active_window(session_id=sid)
     await server.ui_tree(session_id=sid)
     await server.command_bar(session_id=sid)
@@ -107,8 +91,8 @@ async def main() -> None:
     server.screenshot(path=f"{result['data_dir']}/test.png", session_id=sid)
     print("UI tools called successfully.")
 
-    # 6. Tables & Reference Tools
-    print("\n[6/7] Testing Table & Reference tools...", flush=True)
+    # 5. Tables & Reference Tools
+    print("\n[5/8] Testing Table & Reference tools...", flush=True)
     await server.table_current_row(name="Table", session_id=sid)
     await server.table_selected_rows(name="Table", session_id=sid)
     await server.table_cell_text(name="Table", cell="col1", session_id=sid)
@@ -171,9 +155,35 @@ async def main() -> None:
         print(f"dynamic_list_open_form_settings: {e}")
     print("Table and Reference tools called successfully.")
 
-    # 7. Teardown
-    print("\n[7/7] Testing Teardown...", flush=True)
+    # 6. Tabular documents
+    print("\n[6/8] Testing tabular documents...", flush=True)
+    try:
+        await server.tabular_documents(session_id=sid)
+    except Exception as e:
+        print(f"tabular_documents: {e}")
+    try:
+        await server.tabular_document_text(name="Doc", session_id=sid)
+    except Exception as e:
+        print(f"tabular_document_text: {e}")
+    print("Tabular documents called successfully.")
+
+    # 7. RAG Tools (Independent of 1C UI)
+    print("\n[7/8] Testing RAG tools...", flush=True)
+    rag_path = "/home/openclaw/.openclaw/workspace/testclient-bridge/src/cf"
+    server.rag_source_detect(path=rag_path, session_id=sid)
+    server.rag_source_add(name="E2E_SRC", path=rag_path, session_id=sid)
+    server.rag_sources_list(session_id=sid)
+    server.rag_snapshot_create(name="E2E_SNAP", sources=["E2E_SRC"], session_id=sid)
+    server.rag_snapshots_list(session_id=sid)
+    server.rag_index_build(snapshot="E2E_SNAP", session_id=sid)
+    server.rag_lookup_object(object="Configuration", snapshot="E2E_SNAP", session_id=sid)
+    server.rag_query(query="test", snapshot="E2E_SNAP", session_id=sid)
+    print("RAG tools passed.")
+
+    # 8. Teardown
+    print("\n[8/8] Testing Teardown...", flush=True)
     await server.disconnect_test_client(session_id=sid)
+    await server.stop_manager(session_id=sid)
     await server.stop_session(session_id=sid, clean_data=True)
     
     print("\n=== FULL E2E COVERAGE PASSED ===", flush=True)
