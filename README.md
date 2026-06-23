@@ -65,6 +65,43 @@ connect_test_client(
 )
 ```
 
+Логин/пароль можно не передавать явно: `connect_test_client` умеет брать их из локального credentials-файла по `base_url`.
+
+### Безопасное хранение логинов/паролей
+
+По умолчанию MCP-сервер читает файл:
+
+```text
+~/.onec-mcp-credentials.json
+```
+
+Путь можно переопределить переменной окружения:
+
+```bash
+export ONEC_MCP_CREDENTIALS_FILE=/secure/path/credentials.json
+```
+
+Формат файла:
+
+```json
+{
+  "entries": [
+    {
+      "url": "https://beta-ms.42clouds.com/ms",
+      "username": "Admin",
+      "password": "beta"
+    },
+    {
+      "url": "https://*.42clouds.com/*",
+      "username": "testuser",
+      "password": "123321"
+    }
+  ]
+}
+```
+
+Правила матчинга: сначала точное совпадение `url`, затем wildcard (`*`, `?`) через `fnmatch`; первое совпадение побеждает. Пароли не логируются и не возвращаются наружу; tool `credentials_list()` показывает только URL-шаблоны и логины с `password="***"`.
+
 Остановка сессии:
 
 ```text

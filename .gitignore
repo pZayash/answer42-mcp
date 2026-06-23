@@ -5,6 +5,10 @@ __pycache__/
 venv/
 .env
 
+# Local credentials (never commit secrets)
+credentials.json
+.onec-mcp-credentials.json
+
 # Build artefacts
 build/
 dist/
