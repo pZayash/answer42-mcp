@@ -22,6 +22,7 @@ from mcp.server.fastmcp import FastMCP
 from . import platform as _platform
 from . import runtime
 from .bridge import OneCBridgeServer
+from .credentials import get_store as _credentials_store
 from .rag import RagService
 from .window_control import maximize_test_client_window as _maximize_external_window
 from .recorder import RecordingSession
@@ -738,6 +739,12 @@ async def stop_manager(
 
 
 @mcp.tool()
+def credentials_list() -> list[dict[str, str]]:
+    """List configured credential URL patterns with passwords redacted."""
+    return _credentials_store().list_entries()
+
+
+@mcp.tool()
 async def connect_test_client(
     base_url: Annotated[str, "1C infobase URL"] = "",
     username: Annotated[str, "1C username"] = "",
@@ -764,6 +771,14 @@ async def connect_test_client(
         r_pass = r_pass or ""
     if not r_base:
         raise ValueError("base_url is required")
+    # If credentials were not supplied explicitly, resolve them by base URL from
+    # the local credentials store. Empty string is a valid value for local
+    # no-auth infobases, so only fill when both username/password are blank.
+    if not r_user and not r_pass:
+        credentials = _credentials_store().lookup(r_base)
+        if credentials:
+            r_user = credentials["username"]
+            r_pass = credentials["password"]
     params = {"base_url": r_base, "username": r_user, "password": r_pass,
               "port": r_port, "onec_path": r_onec, "host": host, "extra_args": extra_args}
     result: Any
