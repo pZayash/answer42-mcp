@@ -52,6 +52,24 @@ class SessionState:
         self.base_url = base_url
         self.username = username
         self.password = password
+        self.client_ibsrv_port = 0  # to be set in start_session
+        self.client_runtime: runtime.ManagerRuntime | None = None
+        self.xvfb_process: subprocess.Popen | None = None
+        self.runtime: runtime.ManagerRuntime | None = None
+        self.bridge = OneCBridgeServer(
+            host="127.0.0.1",
+            port=ws_port,
+            request_timeout=float(os.getenv("ONEC_MCP_REQUEST_TIMEOUT", "60")),
+        )
+        self.recorder = RecordingSession()
+        self.xvfb_process: subprocess.Popen | None = None
+        self.runtime: runtime.ManagerRuntime | None = None
+        self.bridge = OneCBridgeServer(
+            host="127.0.0.1",
+            port=ws_port,
+            request_timeout=float(os.getenv("ONEC_MCP_REQUEST_TIMEOUT", "60")),
+        )
+        self.recorder = RecordingSession()
         self.xvfb_process: subprocess.Popen | None = None
         self.runtime: runtime.ManagerRuntime | None = None
         self.bridge = OneCBridgeServer(
@@ -84,6 +102,18 @@ class SessionState:
     @property
     def log_dir(self) -> Path:
         return self.data_dir / "logs"
+
+    @property
+    def client_db_path(self) -> Path:
+        return self.data_dir / "ib-client"
+
+    @property
+    def client_server_data_dir(self) -> Path:
+        return self.data_dir / "ibsrv-data-client"
+
+    @property
+    def client_log_dir(self) -> Path:
+        return self.data_dir / "logs-client"
 
 
 _SESSIONS: dict[str, SessionState] = {}
@@ -362,7 +392,39 @@ async def start_session(
         )
         runtime_state.manager_process = manager_proc
         sess.runtime = runtime_state
-        pipeline_info = {"manager_pid": manager_proc.pid, "ws_url": ws_url, "log_dir": str(log_dir)}
+
+        # --- Client ibsrv (second autonomous server for /TESTCLIENT) ---
+        client_ibsrv_port = runtime.find_free_port(runtime.DEFAULT_IBSRV_HTTP_PORT + 100)
+        client_log_dir = sess.client_log_dir
+        client_log_dir.mkdir(parents=True, exist_ok=True)
+        client_ibsrv_name = "mcpclient"
+
+        runtime.create_file_infobase(sess.ibcmd, sess.client_db_path)
+        runtime.load_configuration(sess.ibcmd, sess.client_db_path, cf_path)
+
+        client_server_proc = runtime.start_standalone_server(
+            ibsrv=sess.ibsrv, address=ibsrv_address, port=client_ibsrv_port,
+            name=client_ibsrv_name, data_dir=sess.client_server_data_dir,
+            log_dir=client_log_dir, db_path=sess.client_db_path,
+        )
+        sess.client_ibsrv_port = client_ibsrv_port
+        sess.client_runtime = runtime.ManagerRuntime(
+            infobase=runtime.InfobaseSpec(db_path=sess.client_db_path),
+            server=runtime.StandaloneServerSpec(
+                address=ibsrv_address, port=client_ibsrv_port,
+                name=client_ibsrv_name, data_dir=sess.client_server_data_dir,
+            ),
+            manager=runtime.TestManagerSpec(onec_path=sess.onec_thin),
+            server_process=client_server_proc,
+            log_dir=client_log_dir,
+        )
+
+        client_ws_url = runtime.build_thin_client_ws_url(ibsrv_address, client_ibsrv_port)
+        pipeline_info = {
+            "manager_pid": manager_proc.pid, "ws_url": ws_url, "log_dir": str(log_dir),
+            "client_ibsrv_port": client_ibsrv_port, "client_ws_url": client_ws_url,
+            "client_base_url": f"http://{ibsrv_address}:{client_ibsrv_port}",
+        }
 
     _SESSIONS[sid] = sess
     return {
@@ -389,6 +451,9 @@ async def stop_session(
         runtime.kill_process(sess.runtime.manager_process, "test-manager")
         runtime.kill_process(sess.runtime.server_process, "ibsrv")
         stopped.append("pipeline")
+    if sess.client_runtime is not None:
+        runtime.kill_process(sess.client_runtime.server_process, "ibsrv-client")
+        stopped.append("client-ibsrv")
     try:
         await sess.bridge.stop()
         stopped.append("bridge")
@@ -512,6 +577,11 @@ def stop_manager(
     sess.runtime = None
     runtime.kill_process(rt.manager_process, "test-manager")
     runtime.kill_process(rt.server_process, "ibsrv")
+    # Also stop client ibsrv if running
+    if sess.client_runtime is not None:
+        client_rt = sess.client_runtime
+        sess.client_runtime = None
+        runtime.kill_process(client_rt.server_process, "ibsrv-client")
     return {"stopped": True}
 
 
@@ -534,6 +604,11 @@ async def connect_test_client(
     r_pass = password if password else sess.password
     r_port = port if port else sess.testclient_port
     r_onec = onec_path or sess.onec_thin
+    # If no base_url provided, use the local client ibsrv (second autonomous server)
+    if not r_base and sess.client_ibsrv_port:
+        r_base = f"http://127.0.0.1:{sess.client_ibsrv_port}"
+        r_user = r_user or "user0"
+        r_pass = r_pass or ""
     if not r_base or not r_user:
         raise ValueError("base_url and username are required")
     params = {"base_url": r_base, "username": r_user, "password": r_pass,
