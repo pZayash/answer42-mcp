@@ -3,7 +3,7 @@
 ## Python-пакет
 
 ```bash
-git clone <REPOSITORY_URL> answer42
+git clone https://gitlab.com/platform42/answer42-mcp.git answer42
 cd answer42
 python3 -m venv .venv
 . .venv/bin/activate
