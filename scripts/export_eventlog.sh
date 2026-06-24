@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PLATFORM_DIR="${PLATFORM_DIR:-/opt/1cv8/x86_64/8.5.1.1150}"
+PLATFORM_DIR="${PLATFORM_DIR:-/opt/1cv8/x86_64/8.3.27.1606}"
 EVENTLOG_DIR="${1:-${ONEC_MCP_EVENTLOG_DIR:-/tmp/onec-mcp/ibsrv-data/log-data}}"
 OUT="${2:-build/eventlog.json}"
 FORMAT="${FORMAT:-json}"

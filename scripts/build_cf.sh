@@ -1,7 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PLATFORM_DIR="${PLATFORM_DIR:-/opt/1cv8/x86_64/8.5.1.1150}"
+if [[ -z "${PLATFORM_DIR:-}" ]]; then
+  PLATFORM_DIR="$(find /opt/1cv8/x86_64 -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null \
+    | sort -V \
+    | awk -F. '($1>8)||($1==8&&$2>3)||($1==8&&$2==3&&$3>=27){v=$0} END{if(v) print "/opt/1cv8/x86_64/" v}')"
+  if [[ -z "$PLATFORM_DIR" ]]; then
+    echo "No installed 1C platform >= 8.3.27 found under /opt/1cv8/x86_64" >&2
+    exit 127
+  fi
+fi
 DB_PATH="${DB_PATH:-/tmp/onec-mcp/ib-build-cf}"
 SRC_DIR="${1:-src/cf}"
 OUT_CF="${2:-build/MCPTestManager.cf}"

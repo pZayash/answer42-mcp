@@ -1,10 +1,17 @@
 [project]
-name = "testclient-bridge"
+name = "answer42"
 version = "0.2.0"
-description = "MCP bridge to 1C:Enterprise test client — UI automation, diagnostics, RAG metadata index"
+description = "Answer42 — The Answer to Life, Universe, and 1C — UI Driver. MCP-powered 1C:Enterprise UI automation: click, fill, navigate, test, and introspect managed forms through the test-client API"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = ["mcp>=1.9.0", "websockets>=12.0", "pydantic>=2.0"]
+license = {text = "MIT"}
+authors = [
+    {name = "Kosolapov Stanislav (proDOOMman)", email = "prodoomman@gmail.com"},
+    {name = "Marvin (AI Assistant)"},
+    {name = "42Clouds"},
+    {name = "and contributors"},
+]
 
 [project.optional-dependencies]
 screenshot = ["mss>=9.0.0"]
@@ -12,7 +19,7 @@ dev = ["pytest>=8.0", "ruff>=0.5"]
 window-control = ["python-xlib>=0.33"]
 
 [project.scripts]
-testclient-bridge = "mcp_1c.server:main"
+answer42 = "mcp_1c.server:main"
 
 [tool.ruff]
 line-length = 100

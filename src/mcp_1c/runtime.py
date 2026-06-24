@@ -27,7 +27,7 @@ from typing import Any
 
 LOGGER = logging.getLogger(__name__)
 
-DEFAULT_ONEC_VERSION = "8.5.1.1150"
+DEFAULT_ONEC_VERSION = "8.3.27.1606"
 DEFAULT_WS_PORT = 8765
 DEFAULT_IBSRV_HTTP_PORT = 8314
 DEFAULT_TEST_CLIENT_PORT = 1538
@@ -41,6 +41,7 @@ DEFAULT_IBSRV = f"{DEFAULT_PLATFORM_DIR}/ibsrv"
 DEFAULT_IB_PATH = "/tmp/onec-mcp/ib"
 DEFAULT_IBSRV_DATA = "/tmp/onec-mcp/ibsrv-data"
 DEFAULT_CF_BUILT = "build/MCPTestManager.cf"
+DEFAULT_CLIENT_CF_BUILT = "build/MCPTestClient.cf"
 
 
 def _default_inbox_dir() -> Path:
@@ -314,7 +315,7 @@ def start_standalone_server(
     """Start the autonomous 1C server (ibsrv) and wait for the HTTP-gate.
 
     `direct_regport` overrides the direct-connect gateway port (default
-    1541 for 8.5.1.x).  When running two ibsrv instances on the same
+    1541 for current platform builds).  When running two ibsrv instances on the same
     host, each must use a different direct-regport.
     """
     if not Path(ibsrv).exists():
@@ -429,6 +430,7 @@ def build_thin_test_manager_argv(
     return [
         onec_path,
         "ENTERPRISE",
+        "/DisableStartupDialogs",
         f"/WS{ws_url}",
         "/Lru",
         "/VLru_RU",

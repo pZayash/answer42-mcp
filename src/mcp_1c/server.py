@@ -27,12 +27,13 @@ from .rag import RagService
 from .window_control import maximize_test_client_window as _maximize_external_window
 from .recorder import RecordingSession
 
-mcp = FastMCP("testclient-bridge")
+mcp = FastMCP("Answer42")
 _RAG = RagService()
 DEFAULT_SESSION = "default"
 STATE_FILE = Path(os.getenv("ONEC_MCP_SESSION_STATE", "/tmp/onec-mcp/sessions.json"))
-AUTORELOAD_PID_FILE = Path(os.getenv("ONEC_MCP_AUTORELOAD_PID_FILE", "/tmp/onec-mcp/testclient-bridge-autoreload.pid"))
-AUTORELOAD_LOG_FILE = Path(os.getenv("ONEC_MCP_AUTORELOAD_LOG_FILE", "/tmp/onec-mcp/testclient-bridge-autoreload.log"))
+AUTORELOAD_PID_FILE = Path(os.getenv("ONEC_MCP_AUTORELOAD_PID_FILE", "/tmp/onec-mcp/answer42-autoreload.pid"))
+AUTORELOAD_LOG_FILE = Path(os.getenv("ONEC_MCP_AUTORELOAD_LOG_FILE", "/tmp/onec-mcp/answer42-autoreload.log"))
+RAG_BINDINGS_FILE = Path(os.getenv("ONEC_MCP_RAG_BINDINGS", "/tmp/onec-mcp/rag-bindings.json"))
 
 
 class SessionState:
@@ -71,6 +72,9 @@ class SessionState:
             request_timeout=float(os.getenv("ONEC_MCP_REQUEST_TIMEOUT", "60")),
         )
         self.recorder = RecordingSession()
+        self.rag_snapshot: str = ""
+        self.idle_timeout_seconds: int = 60 * 60
+        self.last_activity_monotonic: float = time.monotonic()
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -85,6 +89,8 @@ class SessionState:
             "username": self.username,
             # Password is intentionally not persisted.
             "client_ibsrv_port": self.client_ibsrv_port,
+            "rag_snapshot": self.rag_snapshot,
+            "idle_timeout_seconds": self.idle_timeout_seconds,
         }
 
     @classmethod
@@ -102,6 +108,8 @@ class SessionState:
             password="",
         )
         sess.client_ibsrv_port = int(data.get("client_ibsrv_port") or 0)
+        sess.rag_snapshot = str(data.get("rag_snapshot", ""))
+        sess.idle_timeout_seconds = int(data.get("idle_timeout_seconds") or 60 * 60)
         return sess
 
     @property
@@ -156,7 +164,7 @@ def _pid_is_running(pid: int) -> bool:
     return True
 
 
-def _start_autoreload_watcher() -> None:
+def _start_autoreload_watcher(dev: str = "", dev_restart_timeout: float = 30.0) -> None:
     """Start a detached dev autoreload watcher once per host.
 
     The watcher must outlive the current stdio MCP process: `openclaw mcp reload`
@@ -164,8 +172,12 @@ def _start_autoreload_watcher() -> None:
     prevents every MCP start from creating another watcher.
     """
 
+    if dev != "openclaw":
+        logging.info("Answer42 autoreload watcher disabled: pass --dev openclaw to enable it")
+        return
+
     if os.getenv("ONEC_MCP_AUTORELOAD", "1").lower() in {"0", "false", "no", "off"}:
-        logging.info("testclient-bridge autoreload watcher disabled by ONEC_MCP_AUTORELOAD")
+        logging.info("Answer42 autoreload watcher disabled by ONEC_MCP_AUTORELOAD")
         return
 
     repo_root = Path(__file__).resolve().parents[2]
@@ -189,7 +201,16 @@ def _start_autoreload_watcher() -> None:
         AUTORELOAD_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
         with AUTORELOAD_LOG_FILE.open("ab") as log:
             proc = subprocess.Popen(
-                [sys.executable, str(watcher), "--root", str(repo_root), "--pid-file", str(AUTORELOAD_PID_FILE)],
+                [
+                    sys.executable,
+                    str(watcher),
+                    "--root",
+                    str(repo_root),
+                    "--pid-file",
+                    str(AUTORELOAD_PID_FILE),
+                    "--dev-restart-timeout",
+                    str(dev_restart_timeout),
+                ],
                 cwd=str(repo_root),
                 stdin=subprocess.DEVNULL,
                 stdout=log,
@@ -208,6 +229,55 @@ def _persist_sessions() -> None:
         json.dumps({sid: sess.to_json() for sid, sess in _SESSIONS.items()}, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+
+
+def _normalize_base_url(url: str) -> str:
+    return str(url or "").strip().rstrip("/")
+
+
+def _load_rag_bindings() -> dict[str, str]:
+    if not RAG_BINDINGS_FILE.exists():
+        return {}
+    try:
+        raw = json.loads(RAG_BINDINGS_FILE.read_text(encoding="utf-8"))
+        return {str(k): str(v) for k, v in dict(raw).items() if k and v}
+    except Exception as exc:
+        logging.warning("Could not read RAG bindings %s: %s", RAG_BINDINGS_FILE, exc)
+        return {}
+
+
+def _save_rag_binding(base_url: str, snapshot: str) -> None:
+    key = _normalize_base_url(base_url)
+    if not key or not snapshot:
+        return
+    data = _load_rag_bindings()
+    data[key] = snapshot
+    RAG_BINDINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    RAG_BINDINGS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _snapshot_for_base_url(base_url: str) -> str:
+    return _load_rag_bindings().get(_normalize_base_url(base_url), "")
+
+
+def _touch_session(sess: SessionState) -> None:
+    sess.last_activity_monotonic = time.monotonic()
+
+
+async def _idle_watch_session(session_id: str) -> None:
+    while True:
+        await asyncio.sleep(30)
+        sess = _SESSIONS.get(session_id)
+        if sess is None:
+            return
+        timeout = max(1, int(sess.idle_timeout_seconds or 60 * 60))
+        if time.monotonic() - sess.last_activity_monotonic >= timeout:
+            logging.info("Session %s idle for %ss; stopping", session_id, timeout)
+            try:
+                await _stop_session_impl(session_id, clean_data=False)
+            except Exception as exc:
+                logging.warning("idle stop_session failed for %s: %s", session_id, exc)
+            return
 
 
 def _load_persisted_sessions() -> dict[str, SessionState]:
@@ -272,14 +342,312 @@ def _record_tool(
     result: Any,
 ) -> Any:
     sess = _session(session_id)
+    _touch_session(sess)
+    text_only = action.startswith("rag_")
     try:
         sess.recorder.capture(
             lambda path, window, display: _screenshot_for_recorder(path, window, display, session_id),
-            action, params, result,
+            action, params, result, screenshot=not text_only,
         )
     except Exception as exc:
         logging.debug("recording capture failed for %s/%s: %s", session_id, action, exc)
     return result
+
+
+def _norm_key(value: Any) -> str:
+    return str(value or "").strip().casefold()
+
+
+def _walk_ui_tree(node: Any):
+    if not isinstance(node, dict):
+        return
+    yield node
+    for child in node.get("children") or []:
+        yield from _walk_ui_tree(child)
+
+
+def _metadata_name_from_navigation_url(url: str) -> str:
+    """Best-effort conversion from e1cib/list/... to a metadata full name."""
+    value = str(url or "")
+    for prefix in ("e1cib/list/", "e1cib/data/", "e1cib/command/"):
+        if value.startswith(prefix):
+            value = value[len(prefix):]
+            break
+    value = value.split("?", 1)[0]
+    ru_to_en = {
+        "Справочник.": "Catalog.",
+        "Документ.": "Document.",
+        "РегистрСведений.": "InformationRegister.",
+        "РегистрНакопления.": "AccumulationRegister.",
+        "РегистрБухгалтерии.": "AccountingRegister.",
+        "РегистрРасчета.": "CalculationRegister.",
+        "ПланВидовРасчета.": "ChartOfCalculationTypes.",
+        "ПланСчетов.": "ChartOfAccounts.",
+        "ПланВидовХарактеристик.": "ChartOfCharacteristicTypes.",
+        "ПланОбмена.": "ExchangePlan.",
+        "БизнесПроцесс.": "BusinessProcess.",
+        "Задача.": "Task.",
+        "Отчет.": "Report.",
+        "Обработка.": "DataProcessor.",
+        "Перечисление.": "Enum.",
+        "Константа.": "Constant.",
+        "ЖурналДокументов.": "DocumentJournal.",
+        "Последовательность.": "Sequence.",
+        "КритерийОтбора.": "FilterCriterion.",
+        "Нумератор.": "NumberingPrefix.",
+        "Подсистема.": "Subsystem.",
+        "ОбщаяКоманда.": "CommonCommand.",
+        "ГруппаКоманд.": "CommandGroup.",
+        "ХранилищеНастроек.": "SettingsStorage.",
+        "Роль.": "Role.",
+        "РегламентноеЗадание.": "ScheduledJob.",
+        "ОпределяемыйТип.": "DefinedType.",
+        "ОбщийМодуль.": "CommonModule.",
+        "ОбщаяФорма.": "CommonForm.",
+        "ОбщийМакет.": "CommonTemplate.",
+        "ОбщаяКартинка.": "CommonPicture.",
+        "ПараметрСеанса.": "SessionParameter.",
+        "ПодпискаНаСобытие.": "EventSubscription.",
+        "ФункциональнаяОпция.": "FunctionalOption.",
+        "ПараметрФункциональныхОпций.": "FunctionalOptionParameter.",
+        "Интерфейс.": "Interface.",
+        "Стиль.": "Style.",
+        "Язык.": "Language.",
+        "ПакетXDTO.": "XDTOPackage.",
+        "WebСервис.": "WebService.",
+        "WSСсылка.": "WSReference.",
+        "HTTPСервис.": "HTTPService.",
+        "СервисИнтеграции.": "IntegrationService.",
+        "ВнешнийИсточникДанных.": "ExternalDataSource.",
+        "Бот.": "Bot.",
+        "WebSocketКлиент.": "WebSocketClient.",
+        "ЦветПалитры.": "PaletteColor.",
+        "ЭлементСтиля.": "StyleElement.",
+        "ОбщийРеквизит.": "CommonAttribute.",
+    }
+    for ru, en in ru_to_en.items():
+        if value.startswith(ru):
+            return en + value[len(ru):]
+    return value
+
+
+def _metadata_name_to_rag_name(value: str) -> str:
+    """Convert runtime/e1cib English metadata names to Russian names used by RAG."""
+    text = str(value or "")
+    en_to_ru = {
+        "Catalog.": "Справочник.",
+        "Document.": "Документ.",
+        "InformationRegister.": "РегистрСведений.",
+        "AccumulationRegister.": "РегистрНакопления.",
+        "AccountingRegister.": "РегистрБухгалтерии.",
+        "CalculationRegister.": "РегистрРасчета.",
+        "ChartOfCalculationTypes.": "ПланВидовРасчета.",
+        "ChartOfAccounts.": "ПланСчетов.",
+        "ChartOfCharacteristicTypes.": "ПланВидовХарактеристик.",
+        "ExchangePlan.": "ПланОбмена.",
+        "BusinessProcess.": "БизнесПроцесс.",
+        "Task.": "Задача.",
+        "Report.": "Отчет.",
+        "DataProcessor.": "Обработка.",
+        "Enum.": "Перечисление.",
+        "Constant.": "Константа.",
+        "DocumentJournal.": "ЖурналДокументов.",
+        "Sequence.": "Последовательность.",
+        "FilterCriterion.": "КритерийОтбора.",
+        "NumberingPrefix.": "Нумератор.",
+        "Subsystem.": "Подсистема.",
+        "CommonCommand.": "ОбщаяКоманда.",
+        "CommandGroup.": "ГруппаКоманд.",
+        "SettingsStorage.": "ХранилищеНастроек.",
+        "Role.": "Роль.",
+        "ScheduledJob.": "РегламентноеЗадание.",
+        "DefinedType.": "ОпределяемыйТип.",
+        "CommonModule.": "ОбщийМодуль.",
+        "CommonForm.": "ОбщаяФорма.",
+        "CommonTemplate.": "ОбщийМакет.",
+        "CommonPicture.": "ОбщаяКартинка.",
+        "SessionParameter.": "ПараметрСеанса.",
+        "EventSubscription.": "ПодпискаНаСобытие.",
+        "FunctionalOption.": "ФункциональнаяОпция.",
+        "FunctionalOptionParameter.": "ПараметрФункциональныхОпций.",
+        "Interface.": "Интерфейс.",
+        "Style.": "Стиль.",
+        "Language.": "Язык.",
+        "XDTOPackage.": "ПакетXDTO.",
+        "WebService.": "WebСервис.",
+        "WSReference.": "WSСсылка.",
+        "HTTPService.": "HTTPСервис.",
+        "IntegrationService.": "СервисИнтеграции.",
+        "ExternalDataSource.": "ВнешнийИсточникДанных.",
+        "Bot.": "Бот.",
+        "WebSocketClient.": "WebSocketКлиент.",
+        "PaletteColor.": "ЦветПалитры.",
+        "StyleElement.": "ЭлементСтиля.",
+        "CommonAttribute.": "ОбщийРеквизит.",
+    }
+    for en, ru in en_to_ru.items():
+        if text.startswith(en):
+            return ru + text[len(en):]
+    return text
+
+
+def _rag_form_element_index(snapshot: str | int | None = None) -> dict[str, list[dict[str, Any]]]:
+    try:
+        items = _RAG.lookup_form_element_types(snapshot=snapshot).get("items", [])
+    except Exception as exc:
+        logging.debug("RAG form element lookup failed: %s", exc)
+        return {}
+    index: dict[str, list[dict[str, Any]]] = {}
+    for item in items:
+        for key in (item.get("name"), item.get("title"), item.get("data_path"), item.get("command_name")):
+            nk = _norm_key(key)
+            if nk:
+                index.setdefault(nk, []).append(item)
+    return index
+
+
+def _pick_rag_element(ui_node: dict[str, Any], candidates: list[dict[str, Any]], active_object: str = "") -> dict[str, Any] | None:
+    if not candidates:
+        return None
+    active_norm = _norm_key(active_object)
+    form_name = _norm_key(ui_node.get("form_name"))
+
+    def score(item: dict[str, Any]) -> int:
+        value = 0
+        if active_norm and active_norm in _norm_key(item.get("object_full_name")):
+            value += 20
+        if form_name and form_name == _norm_key(item.get("form_name")):
+            value += 5
+        if _norm_key(ui_node.get("name")) == _norm_key(item.get("name")):
+            value += 3
+        if _norm_key(ui_node.get("title")) == _norm_key(item.get("title")):
+            value += 2
+        return value
+
+    return sorted(candidates, key=score, reverse=True)[0]
+
+
+def _enrich_ui_tree_with_rag_types(tree: Any, snapshot: str | int | None = None) -> Any:
+    if not isinstance(tree, dict):
+        return tree
+    index = _rag_form_element_index(snapshot=snapshot)
+    if not index:
+        return tree
+    active_object = _metadata_name_from_navigation_url(str(tree.get("navigation_url") or ""))
+    for node in _walk_ui_tree(tree):
+        keys = [_norm_key(node.get("name")), _norm_key(node.get("title")), _norm_key(node.get("data_path"))]
+        candidates: list[dict[str, Any]] = []
+        seen: set[int] = set()
+        for key in keys:
+            for item in index.get(key, []):
+                ident = id(item)
+                if ident not in seen:
+                    candidates.append(item)
+                    seen.add(ident)
+        item = _pick_rag_element(node, candidates, active_object)
+        if item is None:
+            continue
+        value_type = item.get("attribute_type") or item.get("dcs_field_type") or item.get("element_type")
+        node["rag_type"] = value_type
+        node["rag"] = {
+            "object": item.get("object_full_name"),
+            "form": item.get("form_name"),
+            "element_type": item.get("element_type"),
+            "data_path": item.get("data_path"),
+            "attribute_type": item.get("attribute_type"),
+            "attribute_role": item.get("attribute_role"),
+            "dcs_field_type": item.get("dcs_field_type"),
+            "source_path": item.get("source_path"),
+        }
+    return tree
+
+
+def _standard_attributes_for_kind(kind: str) -> list[dict[str, str]]:
+    """Return standard (auto-generated) attributes for a metadata object kind.
+
+    1C automatically generates standard attributes for every object type.
+    These are always available in dynamic lists and auto-generated forms.
+    """
+    kind = str(kind or "").lower()
+    common = [
+        {"name": "Ссылка", "title": "Ссылка", "type": "Ref", "role": "standard"},
+        {"name": "ПометкаУдаления", "title": "ПометкаУдаления", "type": "Boolean", "role": "standard"},
+    ]
+    if kind in ("справочник", "catalog"):
+        return common + [
+            {"name": "Код", "title": "Код", "type": "String|Number", "role": "standard"},
+            {"name": "Наименование", "title": "Наименование", "type": "String", "role": "standard"},
+            {"name": "Предопределенный", "title": "Предопределенный", "type": "Boolean", "role": "standard"},
+            {"name": "ИмяПредопределенныхДанных", "title": "ИмяПредопределенныхДанных", "type": "String", "role": "standard"},
+        ]
+    if kind in ("документ", "document"):
+        return common + [
+            {"name": "Номер", "title": "Номер", "type": "String|Number", "role": "standard"},
+            {"name": "Дата", "title": "Дата", "type": "Date", "role": "standard"},
+            {"name": "Проведен", "title": "Проведен", "type": "Boolean", "role": "standard"},
+        ]
+    if kind in ("регистрсведений", "informationregister"):
+        return common + [
+            {"name": "Период", "title": "Период", "type": "Date", "role": "standard"},
+        ]
+    if kind in ("регистрнакопления", "accumulationregister"):
+        return common + [
+            {"name": "Период", "title": "Период", "type": "Date", "role": "standard"},
+        ]
+    return common
+
+
+def _rag_fields_for_object(object_full_name: str, snapshot: str | int | None = None) -> list[dict[str, Any]]:
+    if not object_full_name:
+        return []
+    rag_name = _metadata_name_to_rag_name(object_full_name)
+    try:
+        matches = _RAG.lookup_object(object=rag_name, snapshot=snapshot).get("matches", [])
+    except Exception as exc:
+        logging.debug("RAG object lookup failed for %s (%s): %s", object_full_name, rag_name, exc)
+        return []
+    fields: list[dict[str, Any]] = []
+    for match in matches:
+        kind = match.get("kind", "")
+        for std in _standard_attributes_for_kind(kind):
+            fields.append({
+                "name": std["name"],
+                "title": std["title"],
+                "type": std["type"],
+                "role": std["role"],
+                "source": "rag.standard_attribute",
+                "object": match.get("full_name"),
+                "filter_supported": True,
+                "order_supported": True,
+            })
+        for attr in match.get("attributes", []) or []:
+            fields.append({
+                "name": attr.get("name"),
+                "title": attr.get("synonym") or attr.get("name"),
+                "type": attr.get("type_name"),
+                "role": attr.get("role"),
+                "source": "rag.attribute",
+                "object": match.get("full_name"),
+                "filter_supported": True,
+                "order_supported": True,
+            })
+        for dcf in match.get("data_composition_fields", []) or []:
+            fields.append({
+                "name": dcf.get("field") or dcf.get("data_path"),
+                "title": dcf.get("title") or dcf.get("field") or dcf.get("data_path"),
+                "type": dcf.get("field_type"),
+                "data_path": dcf.get("data_path"),
+                "expression": dcf.get("expression"),
+                "source": "rag.dcs_field",
+                "object": match.get("full_name"),
+                "filter_supported": True,
+                "order_supported": True,
+            })
+    dedup: dict[tuple[str, str], dict[str, Any]] = {}
+    for field in fields:
+        key = (_norm_key(field.get("name")), _norm_key(field.get("title")))
+        dedup.setdefault(key, field)
+    return list(dedup.values())
 
 
 async def _bridge_call_recorded(
@@ -289,6 +657,7 @@ async def _bridge_call_recorded(
 ) -> Any:
     sess = await _ensure_restored_session(session_id)
     await _wait_for_bridge_connected(sess, timeout=60.0)
+    _touch_session(sess)
     result = await sess.bridge.call(method, params)
     return _record_tool(session_id, method, params, result)
 
@@ -299,7 +668,7 @@ def _screenshot_for_recorder(
     display: str,
     session_id: str = DEFAULT_SESSION,
 ) -> dict[str, Any]:
-    return _do_screenshot(path, window, display, session_id)
+    return screenshot(path=path, window=window, display=display, session_id=session_id)
 
 
 def _resolve_runtime(
@@ -332,25 +701,21 @@ def _resolve_runtime(
 
 
 @mcp.tool()
-def rag_source_detect(path: Annotated[str, "Path to 1C source directory"],
-    *,
-    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
-) -> dict[str, Any]:
-    """Detect 1C source format: EDT-style or Configurator XML dump."""
-    return _record_tool(session_id, "rag_source_detect", {"path": path}, _RAG.detect_source(path))
-
-
-@mcp.tool()
 def rag_source_add(
-    name: Annotated[str, "Logical source name, e.g. MS or Platform42"],
+    name: Annotated[str, "Logical source name, e.g. Configuration or Extension1"],
     path: Annotated[str, "Path to 1C source directory"],
     kind: Annotated[str, "base | extension | configuration | standalone"] = "standalone",
     format: Annotated[str, "auto | edt | designer_xml"] = "auto",
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> dict[str, Any]:
-    """Register or update a 1C source tree for RAG indexing."""
-    return _record_tool(session_id, "rag_source_add", {"name": name, "path": path, "kind": kind, "format": format}, _RAG.add_source(name=name, path=path, kind=kind, format=format))
+    """Register/update a 1C source tree; format is detected automatically when format=auto."""
+    detected = _RAG.detect_source(path) if format == "auto" else {"format": format}
+    effective_format = str(detected.get("format") or format)
+    result = _RAG.add_source(name=name, path=path, kind=kind, format=effective_format)
+    if isinstance(result, dict):
+        result["detected"] = detected
+    return _record_tool(session_id, "rag_source_add", {"name": name, "path": path, "kind": kind, "format": format}, result)
 
 
 @mcp.tool()
@@ -358,7 +723,7 @@ def rag_sources_list(*,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> list[dict[str, Any]]:
     """List registered 1C source trees."""
-    return _RAG.list_sources()
+    return _record_tool(session_id, "rag_sources_list", {}, _RAG.list_sources())
 
 
 @mcp.tool()
@@ -371,7 +736,13 @@ def rag_snapshot_create(
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> dict[str, Any]:
     """Create/update an effective configuration snapshot from base + extensions."""
-    return _RAG.create_snapshot(name=name, base=base, extensions=extensions, sources=sources)
+    result = _RAG.create_snapshot(name=name, base=base, extensions=extensions, sources=sources)
+    sess = _session(session_id)
+    sess.rag_snapshot = str(result.get("name") or name)
+    if sess.base_url:
+        _save_rag_binding(sess.base_url, sess.rag_snapshot)
+    _persist_sessions()
+    return result
 
 
 @mcp.tool()
@@ -379,7 +750,7 @@ def rag_snapshots_list(*,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> list[dict[str, Any]]:
     """List effective RAG snapshots and their layers."""
-    return _RAG.list_snapshots()
+    return _record_tool(session_id, "rag_snapshots_list", {}, _RAG.list_snapshots())
 
 
 @mcp.tool()
@@ -390,7 +761,14 @@ def rag_index_build(
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> dict[str, Any]:
     """Build/rebuild the SQLite/FTS RAG index for a source or snapshot."""
-    return _RAG.build_index(snapshot=snapshot, source=source)
+    sess = _session(session_id)
+    effective_snapshot = snapshot or sess.rag_snapshot or None
+    if effective_snapshot:
+        sess.rag_snapshot = str(effective_snapshot)
+        if sess.base_url:
+            _save_rag_binding(sess.base_url, sess.rag_snapshot)
+        _persist_sessions()
+    return _record_tool(session_id, "rag_index_build", {"snapshot": effective_snapshot, "source": source}, _RAG.build_index(snapshot=effective_snapshot, source=source))
 
 
 @mcp.tool()
@@ -401,7 +779,9 @@ def rag_lookup_object(
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> dict[str, Any]:
     """Look up an indexed 1C metadata object, including navigation, fields and forms."""
-    return _record_tool(session_id, "rag_lookup_object", {"object": object, "snapshot": snapshot}, _RAG.lookup_object(object=object, snapshot=snapshot))
+    sess = _session(session_id)
+    effective_snapshot = snapshot or sess.rag_snapshot or None
+    return _record_tool(session_id, "rag_lookup_object", {"object": object, "snapshot": effective_snapshot}, _RAG.lookup_object(object=object, snapshot=effective_snapshot))
 
 
 @mcp.tool()
@@ -413,67 +793,61 @@ def rag_query(
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> dict[str, Any]:
     """Search business terms and full-text RAG chunks in the local SQLite index."""
-    return _RAG.query(text=query, snapshot=snapshot, limit=limit)
-
-
-@mcp.tool()
-def bridge_status(*,
-    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
-) -> dict[str, Any]:
-    """Return WebSocket bridge status and URL for the 1C manager processor."""
-    if session_id not in _SESSIONS:
-        persisted = _load_persisted_sessions().get(session_id)
-        if persisted is not None:
-            status = persisted.bridge.status()
-            status["restorable"] = True
-            status["note"] = "Session metadata exists on disk; call an async tool to restore bridge listener."
-            return status
     sess = _session(session_id)
-    return sess.bridge.status()
+    effective_snapshot = snapshot or sess.rag_snapshot or None
+    return _record_tool(session_id, "rag_query", {"query": query, "snapshot": effective_snapshot, "limit": limit}, _RAG.query(text=query, snapshot=effective_snapshot, limit=limit))
 
 
 @mcp.tool()
-def runtime_status(*,
+def session_status(*,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> dict[str, Any]:
-    """Report the live state of the autonomous server + test-manager processes."""
+    """Return bridge, runtime, test-client and RAG state for a session."""
     sess = _SESSIONS.get(session_id) or _load_persisted_sessions().get(session_id)
+    if sess is not None:
+        _touch_session(sess)
     if sess is None:
         return {"running": False, "session_id": session_id, "reason": "session not found"}
+    bridge = sess.bridge.status()
     rt = sess.runtime
-    if rt is None:
-        return {"running": False, "session_id": session_id}
+    client_rt = sess.client_runtime
     return {
         "running": True,
         "session_id": session_id,
-        "infobase": str(rt.infobase.db_path),
-        "server": {
-            "pid": rt.server_process.pid if rt.server_process else None,
-            "alive": rt.server_process.poll() is None if rt.server_process else False,
-            "address": rt.server.address,
-            "port": rt.server.port,
-            "listening": runtime.is_port_listening(rt.server.address, rt.server.port),
-        },
-        "manager": {
+        "base_url": sess.base_url,
+        "version": sess.platform_dir.name,
+        "display": sess.display,
+        "bridge": bridge,
+        "manager": None if rt is None else {
             "pid": rt.manager_process.pid if rt.manager_process else None,
             "alive": rt.manager_process.poll() is None if rt.manager_process else False,
+            "server_pid": rt.server_process.pid if rt.server_process else None,
+            "server_alive": rt.server_process.poll() is None if rt.server_process else False,
+            "port": rt.server.port,
+            "log_dir": str(rt.log_dir),
         },
-        "log_dir": str(rt.log_dir),
+        "test_client": {
+            "port": sess.testclient_port,
+            "base_url": sess.base_url,
+            "client_ibsrv_port": sess.client_ibsrv_port,
+            "server_alive": client_rt.server_process.poll() is None if client_rt and client_rt.server_process else False,
+        },
+        "rag_snapshot": sess.rag_snapshot,
+        "idle_timeout_seconds": sess.idle_timeout_seconds,
     }
-
 
 
 @mcp.tool()
 async def start_session(
-    base_url: Annotated[str, "1C infobase URL (for version detection and later connect_test_client)"] = "",
-    username: Annotated[str, "1C username for later connect_test_client"] = "",
-    password: Annotated[str, "1C password for later connect_test_client"] = "",
+    base_url: Annotated[str, "Target 1C infobase URL; used for version detection and test-client connection"] = "",
+    username: Annotated[str, "1C username"] = "",
+    password: Annotated[str, "1C password"] = "",
     version: Annotated[str, "1C platform version override (auto-detected from base_url if empty)"] = "",
     session_id: Annotated[str, "Desired session id; auto-generated when empty"] = "",
-    start_pipeline: Annotated[bool, "Also create infobase, start ibsrv and test-manager"] = True,
+    start_pipeline: Annotated[bool, "Create manager/client infobases, start ibsrv/test-manager and connect test-client"] = True,
+    idle_timeout_minutes: Annotated[int, "Minutes of inactivity before automatic stop_session; 0 disables"] = 60,
 ) -> dict[str, Any]:
-    """One-shot session factory: auto-picks display, ports, platform version,
-    starts Xvfb, and optionally launches the full 1C pipeline."""
+    """One-shot session factory: detect version, start infrastructure and connect the 1C test client."""
     resolved_version = version or None
     if not resolved_version and base_url:
         resolved_version = _platform.detect_version_from_url(base_url)
@@ -482,6 +856,7 @@ async def start_session(
 
     platform_dir = _platform.find_platform_dir(resolved_version)
     actual_version = platform_dir.name
+    _platform.require_websocket_support(actual_version)
     logging.info("start_session: version=%s platform_dir=%s", actual_version, platform_dir)
 
     display = runtime.find_free_display()
@@ -499,6 +874,11 @@ async def start_session(
         ws_port=ws_port, ibsrv_port=ibsrv_port, testclient_port=testclient_port,
         data_dir=data_dir, base_url=base_url, username=username, password=password
     )
+    sess.idle_timeout_seconds = max(0, int(idle_timeout_minutes)) * 60
+    if base_url:
+        bound_snapshot = _snapshot_for_base_url(base_url)
+        if bound_snapshot:
+            sess.rag_snapshot = bound_snapshot
     sess.xvfb_process = runtime.start_xvfb(display)
     await sess.bridge.start()
     _SESSIONS[sid] = sess
@@ -549,12 +929,13 @@ async def start_session(
         client_ibsrv_name = "mcpclient"
 
         runtime.create_file_infobase(sess.ibcmd, sess.client_db_path)
-        # Do not load MCPTestManager.cf into the tested-client infobase:
-        # that configuration contains /TESTMANAGER-only type
-        # `ТестируемоеПриложение` and crashes when run as /TESTCLIENT.
-        # A clean empty infobase is enough for connection/window/screenshot
-        # protocol tests; domain-specific table/form coverage must use a
-        # dedicated tested-client configuration.
+        # Load a dedicated tested-client configuration.  It intentionally does
+        # not contain MCPTestManager code (which uses /TESTMANAGER-only types),
+        # but it does contain real metadata objects for positive UI E2E.
+        client_cf_path = runtime.DEFAULT_CLIENT_CF_BUILT
+        if not Path(client_cf_path).exists():
+            raise FileNotFoundError(f"MCPTestClient.cf not found at {client_cf_path}.")
+        runtime.load_configuration(sess.ibcmd, sess.client_db_path, client_cf_path)
 
         client_server_proc = runtime.start_standalone_server(
             ibsrv=sess.ibsrv, address=ibsrv_address, port=client_ibsrv_port,
@@ -581,28 +962,44 @@ async def start_session(
             "client_base_url": f"http://{ibsrv_address}:{client_ibsrv_port}",
         }
 
+    connect_result: Any = None
+    connect_base_url = base_url
+    if start_pipeline and not connect_base_url and pipeline_info.get("client_base_url"):
+        connect_base_url = str(pipeline_info["client_base_url"])
+    if connect_base_url:
+        connect_result = await _connect_test_client_impl(
+            sess, base_url=connect_base_url, username=username, password=password,
+            port=testclient_port, onec_path=sess.onec_thin, host="localhost", extra_args=""
+        )
+        _auto_maximize_test_client_result(connect_result, sess.display)
+
+    if sess.idle_timeout_seconds > 0:
+        asyncio.create_task(_idle_watch_session(sid))
+
     _persist_sessions()
     return {
         "session_id": sid, "version": actual_version,
         "platform_dir": str(platform_dir), "display": display,
         "ws_port": ws_port, "ibsrv_port": ibsrv_port,
         "testclient_port": testclient_port, "data_dir": str(data_dir),
-        "bridge_url": sess.bridge.url, **pipeline_info,
+        "bridge_url": sess.bridge.url, "rag_snapshot": sess.rag_snapshot,
+        "idle_timeout_seconds": sess.idle_timeout_seconds,
+        "test_client": connect_result, **pipeline_info,
     }
 
 
-@mcp.tool()
-async def stop_session(
-    session_id: Annotated[str, "Session to tear down"] = DEFAULT_SESSION,
-    clean_data: Annotated[bool, "Remove the session data directory"] = False,
-) -> dict[str, Any]:
-    """Tear down a session: stop test-manager, ibsrv, Xvfb, bridge."""
+async def _stop_session_impl(session_id: str = DEFAULT_SESSION, clean_data: bool = False) -> dict[str, Any]:
     try:
         sess = await _ensure_restored_session(session_id)
         _SESSIONS.pop(session_id, None)
     except ValueError:
         return {"stopped": False, "reason": f"session {session_id!r} not found"}
     stopped: list[str] = []
+    try:
+        await sess.bridge.call("disconnect_test_client", {})
+        stopped.append("test-client")
+    except Exception:
+        pass
     if sess.runtime is not None:
         runtime.kill_process(sess.runtime.manager_process, "test-manager")
         runtime.kill_process(sess.runtime.server_process, "ibsrv")
@@ -625,6 +1022,14 @@ async def stop_session(
 
 
 @mcp.tool()
+async def stop_session(
+    session_id: Annotated[str, "Session to tear down"] = DEFAULT_SESSION,
+    clean_data: Annotated[bool, "Remove the session data directory"] = False,
+) -> dict[str, Any]:
+    """Tear down a session: disconnect test-client, stop test-manager, ibsrv, Xvfb and bridge."""
+    return await _stop_session_impl(session_id=session_id, clean_data=clean_data)
+
+
 def launch_manager(
     platform_dir: Annotated[str, "1C platform directory override"] = "",
     db_path: Annotated[str, "File infobase path override"] = "",
@@ -704,7 +1109,7 @@ def export_eventlog(
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> dict[str, Any]:
-    """Export the 1C event log via ibcmd eventlog export."""
+    """Export the 1C event log."""
     sess = _session(session_id)
     ibcmd = str(Path(platform_dir) / "ibcmd") if platform_dir else sess.ibcmd
     if sess.runtime is not None and not eventlog_dir:
@@ -722,78 +1127,54 @@ def export_eventlog(
 
 
 @mcp.tool()
-async def stop_manager(
-    *,
-    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
-) -> dict[str, Any]:
-    """Tear down the manager + autonomous server for a session."""
-    sess = await _ensure_restored_session(session_id)
-    if sess.runtime is None:
-        return {"stopped": False, "reason": "no runtime"}
-    rt = sess.runtime
-    sess.runtime = None
-    runtime.kill_process(rt.manager_process, "test-manager")
-    runtime.kill_process(rt.server_process, "ibsrv")
-    # Also stop client ibsrv if running
-    if sess.client_runtime is not None:
-        client_rt = sess.client_runtime
-        sess.client_runtime = None
-        runtime.kill_process(client_rt.server_process, "ibsrv-client")
-    _persist_sessions()
-    return {"stopped": True}
-
-
-@mcp.tool()
 def credentials_list() -> list[dict[str, str]]:
     """List configured credential URL patterns with passwords redacted."""
     return _credentials_store().list_entries()
 
 
-@mcp.tool()
-async def connect_test_client(
-    base_url: Annotated[str, "1C infobase URL"] = "",
-    username: Annotated[str, "1C username"] = "",
-    password: Annotated[str, "1C password"] = "",
-    port: Annotated[int, "Test client TCP port (0 = use session's)"] = 0,
-    onec_path: Annotated[str, "1cv8c path override"] = "",
-    host: Annotated[str, "Host where the test client runs"] = "localhost",
-    extra_args: Annotated[str, "Extra raw 1C command-line arguments"] = "",
+async def _connect_test_client_impl(
+    sess: SessionState,
     *,
-    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+    base_url: str = "",
+    username: str = "",
+    password: str = "",
+    port: int = 0,
+    onec_path: str = "",
+    host: str = "localhost",
+    extra_args: str = "",
 ) -> Any:
     """Launch 1cv8c /TESTCLIENT inside the manager processor and connect."""
-    sess = await _ensure_restored_session(session_id)
     await _wait_for_bridge_connected(sess, timeout=60.0)
     r_base = base_url or sess.base_url
     r_user = username or sess.username
     r_pass = password if password else sess.password
     r_port = port if port else sess.testclient_port
     r_onec = onec_path or sess.onec_thin
-    # If no base_url provided, use the local client ibsrv (second autonomous server)
     if not r_base and sess.client_ibsrv_port:
         r_base = f"http://127.0.0.1:{sess.client_ibsrv_port}"
         r_user = r_user or ""
         r_pass = r_pass or ""
     if not r_base:
         raise ValueError("base_url is required")
-    # If credentials were not supplied explicitly, resolve them by base URL from
-    # the local credentials store. Empty string is a valid value for local
-    # no-auth infobases, so only fill when both username/password are blank.
     if not r_user and not r_pass:
         credentials = _credentials_store().lookup(r_base)
         if credentials:
             r_user = credentials["username"]
             r_pass = credentials["password"]
+    sess.base_url = r_base
+    sess.username = r_user
+    sess.password = r_pass
+    if sess.rag_snapshot:
+        _save_rag_binding(r_base, sess.rag_snapshot)
+    else:
+        bound_snapshot = _snapshot_for_base_url(r_base)
+        if bound_snapshot:
+            sess.rag_snapshot = bound_snapshot
     params = {"base_url": r_base, "username": r_user, "password": r_pass,
               "port": r_port, "onec_path": r_onec, "host": host, "extra_args": extra_args}
-    result: Any
-    try:
-        result = await sess.bridge.call("connect_test_client", params)
-    except Exception as exc:
-        _auto_maximize_on_error(sess.display)
-        raise exc
-    _auto_maximize_test_client_result(result, sess.display)
-    return _record_tool(session_id, "connect_test_client", params, result)
+    _touch_session(sess)
+    result = await sess.bridge.call("connect_test_client", params)
+    return _record_tool(sess.session_id, "connect_test_client", params, result)
 
 
 def _auto_maximize_on_error(display: str) -> None:
@@ -815,14 +1196,6 @@ def _auto_maximize_test_client_result(result: Any, display: str) -> None:
 
 
 @mcp.tool()
-async def disconnect_test_client(*,
-    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
-) -> Any:
-    """Disconnect the active 1C test client."""
-    return await _bridge_call_recorded(session_id, "disconnect_test_client", {})
-
-
-@mcp.tool()
 async def active_window(*,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
@@ -831,11 +1204,38 @@ async def active_window(*,
 
 
 @mcp.tool()
+async def windows_list(*,
+    max_depth: Annotated[int, "Serialization depth for each window"] = 2,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Return all windows of the tested 1C client application."""
+    return await _bridge_call_recorded(session_id, "windows_list", {"max_depth": max_depth})
+
+
+@mcp.tool()
+async def activate_window(
+    index: Annotated[int, "Window index from windows_list; -1 means search by name/title"] = -1,
+    title: Annotated[str, "Case-insensitive title substring"] = "",
+    name: Annotated[str, "Exact window name when available"] = "",
+    max_depth: Annotated[int, "Serialization depth for returned window"] = 2,
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Activate/switch to a tested 1C client window by index, title or name."""
+    return await _bridge_call_recorded(
+        session_id,
+        "activate_window",
+        {"index": index, "title": title, "name": name, "max_depth": max_depth},
+    )
+
+
+@mcp.tool()
 async def maximize_test_client_window(*,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
-    """Activate and maximize the active 1C test client window via the 1C test-client API."""
-    return await _bridge_call_recorded(session_id, "maximize_test_client_window", {})
+    """Activate and maximize the 1C test-client OS window via wmctrl/xdotool/Xlib."""
+    sess = _session(session_id)
+    return _maximize_external_window(title_contains="", display=sess.display, width=None, height=None)
 
 
 @mcp.tool()
@@ -859,11 +1259,22 @@ def maximize_test_client_external_window(
 
 @mcp.tool()
 async def ui_tree(max_depth: Annotated[int, "Maximum UI tree depth"] = 4,
+    include_rag_types: Annotated[bool, "Enrich UI elements with best-effort types from the local RAG index"] = True,
+    rag_snapshot: Annotated[str, "Optional RAG snapshot name/id used for type enrichment"] = "",
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
-    """Return a serialized tree of the active window/forms/elements."""
-    return await _bridge_call_recorded(session_id, "ui_tree", {"max_depth": max_depth})
+    """Return a serialized tree of the active window/forms/elements.
+
+    When RAG data is available, each matching element gets `rag_type` and `rag`
+    fields with metadata-derived type/source information.  Runtime 1C UI data is
+    returned unchanged when the RAG index has no match.
+    """
+    tree = await _bridge_call_recorded(session_id, "ui_tree", {"max_depth": max_depth})
+    if include_rag_types:
+        sess = _session(session_id)
+        tree = _enrich_ui_tree_with_rag_types(tree, snapshot=rag_snapshot or sess.rag_snapshot or None)
+    return tree
 
 
 @mcp.tool()
@@ -926,19 +1337,19 @@ async def activate_object(
 
 
 @mcp.tool()
-async def execute_window_command(command: Annotated[str, "Explicit 1C navigation link, e.g. e1cib/list/..."],
+async def open_navigation_link(navigation_link: Annotated[str, "Explicit 1C navigation link, e.g. e1cib/list/..."],
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
-    """Execute an explicit 1C navigation link in the active test-client window.
+    """Open an explicit 1C navigation link in the active test-client window.
 
     This tool intentionally rejects arbitrary form command names such as
     `ФормаНайти` or `СледующаяСтрока`. Use first-class MCP tools for form
     actions, table navigation, search/settings, and dynamic-list operations.
     """
-    if not command.startswith("e1cib/"):
-        raise ValueError(f"execute_window_command accepts only explicit e1cib/... navigation links; rejected: {command}")
-    return await _bridge_call_recorded(session_id, "execute_window_command", {"command": command})
+    if not navigation_link.startswith("e1cib/"):
+        raise ValueError(f"open_navigation_link accepts only explicit e1cib/... navigation links; rejected: {navigation_link}")
+    return await _bridge_call_recorded(session_id, "open_navigation_link", {"navigation_link": navigation_link})
 
 
 @mcp.tool()
@@ -1007,6 +1418,20 @@ async def tabular_document_text(
 ) -> Any:
     """Return text and dimensions of a tabular document field in the active window."""
     return await _bridge_call_recorded(session_id, "tabular_document_text", {"name": name, "title": title, "max_depth": max_depth})
+
+
+@mcp.tool()
+async def tabular_document_save(
+    name: Annotated[str, "Tabular document field technical name"] = "",
+    title: Annotated[str, "Tabular document field visible title"] = "",
+    path: Annotated[str, "Output file path; empty = auto-generated temp path"] = "",
+    format: Annotated[str, "Output format: pdf | xlsx | xls | mxl | html | txt"] = "pdf",
+    max_depth: Annotated[int, "Maximum search depth"] = 8,
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Save a tabular document field to a file in the selected format."""
+    return await _bridge_call_recorded(session_id, "tabular_document_save", {"name": name, "title": title, "path": path, "format": format, "max_depth": max_depth})
 
 
 @mcp.tool()
@@ -1158,6 +1583,18 @@ async def table_set_field(
 
 
 @mcp.tool()
+async def table_choose_field_from_list(
+    table: Annotated[str, "Table technical name"],
+    field: Annotated[str, "Column field technical name or title"],
+    search_by_title: Annotated[bool, "If true, match visible title instead of object name"] = False,
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Open the selection form for a reference field in a form table row."""
+    return await _bridge_call_recorded(session_id, "table_choose_field_from_list", {"table": table, "field": field, "search_by_title": search_by_title})
+
+
+@mcp.tool()
 async def table_edit_info(
     table: Annotated[str, "Table technical name"] = "ДополнительнаяИнформация",
     *,
@@ -1165,6 +1602,74 @@ async def table_edit_info(
 ) -> Any:
     """Return diagnostics for currently edited table row and its child fields."""
     return await _bridge_call_recorded(session_id, "table_edit_info", {"table": table})
+
+
+@mcp.tool()
+async def dynamic_list_available_fields(
+    object: Annotated[str, "1C metadata object full name, e.g. Catalog.ПС_Справочник1; empty = derive from active window"] = "",
+    rag_snapshot: Annotated[str, "Optional RAG snapshot name/id"] = "",
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Return RAG-known fields available for dynamic-list filtering and ordering."""
+    sess = _session(session_id)
+    if not object:
+        try:
+            win = await _bridge_call_recorded(session_id, "active_window", {})
+            object = _metadata_name_from_navigation_url(str(win.get("navigation_url") or ""))
+        except Exception:
+            object = ""
+    effective_snapshot = rag_snapshot or sess.rag_snapshot or None
+    fields = _rag_fields_for_object(object, snapshot=effective_snapshot)
+    return {"object": object, "rag_object": _metadata_name_to_rag_name(object), "snapshot": effective_snapshot, "count": len(fields), "fields": fields}
+
+
+@mcp.tool()
+async def dynamic_list_apply_settings(
+    filters: Annotated[str, "JSON array of filter objects [{field, value, comparison?}] or empty string"] = "",
+    orders: Annotated[str, "JSON array of order objects [{field, direction?}] or empty string"] = "",
+    clear_first: Annotated[bool, "Reset settings to defaults before applying new ones"] = False,
+    name: Annotated[str, "Dynamic list/table technical name"] = "Список",
+    title: Annotated[str, "Dynamic list/table visible title"] = "",
+    max_depth: Annotated[int, "Maximum search depth"] = 8,
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Apply dynamic-list filters/orders and optionally clear settings first.
+
+    `orders` are applied with the stable test-client API `УстановитьПорядок`.
+    `filters` are applied through the standard "Настроить список" dialog using
+    best-effort field/value filling; if a configuration renders the settings
+    form differently, the returned step contains the exact diagnostic/error.
+    """
+    steps: list[dict[str, Any]] = []
+    if clear_first:
+        cleared = await _bridge_call_recorded(session_id, "dynamic_list_clear_settings", {"button": ""})
+        steps.append({"action": "clear", "result": cleared})
+    filter_list = json.loads(filters) if filters else []
+    order_list = json.loads(orders) if orders else []
+    if filter_list:
+        opened = await _bridge_call_recorded(session_id, "dynamic_list_open_settings", {"button": ""})
+        steps.append({"action": "open_settings", "result": opened})
+        for spec in filter_list:
+            applied = await _bridge_call_recorded(session_id, "dynamic_list_apply_filter", {
+                "field": spec.get("field", ""),
+                "value": spec.get("value", ""),
+                "comparison": spec.get("comparison", "Equal"),
+                "name": name,
+                "title": title,
+                "max_depth": max_depth,
+            })
+            steps.append({"action": "filter", "spec": spec, "result": applied})
+        closed = await _bridge_call_recorded(session_id, "close_form", {})
+        steps.append({"action": "close_settings", "result": closed})
+    for spec in order_list:
+        field = spec.get("field", "")
+        ordered = await _bridge_call_recorded(session_id, "dynamic_list_set_order", {
+            "name": name, "title": title, "column_title": field, "max_depth": max_depth,
+        })
+        steps.append({"action": "order", "spec": spec, "result": ordered})
+    return {"applied": True, "filters": len(filter_list), "orders": len(order_list), "steps": steps}
 
 
 @mcp.tool()
@@ -1311,7 +1816,12 @@ def recording_capture(
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> dict[str, Any]:
     """Manually capture a screenshot/slide in the active recording session."""
-    event = _session(session_id).recorder.capture(_screenshot_for_recorder, action, {"note": note}, {"note": note})
+    event = _session(session_id).recorder.capture(
+        lambda path, window, display: _screenshot_for_recorder(path, window, display, session_id),
+        action,
+        {"note": note},
+        {"note": note},
+    )
     return event or {"active": False}
 
 
@@ -1389,10 +1899,22 @@ async def _run() -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="MCP server for 1C:Enterprise test manager")
     parser.add_argument("--log-level", default=os.getenv("ONEC_MCP_LOG_LEVEL", "INFO"))
+    parser.add_argument(
+        "--dev",
+        default=os.getenv("ONEC_MCP_DEV", ""),
+        choices=("", "openclaw"),
+        help="enable development integrations; currently only 'openclaw' starts the MCP autoreload watchdog",
+    )
+    parser.add_argument(
+        "--dev-restart-timeout",
+        type=float,
+        default=float(os.getenv("ONEC_MCP_DEV_RESTART_TIMEOUT", "30")),
+        help="seconds of no file changes before the OpenClaw MCP autoreload watchdog triggers reload",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO))
-    _start_autoreload_watcher()
+    _start_autoreload_watcher(args.dev, args.dev_restart_timeout)
     asyncio.run(_run())
 
 
