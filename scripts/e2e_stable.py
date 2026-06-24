@@ -190,6 +190,7 @@ async def main() -> None:
             start = await call_ok(session, "start_session", {
                 "session_id": sid,
                 "start_pipeline": True,
+                "command_parameter": "E2E_COMMAND_PARAMETER",
             })
             assert start["session_id"] == sid, start
             assert start.get("client_ibsrv_port"), start
@@ -224,7 +225,23 @@ async def main() -> None:
                 assert conn and conn["connected"] is True, start
 
                 # ── window / UI introspection ────────────────────────────
-                await call_ui_ok(session, "active_window", {"session_id": sid})
+                active = await call_ui_ok(session, "active_window", {"session_id": sid})
+                assert active.get("source") == "tested_application_active_window", active
+                windows = await call_ui_ok(session, "windows_list", {"session_id": sid})
+                assert windows.get("count", 0) >= 1, windows
+                assert len(windows.get("windows", [])) == windows.get("count"), windows
+                activated = await call_ui_ok(session, "activate_window", {"index": 0, "session_id": sid})
+                assert activated.get("activated") is True, activated
+                await call_ui_ok(session, "goto_start_page", {"session_id": sid})
+                # Navigation between opened windows can be unavailable when the client has only the start page open.
+                next_nav = await session.call_tool("goto_next_window", {"session_id": sid})
+                print("OK_OR_EXPECTED_ERROR goto_next_window", flush=True)
+                if not next_nav.isError:
+                    _parse_tool_result(next_nav)
+                prev_nav = await session.call_tool("goto_previous_window", {"session_id": sid})
+                print("OK_OR_EXPECTED_ERROR goto_previous_window", flush=True)
+                if not prev_nav.isError:
+                    _parse_tool_result(prev_nav)
                 await capture_screenshot(session, sid, str(screenshot_dir / "01-initial-window.png"))
 
                 # ── negative: missing objects still return diagnostics ───

@@ -846,6 +846,9 @@ async def start_session(
     session_id: Annotated[str, "Desired session id; auto-generated when empty"] = "",
     start_pipeline: Annotated[bool, "Create manager/client infobases, start ibsrv/test-manager and connect test-client"] = True,
     idle_timeout_minutes: Annotated[int, "Minutes of inactivity before automatic stop_session; 0 disables"] = 60,
+    extra_args: Annotated[str, "Extra raw 1C command-line arguments for the test client"] = "",
+    execute: Annotated[str, "External data processor/report path for the test-client /Execute command-line parameter"] = "",
+    command_parameter: Annotated[str, "Additional test-client /C value; when extra_args already contains /C, this value is appended with ';'"] = "",
 ) -> dict[str, Any]:
     """One-shot session factory: detect version, start infrastructure and connect the 1C test client."""
     resolved_version = version or None
@@ -969,7 +972,8 @@ async def start_session(
     if connect_base_url:
         connect_result = await _connect_test_client_impl(
             sess, base_url=connect_base_url, username=username, password=password,
-            port=testclient_port, onec_path=sess.onec_thin, host="localhost", extra_args=""
+            port=testclient_port, onec_path=sess.onec_thin, host="localhost",
+            extra_args=extra_args, execute=execute, command_parameter=command_parameter,
         )
         _auto_maximize_test_client_result(connect_result, sess.display)
 
@@ -1142,6 +1146,8 @@ async def _connect_test_client_impl(
     onec_path: str = "",
     host: str = "localhost",
     extra_args: str = "",
+    execute: str = "",
+    command_parameter: str = "",
 ) -> Any:
     """Launch 1cv8c /TESTCLIENT inside the manager processor and connect."""
     await _wait_for_bridge_connected(sess, timeout=60.0)
@@ -1171,7 +1177,9 @@ async def _connect_test_client_impl(
         if bound_snapshot:
             sess.rag_snapshot = bound_snapshot
     params = {"base_url": r_base, "username": r_user, "password": r_pass,
-              "port": r_port, "onec_path": r_onec, "host": host, "extra_args": extra_args}
+              "port": r_port, "onec_path": r_onec, "host": host,
+              "extra_args": extra_args, "execute": execute,
+              "command_parameter": command_parameter}
     _touch_session(sess)
     result = await sess.bridge.call("connect_test_client", params)
     return _record_tool(sess.session_id, "connect_test_client", params, result)
@@ -1226,6 +1234,45 @@ async def activate_window(
         session_id,
         "activate_window",
         {"index": index, "title": title, "name": name, "max_depth": max_depth},
+    )
+
+
+@mcp.tool()
+async def goto_start_page(*,
+    max_depth: Annotated[int, "Serialization depth for returned window"] = 2,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Navigate the main test-client window to the start page."""
+    return await _bridge_call_recorded(
+        session_id,
+        "goto_start_page",
+        {"max_depth": max_depth},
+    )
+
+
+@mcp.tool()
+async def goto_previous_window(*,
+    max_depth: Annotated[int, "Serialization depth for returned window"] = 2,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Navigate the main test-client window to the previous open window."""
+    return await _bridge_call_recorded(
+        session_id,
+        "goto_previous_window",
+        {"max_depth": max_depth},
+    )
+
+
+@mcp.tool()
+async def goto_next_window(*,
+    max_depth: Annotated[int, "Serialization depth for returned window"] = 2,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Navigate the main test-client window to the next open window."""
+    return await _bridge_call_recorded(
+        session_id,
+        "goto_next_window",
+        {"max_depth": max_depth},
     )
 
 
