@@ -2,7 +2,7 @@
 
 * detect_version_from_url - fetch the public login page and parse VERSION.
 * find_platform_dir - locate the requested (or latest) platform dir.
-* require_websocket_support - reject versions that do not support websockets.
+* require_websocket_support - reject unsupported 1C platform versions.
 """
 
 from __future__ import annotations
@@ -98,7 +98,7 @@ def _version_tuple(version: str) -> tuple[int, int, int, int]:
 
 
 def require_websocket_support(version: str) -> None:
-    """1С versions before 8.5 do not support websockets."""
+    """Answer42 requires 1С:Предприятие 8.3.27+."""
     major, minor, patch, _ = _version_tuple(version)
-    if (major, minor) < (8, 5):
-        raise ValueError(f"Версия {version} не поддерживает WebSocket. Требуется 1С 8.5+.")
+    if (major, minor, patch) < (8, 3, 27):
+        raise ValueError(f"Версия {version} не поддерживается. Требуется 1С:Предприятие 8.3.27+.")

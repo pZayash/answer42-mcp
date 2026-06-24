@@ -1,64 +1,63 @@
-# Installation
+# Установка Answer42
 
-## Python package
+## Python-пакет
 
 ```bash
-git clone https://gitlab.com/platform42/testclient-bridge.git
-cd testclient-bridge
+git clone <REPOSITORY_URL> answer42
+cd answer42
 python3 -m venv .venv
 . .venv/bin/activate
 pip install -e '.[screenshot]'
 ```
 
-## Build 1C configuration
+## Сборка конфигураций 1С
+
+Сборка конфигурации менеджера:
 
 ```bash
-DISPLAY=:99 ./scripts/build_cf.sh
+DISPLAY=:99 ./scripts/build_cf.sh src/cf build/MCPTestManager.cf
 ```
 
-This creates `build/MCPTestManager.cf` from `src/cf/`.
-
-## OpenClaw MCP server
-
-OpenClaw stores MCP servers in `mcp.servers`. Add `testclient-bridge` as a stdio server:
+Сборка тестовой конфигурации:
 
 ```bash
-/mcp set testclient-bridge={"command":"/home/openclaw/.openclaw/workspace/testclient-bridge/.venv/bin/testclient-bridge","args":[],"cwd":"/home/openclaw/.openclaw/workspace/testclient-bridge","enabled":true,"requestTimeoutMs":120000,"connectionTimeoutMs":30000}
+DISPLAY=:99 ./scripts/build_cf.sh src/client_cf build/MCPTestClient.cf
 ```
 
-If the server is installed editable in the current repo, the equivalent command path is:
+## MCP-сервер в OpenClaw
 
-```text
-/home/openclaw/.openclaw/workspace/testclient-bridge/.venv/bin/testclient-bridge
+OpenClaw хранит MCP-серверы в `mcp.servers`. Добавьте `answer42` как stdio server:
+
+```bash
+/mcp set answer42={"command":"/home/openclaw/.openclaw/workspace/answer42/.venv/bin/answer42","args":[],"cwd":"/home/openclaw/.openclaw/workspace/answer42","enabled":true,"requestTimeoutMs":120000,"connectionTimeoutMs":30000}
 ```
 
-After changing MCP config, restart/reload OpenClaw gateway if hot reload does not pick it up.
+После изменения MCP config перезапустите или перезагрузите OpenClaw gateway, если hot reload не подхватил конфигурацию.
 
-## OpenClaw skills
+## Skills
 
-The repo contains agent skills:
+Репозиторий содержит skills для агентов:
 
-- `skills/testclient-bridge/SKILL.md`
-- `skills/testclient-bridge-rag/SKILL.md`
+- `skills/answer42/SKILL.md`
+- `skills/answer42-rag/SKILL.md`
 
-Install them into the OpenClaw workspace skills directory:
+Установка в workspace skills directory:
 
 ```bash
 mkdir -p ~/.openclaw/workspace/skills
-cp -a skills/testclient-bridge ~/.openclaw/workspace/skills/
-cp -a skills/testclient-bridge-rag ~/.openclaw/workspace/skills/
+cp -a skills/answer42 ~/.openclaw/workspace/skills/
+cp -a skills/answer42-rag ~/.openclaw/workspace/skills/
 ```
-
-Or apply them through OpenClaw Skill Workshop when working from an agent session.
 
 ## Smoke checks
 
 ```bash
 PYTHONPATH=src python3 -m pytest -q
-DISPLAY=:99 ./scripts/build_cf.sh
+DISPLAY=:99 ./scripts/build_cf.sh src/cf build/MCPTestManager.cf
+DISPLAY=:99 ./scripts/build_cf.sh src/client_cf build/MCPTestClient.cf
 ```
 
-Optional full E2E against dev-06:
+Полный E2E:
 
 ```bash
 DISPLAY=:99 python3 scripts/e2e_stable.py

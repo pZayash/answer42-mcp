@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Auto-reload OpenClaw MCP runtimes when testclient-bridge code changes.
+"""Auto-reload OpenClaw MCP runtimes when Answer42 code changes.
 
 This is intentionally outside the MCP stdio process: stdio JSON-RPC sessions cannot
 be hot-reloaded safely. On file changes we ask OpenClaw to dispose cached MCP
-runtimes; the next tool call starts a fresh testclient-bridge process.
+runtimes; the next tool call starts a fresh Answer42 process.
 """
 from __future__ import annotations
 
@@ -53,7 +53,13 @@ def main() -> int:
     parser.add_argument("--root", default=str(Path(__file__).resolve().parents[1]))
     parser.add_argument("--interval", type=float, default=1.0)
     parser.add_argument("--debounce", type=float, default=1.5)
-    parser.add_argument("--server", default="testclient-bridge")
+    parser.add_argument(
+        "--dev-restart-timeout",
+        type=float,
+        default=30.0,
+        help="seconds to wait after the last detected change before reloading OpenClaw MCP runtimes",
+    )
+    parser.add_argument("--server", default="answer42")
     parser.add_argument("--once", action="store_true", help="wait for one change, reload once, exit")
     parser.add_argument("--pid-file", default="", help="write watcher pid to this file and remove it on exit")
     args = parser.parse_args()
@@ -82,12 +88,23 @@ def main() -> int:
         new = snapshot(root, patterns)
         if new == current:
             continue
-        # debounce bursts of editor writes
-        time.sleep(args.debounce)
-        new = snapshot(root, patterns)
-        if new == current:
+        # Debounce bursts of editor writes.  For OpenClaw development this must
+        # be long enough to avoid reloading the MCP process on every small file
+        # write while an agent is applying a multi-file patch.
+        deadline = time.monotonic() + max(args.debounce, args.dev_restart_timeout)
+        stable = new
+        while True:
+            time.sleep(args.interval)
+            newer = snapshot(root, patterns)
+            if newer != stable:
+                stable = newer
+                deadline = time.monotonic() + max(args.debounce, args.dev_restart_timeout)
+                continue
+            if time.monotonic() >= deadline:
+                break
+        if stable == current:
             continue
-        current = new
+        current = stable
         print("[mcp-autoreload] change detected; running openclaw mcp reload", flush=True)
         code = run_reload(args.server)
         print(f"[mcp-autoreload] reload exit code {code}", flush=True)

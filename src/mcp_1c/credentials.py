@@ -33,14 +33,14 @@ class CredentialsStore:
         {
           "entries": [
             {
-              "url": "https://beta-ms.42clouds.com/ms",
-              "username": "Admin",
-              "password": "beta"
+              "url": "https://example.invalid/infobase",
+              "username": "user",
+              "password": "secret"
             },
             {
-              "url": "https://*.42clouds.com/*",
-              "username": "testuser",
-              "password": "123321"
+              "url": "https://*.example.invalid/*",
+              "username": "wildcard-user",
+              "password": "wildcard-secret"
             }
           ]
         }

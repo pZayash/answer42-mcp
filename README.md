@@ -1,16 +1,20 @@
-# testclient-bridge
+# Answer42
 
-MCP-мост к **1С:Предприятию** через клиент тестирования.
+<p align="center">
+  <img src="docs/assets/answer42-logo.png" alt="Answer42 logo" width="220">
+</p>
+
+**Answer42** — MCP-инструмент для интерактивного управления UI **1С:Предприятия** через клиент тестирования. Он позволяет AI-агенту открывать формы 1С, нажимать кнопки, заполнять поля, выбирать ссылки из форм выбора, работать с таблицами, динамическими списками и табличными документами.
+
+> **The Answer to Life, Universe, and 1C — UI Driver**
 
 Проект даёт AI-агенту три способности:
 
-1. **UI automation** — управление интерфейсом 1С через `/TESTMANAGER` + `/TESTCLIENT`.
-2. **Runtime diagnostics** — выгрузка журнала регистрации автономного сервера через `ibcmd eventlog export`.
-3. **RAG metadata index** — локальный SQLite/FTS индекс конфигураций 1С (EDT, XML-выгрузка Конфигуратора, base + extensions).
+1. **Интерактивное управление UI 1С** — открыть форму, кликнуть кнопку, активировать поле, заполнить значение, выбрать строку, провести сценарий через `/TESTMANAGER` + `/TESTCLIENT`.
+2. **Доказательная запись клиентского тестирования** — записывать аннотированные PDF/GIF/MP4-слайды с MCP method/request/response и скриншотами окна 1С.
+3. **RAG-индекс метаданных** — локальный SQLite/FTS индекс конфигураций 1С (EDT, XML-выгрузка Конфигуратора, base + extensions), включая подсказки для `ui_tree` и dynamic-list settings.
 
 ## Быстрый старт
-
-### One-shot сессия (рекомендуется)
 
 ```bash
 python3 -m venv .venv
@@ -18,56 +22,27 @@ python3 -m venv .venv
 pip install -e '.[screenshot,dev,window-control]'
 
 # Запуск MCP-сервера (transport: stdio)
-testclient-bridge --ws-host 127.0.0.1 --ws-port 8765
+answer42 --ws-host 127.0.0.1 --ws-port 8765
 ```
 
-Одна сессия через MCP tool:
+Запуск сессии и подключение тестируемой базы выполняются одним MCP-вызовом:
 
 ```text
 start_session(
-  base_url="https://your-stand.42clouds.com/ms",
-  username="your-login",
-  password="your-password",
-  version="8.5.1.1150",  # опционально, авто-детект из base_url
-  session_id="my-session",  # опционально, авто-генерация
-  start_pipeline=True  # запустить ibsrv + test-manager
-)
-```
-
-Возвращает:
-
-```json
-{
-  "session_id": "my-session",
-  "version": "8.5.1.1150",
-  "platform_dir": "/opt/1cv8/x86_64/8.5.1.1150",
-  "display": ":99",
-  "ws_port": 8765,
-  "ibsrv_port": 8314,
-  "testclient_port": 1538,
-  "data_dir": "/tmp/onec-mcp/sessions/my-session",
-  "bridge_url": "ws://127.0.0.1:8765/bridge",
-  "manager_pid": 12345,
-  "ws_url": "http://127.0.0.1:8314",
-  "log_dir": "/tmp/onec-mcp/sessions/my-session/logs"
-}
-```
-
-Подключение тестируемой базы:
-
-```text
-connect_test_client(
   session_id="my-session",
   base_url="<TARGET_INFOBASE_URL>",
   username="<USERNAME>",
   password="<PASSWORD>",
-  port=1538
+  idle_timeout_minutes=60,
+  start_pipeline=True
 )
 ```
 
-Логин/пароль можно не передавать явно: `connect_test_client` умеет брать их из локального credentials-файла по `base_url`.
+`start_session` определяет версию 1С по `base_url`, поднимает инфраструктуру Answer42 (Xvfb, свободные порты, WebSocket bridge, файловую базу менеджера, автономный сервер и test-manager) и сразу подключает клиент тестирования к целевой информационной базе. После `idle_timeout_minutes` минут неактивности сессия автоматически завершается; значение по умолчанию — 60 минут.
 
-### Безопасное хранение логинов/паролей
+Логин/пароль можно не передавать явно: `start_session` умеет брать их из локального credentials-файла по `base_url`.
+
+## Безопасное хранение логинов и паролей
 
 По умолчанию MCP-сервер читает файл:
 
@@ -87,14 +62,14 @@ export ONEC_MCP_CREDENTIALS_FILE=/secure/path/credentials.json
 {
   "entries": [
     {
-      "url": "https://beta-ms.42clouds.com/ms",
-      "username": "Admin",
-      "password": "beta"
+      "url": "https://example.invalid/infobase",
+      "username": "<USERNAME>",
+      "password": "<PASSWORD>"
     },
     {
-      "url": "https://*.42clouds.com/*",
-      "username": "testuser",
-      "password": "123321"
+      "url": "https://*.example.invalid/*",
+      "username": "<WILDCARD_USERNAME>",
+      "password": "<WILDCARD_PASSWORD>"
     }
   ]
 }
@@ -108,181 +83,111 @@ export ONEC_MCP_CREDENTIALS_FILE=/secure/path/credentials.json
 stop_session(session_id="my-session", clean_data=False)
 ```
 
-### Low-level запуск (legacy)
-
-Через `launch_manager()` и ручное управление процессами. См. раздел "Запуск менеджера тестирования".
-
 ## Требования
 
 - Python 3.11+
-- Пакеты: `mcp`, `websockets`, `pydantic`; для скриншотов — `mss`; для управления OS-окном — `python-xlib`/`wmctrl`/`xdotool`
-- 1С:Предприятие 8.5+ с поддержкой WebSocket-клиентов и режима тестирования
+- 1С:Предприятие 8.3.27+
+- Пакеты Python: `mcp`, `websockets`, `pydantic`; для скриншотов — `mss`; для управления OS-окном — `python-xlib`/`wmctrl`/`xdotool`
 - GUI/Xvfb для headless-сервера
 
 ## Безопасность стендов и учётных данных
 
-В репозитории не должно быть реальных URL стендов, логинов или паролей. Все параметры целевой базы передаются явно при вызове `connect_test_client` или через локальные переменные окружения/секретное хранилище:
+В репозитории не должно быть реальных URL стендов, логинов или паролей. Все параметры целевой базы передаются явно при вызове `start_session` или через локальные переменные окружения/секретное хранилище.
 
-- `TARGET_INFOBASE_URL` — URL тестируемой информационной базы;
-- `TARGET_USERNAME` — пользователь тестируемой базы;
-- `TARGET_PASSWORD` — пароль;
-- `TARGET_TESTCLIENT_PORT` — порт клиента тестирования, по умолчанию `1538`.
-
-Примеры в документации используют только плейсхолдеры (`<TARGET_INFOBASE_URL>`, `<USERNAME>`, `<PASSWORD>`). Перед публикацией артефактов записи проверяйте, что параметры вызовов заредактированы: recorder маскирует ключи вроде `password`, но URL и логин тоже не должны попадать в публичные материалы.
+Примеры в документации используют только плейсхолдеры (`<TARGET_INFOBASE_URL>`, `<USERNAME>`, `<PASSWORD>`). Перед публикацией артефактов проверяйте, что параметры вызовов заредактированы: recorder маскирует ключи вроде `password`, но URL и логин тоже не должны попадать в публичные материалы.
 
 ## Архитектура
 
-### Сессии
+Поток выполнения:
 
-Сервер поддерживает **одновременные изолированные сессии** в рамках одного MCP-процесса. Каждая сессия получает:
-
-- Свой `Xvfb` display (автоподбор из `:99`–`:199`)
-- Свои TCP-порты (WebSocket bridge, ibsrv HTTP, test-client)
-- Свою файловую базу (`/tmp/onec-mcp/sessions/{session_id}/ib`)
-- Свои логи (`/tmp/onec-mcp/sessions/{session_id}/logs`)
-
-`session_id` передаётся явным keyword-only параметром во все MCP tools. Если не указан — используется сессия `"default"` (обратная совместимость).
-
-### Компоненты
-
-```text
-MCP client (LLM/agent)
-        │ stdio MCP
-        ▼
-Python MCP server (testclient-bridge)
-        │ JSON-RPC-like requests
-        ▼
-WebSocket server (ws://127.0.0.1:{port}/bridge)
-        │
-        ▼
-1C test manager (1cv8c /WS ... /TESTMANAGER)
-        │ opens embedded processor MCPTestManager
-        │ 1C test manager API (ТестируемоеПриложение)
-        ▼
-1C test client (/TESTCLIENT -TPort{port})
-        │
-        ▼
-Target infobase (<TARGET_INFOBASE_URL>)
-```
+1. MCP-клиент вызывает tools через stdio MCP.
+2. Answer42 принимает MCP-вызовы и передаёт команды в WebSocket bridge.
+3. 1С test manager подключается к bridge и выполняет BSL-dispatch.
+4. Test manager управляет 1С test client через API `ТестируемоеПриложение`.
+5. Test client выполняет интерактивные операции в целевой информационной базе.
 
 Подробнее: [`docs/architecture.md`](docs/architecture.md).
 
-## Сборка конфигурации 1С
+## Сборка конфигураций 1С
 
-Конфигурация `MCPTestManager.cf` содержит встроенную обработку-мост и собирается из XML-исходников `src/cf/`:
-
-```bash
-DISPLAY=:99 ./scripts/build_cf.sh
-```
-
-## Запуск менеджера тестирования
-
-Через MCP tool `launch_manager` или вручную:
+Конфигурация менеджера тестирования собирается из XML-исходников `src/cf/`:
 
 ```bash
-# 1. Создать файловую базу
-/opt/1cv8/x86_64/8.5.1.1150/ibcmd infobase create --db-path=/tmp/onec-mcp/ib --create-database
-
-# 2. Загрузить конфигурацию с обработкой-мостом
-/opt/1cv8/x86_64/8.5.1.1150/ibcmd config load --db-path=/tmp/onec-mcp/ib build/MCPTestManager.cf
-
-# 3. Запустить автономный сервер
-/opt/1cv8/x86_64/8.5.1.1150/ibsrv --data=/tmp/onec-mcp/ibsrv-data --name=mcp
-
-# 4. Запустить менеджер тестирования
-DISPLAY=:99 /opt/1cv8/x86_64/8.5.1.1150/1cv8c ENTERPRISE \
-  /WS"http://127.0.0.1:8314" \
-  /Lru /VLru_RU \
-  /TESTMANAGER
+DISPLAY=:99 ./scripts/build_cf.sh src/cf build/MCPTestManager.cf
 ```
 
-## Подключение тестируемой базы
+Тестовая конфигурация для E2E собирается из XML-исходников `src/client_cf/`:
 
-MCP tool `connect_test_client` требует явные параметры целевой базы. Значения не дефолтятся в коде и не должны коммититься:
-
-```text
-connect_test_client(
-  base_url="<TARGET_INFOBASE_URL>",
-  username="<USERNAME>",
-  password="<PASSWORD>",
-  port=1538,
-  onec_path="/opt/1cv8/x86_64/8.5.1.1150/1cv8c"
-)
+```bash
+DISPLAY=:99 ./scripts/build_cf.sh src/client_cf build/MCPTestClient.cf
 ```
 
-## MCP tools
+E2E-сценарий всегда пересобирает `build/MCPTestClient.cf` из `src/client_cf/`, чтобы тесты не использовали устаревший артефакт.
 
-### Lifecycle
+## MCP-инструменты
 
-- `start_session(base_url, username, password, version, session_id, start_pipeline)` — one-shot: Xvfb + free ports + version detection + ibsrv + test-manager.
-- `stop_session(session_id, clean_data)` — остановка всех процессов, Xvfb, bridge, опционально удаление data_dir.
-- `bridge_status(session_id)` — статус WebSocket bridge.
-- `runtime_status(session_id)` — состояние процессов автономного сервера и менеджера.
-- `launch_manager(...)` — полный конвейер: ibcmd → ibsrv → 1cv8c /WS /TESTMANAGER (low-level, внутри существующей сессии).
-- `stop_manager(session_id)` — остановка manager + ibsrv (без остановки сессии).
-- `export_eventlog(...)` — выгрузка журнала регистрации через `ibcmd eventlog export`.
+### Жизненный цикл
 
-### Test client
+- `start_session(...)` — единый запуск: определение версии по `base_url`, Xvfb, свободные порты, ibsrv, test-manager и подключение клиента тестирования.
+- `session_status(session_id)` — состояние bridge, runtime, клиента тестирования и RAG snapshot.
+- `stop_session(session_id, clean_data)` — отключение клиента тестирования и остановка всех процессов, Xvfb и bridge.
 
-- `connect_test_client(base_url, username, password, port, onec_path, session_id)` — подключить тест-клиент.
-- `disconnect_test_client(session_id)` — отключить.
-
-### UI automation
+### Автоматизация UI
 
 - `active_window()` — активное окно.
-- `ui_tree(max_depth)` — дерево UI.
-- `command_bar()` — командная панель.
-- `current_element()` — текущий элемент.
-- `find_object(name, type)` — найти объект в дереве UI.
-- `activate_object(name, type)` — активировать объект.
-- `execute_window_command(command)` — выполнить команду окна.
+- `windows_list(max_depth)` — список окон тестируемого приложения.
+- `activate_window(index, title, name)` — переключить активное окно по индексу, заголовку или имени.
+- `ui_tree(max_depth, include_rag_types, rag_snapshot)` — дерево UI с RAG-типами элементов, когда доступен индекс метаданных.
+- `command_bar()` — диагностическая информация по командной панели, когда она доступна API тест-клиента.
+- `current_element()` — диагностическая информация по текущему элементу, когда она доступна API тест-клиента.
+- `find_object(name, title, type)` — найти объект в дереве UI.
+- `activate_object(name, title, type)` — активировать объект.
+- `open_navigation_link(navigation_link)` — открыть навигационную ссылку `e1cib/...`.
 - `click_button(name, search_by_title)` — нажать кнопку.
-- `set_field_value(name, value)` — установить значение поля.
+- `set_field_value(field_name, value, search_by_title)` — установить значение поля.
 - `create_new_item()` — создать новый элемент.
 - `save_form()` — сохранить форму.
 - `close_form()` — закрыть форму.
 - `screenshot(path)` — скриншот экрана.
 
-### Table / table-part
+### Таблицы и табличные части
 
-- `table_rows(table_name)` — строки таблицы.
-- `table_find_row(table_name, substring)` — найти строку по подстроке.
-- `table_goto_row(table_name, index)` — перейти к строке по индексу.
-- `table_current_row(table_name)` — текущая строка.
-- `table_selected_rows(table_name)` — выделенные строки.
-- `table_set_field(table_name, field, value)` — установить значение в ячейке.
-- `table_edit_info(table_name)` — информация о редактировании таблицы.
-- `toggle_field(name)` — переключить флажок.
+- `table_rows(...)` — строки таблицы.
+- `table_find_row(...)` — найти строку по подстроке.
+- `table_goto_row(...)` — перейти к строке.
+- `table_current_row(...)` — текущая строка.
+- `table_selected_rows(...)` — выделенные строки.
+- `table_set_field(...)` — установить значение в ячейке.
+- `table_choose_field_from_list(...)` — открыть форму выбора для ссылочного поля в строке табличной части.
+- `table_edit_info(...)` — информация о редактировании таблицы.
+- `table_move_row(...)` — перейти к первой/следующей/предыдущей/последней строке.
 
-### Reference / selection
+### Динамические списки
 
-- `choose_field_from_list(field_name, substring)` — выбрать из списка по подстроке.
-- `choose_field_first_row(field_name)` — выбрать первую строку списка.
-- `choose_current_row()` — выбрать текущую строку.
+- `dynamic_list_available_fields(object, rag_snapshot)` — поля, доступные для отбора/сортировки по RAG-индексу.
+- `dynamic_list_apply_settings(filters, orders, clear_first)` — применить сортировки через API тест-клиента и best-effort отборы через стандартную форму **Настроить список**.
+- `dynamic_list_set_order(column_title, name="Список")` — сортировка по видимому заголовку колонки.
+- `dynamic_list_output()` — команда **Вывести список** с возвратом текста табличного документа, когда он доступен.
+- `dynamic_list_open_settings()` — открыть **Настроить список**.
+- `dynamic_list_clear_settings()` — сбросить настройки динамического списка.
+- `dynamic_list_open_form_settings()` — открыть **Изменить форму**.
 
-### Dynamic list tools
+### Табличные документы
 
-- `dynamic_list_set_order` — сортировка по видимому заголовку колонки (`УстановитьПорядок(<ЗаголовокКолонки>)`).
-- `dynamic_list_output` — команда **Вывести список** с возвратом текста табличного документа, когда он доступен.
-- `dynamic_list_open_settings` — открыть **Настроить список**.
-- `dynamic_list_clear_settings` — сбросить настройки динамического списка.
-- `dynamic_list_open_form_settings` — открыть **Изменить форму**.
+- `tabular_documents(include_text)` — список табличных документов в активном окне.
+- `tabular_document_text(...)` — текст табличного документа.
+- `tabular_document_save(path, format)` — сохранить табличный документ в выбранном формате.
 
-### Evidence recording
 
-Use `recording_start(output_dir, display, window)` before a workflow. Recorded tool calls create screenshots and annotated slides. Finish with `recording_stop()` to build:
+### Доказательная запись
 
-- `manifest.json`
-- `recording.gif`
-- `recording.mp4`
-- `recording.pdf` when ImageMagick is installed
+- `recording_start(output_dir, display, window)` — включить доказательную запись.
+- `recording_capture(action, note)` — вручную добавить доказательный слайд.
+- `recording_stop()` — собрать `manifest.json`, `recording.gif`, `recording.mp4`, `recording.pdf` (если доступен backend PDF).
 
-For OS window maximization use `maximize_test_client_external_window()`. It tries `wmctrl`, then `xdotool`, then the built-in `python-xlib` fallback.
+### RAG / индекс метаданных
 
-### RAG / metadata index
-
-- `rag_source_detect(path)` — определить формат исходников.
-- `rag_source_add(name, path, kind, format)` — зарегистрировать источник.
+- `rag_source_add(name, path, kind, format="auto")` — зарегистрировать источник; формат определяется автоматически при `format="auto"`.
 - `rag_sources_list()` — список источников.
 - `rag_snapshot_create(name, base, extensions, sources)` — создать effective snapshot.
 - `rag_snapshots_list()` — список snapshot-ов.
@@ -290,23 +195,26 @@ For OS window maximization use `maximize_test_client_external_window()`. It trie
 - `rag_lookup_object(object, snapshot)` — найти объект метаданных.
 - `rag_query(query, snapshot, limit)` — полнотекстовый поиск.
 
-CLI-обёртка:
+CLI-пример:
 
 ```bash
-python3 scripts/rag_cli.py add-source MS /path/to/MS/src --kind base
-python3 scripts/rag_cli.py snapshot MS+Platform42 --base MS --extension Platform42
-python3 scripts/rag_cli.py build --snapshot MS+Platform42
-python3 scripts/rag_cli.py lookup РегистрСведений.РезервныеКопииОбластейДанных --snapshot MS+Platform42
+python3 scripts/rag_cli.py add-source Configuration /path/to/configuration/src --kind base
+python3 scripts/rag_cli.py add-source Extension1 /path/to/extension/src --kind extension
+python3 scripts/rag_cli.py snapshot Configuration+Extension1 --base Configuration --extension Extension1
+python3 scripts/rag_cli.py build --snapshot Configuration+Extension1
+python3 scripts/rag_cli.py lookup РегистрСведений.Регистр1 --snapshot Configuration+Extension1
 ```
 
 ## Ограничения
 
-- Одно активное WebSocket-подключение обработки 1С.
-- Скриншот делается Python-стороной через `mss`; нужен общий DISPLAY.
-- `/TESTMANAGER` обязателен — это режим тонкого клиента с управлением клиентами тестирования.
-- `ManagedApplicationModule.ПриНачалеРаботыСистемы` не вызывается в `/TESTMANAGER` на 8.5.1 — обработка открывается через `ОбщаяКоманда` с `Autostart=true` или через командную панель.
-- Форма пользовательской настройки **«Изменить форму»** частично недоступна для надёжной автоматизации через API клиента тестирования. В частности, команда **«Добавить поля»** в верхней панели формы настройки может быть видна на скриншоте и в диагностическом тексте, но не нажиматься как обычная `ТестируемаяКнопкаФормы`: `click_button` может не находить её, а `activate_object` может вернуть `activated=true` без открытия диалога добавления полей. Не используйте X11-клики как обходной путь. Для проверяемых сценариев фильтрации динамических списков используйте **«Настроить список...»** и доступные поля компоновщика; для вывода вложенной колонки через **«Изменить форму»** текущая архитектура не гарантирует выполнение.
+- Форма пользовательской настройки **«Изменить форму»** частично недоступна для надёжной автоматизации через API клиента тестирования. В частности, команда **«Добавить поля»** в верхней панели формы настройки может быть видна на скриншоте и в диагностическом тексте, но не нажиматься как обычная `ТестируемаяКнопкаФормы`: `click_button` может не находить её, а `activate_object` может вернуть `activated=true` без открытия диалога добавления полей.
 
 ## Лицензия
 
 MIT
+
+## Copyright
+
+Copyright (c) 2026 Kosolapov Stanislav aka proDOOMman <prodoomman@gmail.com>, Marvin (AI Assistant), 42Clouds, and contributors.
+
+Licensed under the MIT License.

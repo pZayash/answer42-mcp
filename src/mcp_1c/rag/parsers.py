@@ -113,6 +113,24 @@ def _children_named(root: ET.Element, name: str) -> list[ET.Element]:
     return [elem for elem in root.iter() if _strip_ns(elem.tag) == name]
 
 
+def _metadata_child_name(elem: ET.Element) -> str | None:
+    """Name for metadata child in EDT or Configurator XML dump.
+
+    Configurator XML puts child properties under <Properties><Name>, while EDT
+    often uses direct <name>.  Avoid recursing into nested column attributes
+    when reading a tabular section name.
+    """
+    direct = _direct_text(elem, ["name", "Name"])
+    if direct:
+        return direct
+    for child in list(elem):
+        if _strip_ns(child.tag).lower() == "properties":
+            value = _direct_text(child, ["name", "Name"])
+            if value:
+                return value
+    return None
+
+
 def _xml_root(path: Path) -> ET.Element | None:
     try:
         return ET.parse(path).getroot()
@@ -230,17 +248,17 @@ def _extract_metadata_children(parsed: ParsedSource, root: ET.Element, full: str
         tag = _strip_ns(elem.tag).lower()
         role = _metadata_field_role(tag)
         if role is not None and id(elem) not in table_part_descendants:
-            name = _direct_text(elem, ["name", "Name"])
+            name = _metadata_child_name(elem)
             if name:
                 parsed.attributes.append(Attribute(full, name, _type_text(elem), _synonym_text(elem), None, str(source_path), role))
         elif tag in {"tabularsection", "tabularsections", "tablepart", "tableparts"}:
-            name = _direct_text(elem, ["name", "Name"])
+            name = _metadata_child_name(elem)
             if name:
                 parsed.table_parts.append(TablePart(full, name, _synonym_text(elem), str(source_path)))
                 for col in elem.iter():
                     ctag = _strip_ns(col.tag).lower()
                     if _metadata_field_role(ctag) is not None:
-                        cname = _direct_text(col, ["name", "Name"])
+                        cname = _metadata_child_name(col)
                         if cname and cname != name:
                             parsed.table_part_columns.append(TablePartColumn(full, name, cname, _type_text(col), _synonym_text(col), None, str(source_path)))
 
@@ -266,7 +284,7 @@ def _extract_form_elements(parsed: ParsedSource, root: ET.Element, full: str, fo
     for elem in root.iter():
         tag = _strip_ns(elem.tag)
         low = tag.lower()
-        if low not in {"element", "item", "button", "command", "field", "table", "group"}:
+        if low not in {"element", "item", "items", "button", "command", "field", "table", "group"}:
             continue
         name = elem.attrib.get("name") or elem.attrib.get("Name") or _first_text(elem, ["name", "Name"])
         if not name:
@@ -292,7 +310,7 @@ def _extract_embedded_data_composition_fields(parsed: ParsedSource, root: ET.Ele
         tag = _strip_ns(elem.tag)
         low = tag.lower()
         if low in {"dataset", "datasetquery"}:
-            dataset_name = _direct_text(elem, ["name", "Name"]) or dataset_name
+            dataset_name = _metadata_child_name(elem) or dataset_name
         if low not in {"fields", "field", "calculatedfield", "totalfield"}:
             continue
         data_path = _direct_text(elem, ["dataPath", "DataPath"]) or _direct_text(elem, ["name", "Name"])
@@ -332,7 +350,7 @@ def _extract_data_composition_schemas(parsed: ParsedSource, object_dir: Path, fu
             tag = _strip_ns(elem.tag)
             low = tag.lower()
             if low == "dataset":
-                dataset_name = _direct_text(elem, ["name", "Name"]) or dataset_name
+                dataset_name = _metadata_child_name(elem) or dataset_name
             if low not in {"field", "calculatedfield", "totalfield"}:
                 continue
             data_path = _direct_text(elem, ["dataPath", "DataPath"]) or _direct_text(elem, ["name", "Name"])
