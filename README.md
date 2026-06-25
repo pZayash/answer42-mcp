@@ -136,6 +136,21 @@ DISPLAY=:99 ./scripts/build_cf.sh src/client_cf build/MCPTestClient.cf
 
 E2E-сценарий всегда пересобирает `build/MCPTestClient.cf` из `src/client_cf/`, чтобы тесты не использовали устаревший артефакт.
 
+E2E можно запускать целиком или по независимым сценариям:
+
+```bash
+PYTHONPATH=src python3 scripts/e2e_stable.py                         # full
+E2E_SCENARIO=smoke PYTHONPATH=src python3 scripts/e2e_stable.py       # быстрый smoke
+E2E_SCENARIO=dynamic PYTHONPATH=src python3 scripts/e2e_stable.py     # таблицы/dynamic-list/отчёт
+E2E_SCENARIO=coverage PYTHONPATH=src python3 scripts/e2e_stable.py    # diagnostic/negative tools
+```
+
+Для реального распараллеливания сценарий умеет сам запустить три разные сессии (`smoke`, `dynamic`, `coverage`), а не три копии одного и того же теста:
+
+```bash
+E2E_PARALLEL=1 E2E_SESSION_ID=e2e-split PYTHONPATH=src python3 scripts/e2e_stable.py
+```
+
 ## MCP-инструменты
 
 ### Жизненный цикл
@@ -196,7 +211,7 @@ E2E-сценарий всегда пересобирает `build/MCPTestClient.
 
 - `recording_start(output_dir, display, window)` — включить доказательную запись.
 - `recording_capture(action, note)` — вручную добавить доказательный слайд.
-- `recording_stop()` — собрать `manifest.json`, `recording.mp4`, `recording.pdf` (если доступен backend PDF).
+- `recording_stop()` — собрать `manifest.json`, `recording.pdf` (если доступен backend PDF).
 
 ### RAG / индекс метаданных
 
