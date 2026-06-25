@@ -2716,7 +2716,7 @@ def recording_capture(
 def recording_stop(*,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> dict[str, Any]:
-    """Stop recording and build PDF/MP4/HTML from captured slides."""
+    """Stop recording and build PDF evidence from captured slides."""
     return _session(session_id).recorder.stop()
 
 
