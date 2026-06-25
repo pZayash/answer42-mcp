@@ -1,5 +1,7 @@
 import asyncio
+from pathlib import Path, PureWindowsPath
 
+from mcp_1c import platform as onec_platform
 from mcp_1c.server import _normalize_connection_mode, mcp
 
 
@@ -67,6 +69,11 @@ def test_selected_new_tool_schemas():
     assert tools["decoration_click_link"].inputSchema["properties"]["presentation"]["default"] == ""
     assert tools["start_session"].inputSchema["properties"]["connection_mode"]["default"] == "auto"
     assert tools["start_session"].inputSchema["properties"]["connection_value"]["default"] == ""
+
+
+def test_platform_version_from_windows_bin_dir():
+    assert onec_platform.platform_version_from_dir(PureWindowsPath(r"C:\\Program Files\\1cv8\\8.5.1.1150\\bin")) == "8.5.1.1150"
+    assert onec_platform.platform_version_from_dir(Path("/opt/1cv8/x86_64/8.5.1.1150")) == "8.5.1.1150"
 
 
 def test_connection_mode_normalization(tmp_path):

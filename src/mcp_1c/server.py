@@ -1154,7 +1154,7 @@ def sessions_list() -> dict[str, Any]:
             "session_id": sid,
             "running": sid in _SESSIONS,
             "base_url": sess.base_url,
-            "version": sess.platform_dir.name,
+            "version": _platform.platform_version_from_dir(sess.platform_dir),
             "display": sess.display,
             "ws_port": sess.ws_port,
             "bridge_connected": bool(bridge_status.get("connected")),
@@ -1207,7 +1207,7 @@ def session_status(*,
         "running": True,
         "session_id": session_id,
         "base_url": sess.base_url,
-        "version": sess.platform_dir.name,
+        "version": _platform.platform_version_from_dir(sess.platform_dir),
         "display": sess.display,
         "bridge": bridge,
         "manager": None if rt is None else {
@@ -1263,7 +1263,7 @@ async def start_session(
         _platform.require_websocket_support(resolved_version)
 
     platform_dir = _platform.find_platform_dir(resolved_version)
-    actual_version = platform_dir.name
+    actual_version = _platform.platform_version_from_dir(platform_dir)
     _platform.require_websocket_support(actual_version)
     logging.info("start_session: version=%s platform_dir=%s", actual_version, platform_dir)
 
