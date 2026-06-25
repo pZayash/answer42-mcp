@@ -45,6 +45,27 @@ def _kill_all_1c() -> None:
     time.sleep(1)
 
 
+def _prebuild_shared_client_base(shared_id: str) -> None:
+    """Create the shared tested-client file infobase before child fan-out.
+
+    This avoids three child MCP servers racing to create/load the same file
+    infobase.  The shared ibsrv itself is still started lazily by start_session.
+    """
+    from mcp_1c import platform as _platform
+    from mcp_1c import runtime
+
+    platform_dir = _platform.find_platform_dir(os.environ.get("ONEC_VERSION") or None)
+    ibcmd = str(platform_dir / "ibcmd")
+    db_path = Path(os.getenv("ONEC_MCP_SHARED_CLIENT_BASE_DIR", "/tmp/onec-mcp/shared-client-bases")) / shared_id / "ib"
+    if db_path.exists() and any(db_path.iterdir()):
+        return
+    cf_path = runtime.DEFAULT_CLIENT_CF_BUILT
+    if not Path(cf_path).exists():
+        raise FileNotFoundError(f"MCPTestClient.cf not found at {cf_path}.")
+    runtime.create_file_infobase(ibcmd, db_path)
+    runtime.load_configuration(ibcmd, db_path, cf_path)
+
+
 def _safe_suffix(value: str) -> str:
     return value.replace("/", "_").replace("\\", "_")
 
@@ -288,7 +309,7 @@ async def run_dynamic(session: ClientSession, sid: str, suffix: str, screenshot_
     await seed_dynamic_data(session, sid)
 
     rows = await call_ui_ok(session, "table_rows", {"name": "Список", "session_id": sid})
-    assert rows["count"] == 2, f"Expected 2 rows, got {rows['count']}: {rows}"
+    assert rows["count"] >= 2, f"Expected at least 2 rows, got {rows['count']}: {rows}"
     cur = await call_ui_ok(session, "table_current_row", {"name": "Список", "session_id": sid})
     assert "Тестовый элемент" in str(cur), cur
     cell = await call_ui_ok(session, "table_cell_text", {"name": "Список", "cell": "Наименование", "session_id": sid})
@@ -473,6 +494,10 @@ def run_parallel_split() -> None:
         _build_client_cf_from_sources()
     if os.environ.get("E2E_SKIP_KILL_ALL_1C") != "1":
         _kill_all_1c()
+
+    shared_id = os.environ.get("ONEC_MCP_SHARED_CLIENT_BASE_ID") or base_sid
+    os.environ["ONEC_MCP_SHARED_CLIENT_BASE_ID"] = shared_id
+    _prebuild_shared_client_base(shared_id)
 
     procs: list[tuple[str, subprocess.Popen[str], Path]] = []
     for scenario in SCENARIOS:

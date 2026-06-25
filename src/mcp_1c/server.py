@@ -16,6 +16,7 @@ import subprocess
 import re
 import fcntl
 import hashlib
+from dataclasses import dataclass, field
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Annotated, Any
@@ -39,6 +40,8 @@ AUTORELOAD_LOG_FILE = Path(os.getenv("ONEC_MCP_AUTORELOAD_LOG_FILE", "/tmp/onec-
 RAG_BINDINGS_FILE = Path(os.getenv("ONEC_MCP_RAG_BINDINGS", "/tmp/onec-mcp/rag-bindings.json"))
 
 _PORT_ALLOC_LOCK = Path(os.getenv("ONEC_MCP_PORT_ALLOC_LOCK", "/tmp/onec-mcp/port-allocation.lock"))
+_SHARED_FILE_SERVERS_FILE = Path(os.getenv("ONEC_MCP_SHARED_FILE_SERVERS", "/tmp/onec-mcp/shared-file-servers.json"))
+_SHARED_FILE_SERVERS_LOCK = Path(os.getenv("ONEC_MCP_SHARED_FILE_SERVERS_LOCK", "/tmp/onec-mcp/shared-file-servers.lock"))
 
 
 @contextmanager
@@ -52,8 +55,263 @@ def _port_allocation_lock():
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
+@contextmanager
+def _shared_file_servers_lock():
+    _SHARED_FILE_SERVERS_LOCK.parent.mkdir(parents=True, exist_ok=True)
+    with _SHARED_FILE_SERVERS_LOCK.open("w") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
 _PORT_BAND_SIZE = 20
 _PORT_SCAN_WIDTH = 10
+
+
+@dataclass(slots=True)
+class SharedFileServer:
+    """Shared ibsrv instance for one file infobase.
+
+    Several /TESTCLIENT windows can connect to the same autonomous server.
+    The server is stopped when the last owning session releases it.
+    """
+
+    key: str
+    db_path: Path
+    data_dir: Path
+    log_dir: Path
+    address: str
+    port: int
+    direct_regport: int
+    name: str
+    platform_dir: Path
+    pid: int
+    process: subprocess.Popen | None = None
+    owners: set[str] = field(default_factory=set)
+
+    @property
+    def base_url(self) -> str:
+        return f"http://{self.address}:{self.port}"
+
+
+_SHARED_FILE_SERVERS: dict[str, SharedFileServer] = {}
+
+
+def _load_shared_file_registry() -> dict[str, Any]:
+    if not _SHARED_FILE_SERVERS_FILE.exists():
+        return {}
+    try:
+        return json.loads(_SHARED_FILE_SERVERS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _save_shared_file_registry(registry: dict[str, Any]) -> None:
+    _SHARED_FILE_SERVERS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _SHARED_FILE_SERVERS_FILE.write_text(json.dumps(registry, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _shared_file_key(kind: str, platform_dir: Path, db_path: Path) -> str:
+    return f"{kind}:{platform_dir.resolve()}:{db_path.resolve()}"
+
+
+def _shared_file_server_alive(shared: SharedFileServer) -> bool:
+    if shared.process is not None and shared.process.poll() is not None:
+        return False
+    if not _pid_is_running(shared.pid):
+        return False
+    return runtime.is_port_listening(shared.address, shared.port)
+
+
+def _shared_file_entry_alive(entry: dict[str, Any]) -> bool:
+    return _pid_is_running(int(entry.get("pid") or 0)) and runtime.is_port_listening(
+        str(entry.get("address") or "127.0.0.1"),
+        int(entry.get("port") or 0),
+    )
+
+
+def _shared_file_from_entry(key: str, entry: dict[str, Any]) -> SharedFileServer:
+    return SharedFileServer(
+        key=key,
+        db_path=Path(str(entry["db_path"])),
+        data_dir=Path(str(entry["data_dir"])),
+        log_dir=Path(str(entry["log_dir"])),
+        address=str(entry.get("address") or "127.0.0.1"),
+        port=int(entry["port"]),
+        direct_regport=int(entry.get("direct_regport") or 0),
+        name=str(entry.get("name") or "mcpfileclient"),
+        platform_dir=Path(str(entry["platform_dir"])),
+        pid=int(entry["pid"]),
+        process=None,
+        owners=set(map(str, entry.get("owners") or [])),
+    )
+
+
+def _shared_file_to_entry(shared: SharedFileServer) -> dict[str, Any]:
+    return {
+        "db_path": str(shared.db_path),
+        "data_dir": str(shared.data_dir),
+        "log_dir": str(shared.log_dir),
+        "address": shared.address,
+        "port": shared.port,
+        "direct_regport": shared.direct_regport,
+        "name": shared.name,
+        "platform_dir": str(shared.platform_dir),
+        "pid": shared.pid,
+        "owners": sorted(shared.owners),
+    }
+
+
+def _kill_pid_group(pid: int, label: str, timeout: float = 5.0) -> None:
+    """Terminate a process group by pid when we do not own a Popen handle."""
+    if pid <= 0:
+        return
+    if not _pid_is_running(pid):
+        return
+    try:
+        os.killpg(os.getpgid(pid), signal.SIGTERM)
+    except Exception:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except Exception:
+            return
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not _pid_is_running(pid):
+            logging.info("Stopped %s (pid=%s) via SIGTERM", label, pid)
+            return
+        time.sleep(0.1)
+    try:
+        os.killpg(os.getpgid(pid), signal.SIGKILL)
+    except Exception:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except Exception:
+            return
+    logging.warning("Killed %s (pid=%s) via SIGKILL", label, pid)
+
+
+def _shared_file_paths(kind: str, digest: str) -> tuple[Path, Path, Path]:
+    root = Path(os.getenv("ONEC_MCP_SHARED_FILE_SERVERS_DIR", "/tmp/onec-mcp/shared-file-servers"))
+    base = root / kind / digest
+    return base / "ib", base / "ibsrv-data", base / "logs"
+
+
+def _acquire_shared_file_server(
+    *,
+    owner_session_id: str,
+    kind: str,
+    platform_dir: Path,
+    ibcmd: str,
+    ibsrv: str,
+    db_path: Path,
+    cf_path: str = "",
+    create_if_missing: bool = False,
+    port_seed: str = "",
+    server_name: str = "mcpfileclient",
+) -> SharedFileServer:
+    """Start or reuse one ibsrv for a file infobase and add an owner ref.
+
+    The registry is persisted under /tmp so parallel MCP server processes can
+    share a single autonomous server for the same file infobase.
+    """
+    resolved_db_path = db_path.resolve()
+    key = _shared_file_key(kind, platform_dir, resolved_db_path)
+    with _shared_file_servers_lock():
+        registry = _load_shared_file_registry()
+        entry = registry.get(key)
+        if isinstance(entry, dict) and _shared_file_entry_alive(entry):
+            owners = set(map(str, entry.get("owners") or []))
+            owners.add(owner_session_id)
+            entry["owners"] = sorted(owners)
+            registry[key] = entry
+            _save_shared_file_registry(registry)
+            shared = _shared_file_from_entry(key, entry)
+            _SHARED_FILE_SERVERS[key] = shared
+            return shared
+        if entry:
+            _kill_pid_group(int(entry.get("pid") or 0), f"shared-ibsrv-{kind}")
+            registry.pop(key, None)
+            _save_shared_file_registry(registry)
+
+        if create_if_missing:
+            cf = Path(cf_path) if cf_path else None
+            if cf and not cf.exists():
+                raise FileNotFoundError(f"Shared file infobase CF not found at {cf}.")
+            # Shared file infobases are intentionally persistent across several
+            # MCP server processes.  If a previous process already created the
+            # database but died before writing the registry entry, do not wipe it
+            # here: just publish it through a fresh ibsrv.
+            if not resolved_db_path.exists() or not any(resolved_db_path.iterdir()):
+                runtime.create_file_infobase(ibcmd, resolved_db_path)
+                if cf:
+                    runtime.load_configuration(ibcmd, resolved_db_path, str(cf))
+        elif not resolved_db_path.exists():
+            raise FileNotFoundError(f"File infobase directory not found: {resolved_db_path}")
+
+        digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
+        _, data_dir, log_dir = _shared_file_paths(kind, digest)
+        port_offset = _stable_session_port_offset(port_seed or key)
+        port = _find_session_port(runtime.DEFAULT_IBSRV_HTTP_PORT, port_offset, sub_offset=10)
+        direct_regport = _find_session_port(runtime.DEFAULT_IBSRV_DIRECT_PORT, port_offset, sub_offset=10)
+        proc = runtime.start_standalone_server(
+            ibsrv=ibsrv,
+            address="127.0.0.1",
+            port=port,
+            name=server_name,
+            data_dir=data_dir,
+            log_dir=log_dir,
+            db_path=resolved_db_path,
+            direct_regport=direct_regport,
+            direct_range=_direct_range_from_regport(direct_regport),
+        )
+        shared = SharedFileServer(
+            key=key,
+            db_path=resolved_db_path,
+            data_dir=data_dir,
+            log_dir=log_dir,
+            address="127.0.0.1",
+            port=port,
+            direct_regport=direct_regport,
+            name=server_name,
+            platform_dir=platform_dir,
+            pid=proc.pid,
+            process=proc,
+            owners={owner_session_id},
+        )
+        registry[key] = _shared_file_to_entry(shared)
+        _save_shared_file_registry(registry)
+        _SHARED_FILE_SERVERS[key] = shared
+        return shared
+
+
+def _release_shared_file_server(key: str, owner_session_id: str) -> bool:
+    """Release one owner ref. Return True when the shared server was stopped."""
+    if not key:
+        return False
+    with _shared_file_servers_lock():
+        registry = _load_shared_file_registry()
+        entry = registry.get(key)
+        if not isinstance(entry, dict):
+            _SHARED_FILE_SERVERS.pop(key, None)
+            return False
+        owners = set(map(str, entry.get("owners") or []))
+        owners.discard(owner_session_id)
+        if owners and _shared_file_entry_alive(entry):
+            entry["owners"] = sorted(owners)
+            registry[key] = entry
+            _save_shared_file_registry(registry)
+            local = _SHARED_FILE_SERVERS.get(key)
+            if local:
+                local.owners = owners
+            return False
+        _kill_pid_group(int(entry.get("pid") or 0), "shared-ibsrv-file")
+        registry.pop(key, None)
+        _save_shared_file_registry(registry)
+        _SHARED_FILE_SERVERS.pop(key, None)
+        return True
 
 
 def _stable_session_port_offset(session_id: str) -> int:
@@ -64,6 +322,12 @@ def _stable_session_port_offset(session_id: str) -> int:
 def _find_session_port(base: int, offset: int, *, sub_offset: int = 0) -> int:
     start = base + offset + sub_offset
     return runtime.find_free_port(start, start + _PORT_SCAN_WIDTH)
+
+
+def _direct_range_from_regport(direct_regport: int, width: int = 8) -> tuple[int, int]:
+    """Return a small direct port range unique to this standalone server."""
+    start = direct_regport + 20
+    return start, start + width - 1
 
 
 class SessionState:
@@ -94,8 +358,10 @@ class SessionState:
         self.password = password
         self.client_ibsrv_port = 0  # to be set in start_session for the built-in demo client
         self.client_runtime: runtime.ManagerRuntime | None = None
+        self.shared_client_key: str = ""  # shared ibsrv key for built-in demo client
         self.file_client_ibsrv_port = 0  # to be set when a file infobase target is served through ibsrv
         self.file_client_runtime: runtime.ManagerRuntime | None = None
+        self.shared_file_key: str = ""  # shared ibsrv key for connection_mode=file
         self.xvfb_process: subprocess.Popen | None = None
         self.runtime: runtime.ManagerRuntime | None = None
         self.bridge = OneCBridgeServer(
@@ -121,7 +387,9 @@ class SessionState:
             "username": self.username,
             # Password is intentionally not persisted.
             "client_ibsrv_port": self.client_ibsrv_port,
+            "shared_client_key": self.shared_client_key,
             "file_client_ibsrv_port": self.file_client_ibsrv_port,
+            "shared_file_key": self.shared_file_key,
             "rag_snapshot": self.rag_snapshot,
             "idle_timeout_seconds": self.idle_timeout_seconds,
         }
@@ -141,7 +409,9 @@ class SessionState:
             password="",
         )
         sess.client_ibsrv_port = int(data.get("client_ibsrv_port") or 0)
+        sess.shared_client_key = str(data.get("shared_client_key") or "")
         sess.file_client_ibsrv_port = int(data.get("file_client_ibsrv_port") or 0)
+        sess.shared_file_key = str(data.get("shared_file_key") or "")
         sess.rag_snapshot = str(data.get("rag_snapshot", ""))
         sess.idle_timeout_seconds = int(data.get("idle_timeout_seconds") or 60 * 60)
         return sess
@@ -875,6 +1145,18 @@ def session_status(*,
     rt = sess.runtime
     client_rt = sess.client_runtime
     file_client_rt = sess.file_client_runtime
+    client_server_alive = False
+    if client_rt:
+        if client_rt.server_process:
+            client_server_alive = client_rt.server_process.poll() is None
+        else:
+            client_server_alive = runtime.is_port_listening(client_rt.server.address, client_rt.server.port)
+    file_client_server_alive = False
+    if file_client_rt:
+        if file_client_rt.server_process:
+            file_client_server_alive = file_client_rt.server_process.poll() is None
+        else:
+            file_client_server_alive = runtime.is_port_listening(file_client_rt.server.address, file_client_rt.server.port)
     return {
         "running": True,
         "session_id": session_id,
@@ -894,9 +1176,11 @@ def session_status(*,
             "port": sess.testclient_port,
             "base_url": sess.base_url,
             "client_ibsrv_port": sess.client_ibsrv_port,
-            "server_alive": client_rt.server_process.poll() is None if client_rt and client_rt.server_process else False,
+            "server_alive": client_server_alive,
+            "shared_client_key": sess.shared_client_key,
             "file_client_ibsrv_port": sess.file_client_ibsrv_port,
-            "file_client_server_alive": file_client_rt.server_process.poll() is None if file_client_rt and file_client_rt.server_process else False,
+            "file_client_server_alive": file_client_server_alive,
+            "shared_file_key": sess.shared_file_key,
         },
         "rag_snapshot": sess.rag_snapshot,
         "idle_timeout_seconds": sess.idle_timeout_seconds,
@@ -984,6 +1268,7 @@ async def start_session(
         name=ibsrv_name, data_dir=sess.server_data_dir,
         log_dir=log_dir, db_path=sess.db_path,
         direct_regport=ibsrv_direct_regport,
+        direct_range=_direct_range_from_regport(ibsrv_direct_regport),
     )
     runtime_state.server_process = server_proc
 
@@ -1004,45 +1289,44 @@ async def start_session(
     # passed a target URL/file/server infobase, connect the test client to
     # that target instead of creating an extra demo infobase.
     if not (base_url or connection_value):
-        with _port_allocation_lock():
-            client_ibsrv_port = _find_session_port(runtime.DEFAULT_IBSRV_HTTP_PORT, port_offset, sub_offset=10)
-            client_direct_regport = _find_session_port(runtime.DEFAULT_IBSRV_DIRECT_PORT, port_offset, sub_offset=10)
-        client_log_dir = sess.client_log_dir
-        client_log_dir.mkdir(parents=True, exist_ok=True)
-        client_ibsrv_name = "mcpclient"
-
-        with _port_allocation_lock():
-            runtime.create_file_infobase(sess.ibcmd, sess.client_db_path)
-            # Load a dedicated tested-client configuration.  It intentionally does
-            # not contain MCPTestManager code (which uses /TESTMANAGER-only types),
-            # but it does contain real metadata objects for positive UI E2E.
-            client_cf_path = runtime.DEFAULT_CLIENT_CF_BUILT
-            if not Path(client_cf_path).exists():
-                raise FileNotFoundError(f"MCPTestClient.cf not found at {client_cf_path}.")
-            runtime.load_configuration(sess.ibcmd, sess.client_db_path, client_cf_path)
-
-        client_server_proc = runtime.start_standalone_server(
-            ibsrv=sess.ibsrv, address=ibsrv_address, port=client_ibsrv_port,
-            name=client_ibsrv_name, data_dir=sess.client_server_data_dir,
-            log_dir=client_log_dir, db_path=sess.client_db_path,
-            direct_regport=client_direct_regport,
+        shared_client_id = os.getenv("ONEC_MCP_SHARED_CLIENT_BASE_ID") or "default"
+        shared_client_root = Path(os.getenv("ONEC_MCP_SHARED_CLIENT_BASE_DIR", "/tmp/onec-mcp/shared-client-bases"))
+        shared_client_db = shared_client_root / shared_client_id / "ib"
+        shared_client = _acquire_shared_file_server(
+            owner_session_id=sid,
+            kind="demo-client",
+            platform_dir=platform_dir,
+            ibcmd=sess.ibcmd,
+            ibsrv=sess.ibsrv,
+            db_path=shared_client_db,
+            cf_path=runtime.DEFAULT_CLIENT_CF_BUILT,
+            create_if_missing=True,
+            port_seed=f"demo-client:{shared_client_id}",
+            server_name="mcpclient",
         )
-        sess.client_ibsrv_port = client_ibsrv_port
+        sess.client_ibsrv_port = shared_client.port
+        sess.shared_client_key = shared_client.key
         sess.client_runtime = runtime.ManagerRuntime(
-            infobase=runtime.InfobaseSpec(db_path=sess.client_db_path),
+            infobase=runtime.InfobaseSpec(db_path=shared_client.db_path),
             server=runtime.StandaloneServerSpec(
-                address=ibsrv_address, port=client_ibsrv_port,
-                name=client_ibsrv_name, data_dir=sess.client_server_data_dir,
+                address=shared_client.address,
+                port=shared_client.port,
+                name=shared_client.name,
+                data_dir=shared_client.data_dir,
             ),
             manager=runtime.TestManagerSpec(onec_path=sess.onec_thin),
-            server_process=client_server_proc,
-            log_dir=client_log_dir,
+            server_process=shared_client.process,
+            log_dir=shared_client.log_dir,
+            extra={"shared_key": shared_client.key, "shared_refcount": len(shared_client.owners)},
         )
 
-        client_ws_url = runtime.build_thin_client_ws_url(ibsrv_address, client_ibsrv_port)
+        client_ws_url = runtime.build_thin_client_ws_url(shared_client.address, shared_client.port)
         pipeline_info.update({
-            "client_ibsrv_port": client_ibsrv_port, "client_ws_url": client_ws_url,
-            "client_base_url": f"http://{ibsrv_address}:{client_ibsrv_port}",
+            "client_ibsrv_port": shared_client.port,
+            "client_ws_url": client_ws_url,
+            "client_base_url": shared_client.base_url,
+            "client_shared": True,
+            "client_shared_refcount": len(shared_client.owners),
         })
 
     connect_result: Any = None
@@ -1090,11 +1374,19 @@ async def _stop_session_impl(session_id: str = DEFAULT_SESSION, clean_data: bool
         runtime.kill_process(sess.runtime.server_process, "ibsrv")
         stopped.append("pipeline")
     if sess.client_runtime is not None:
-        runtime.kill_process(sess.client_runtime.server_process, "ibsrv-client")
-        stopped.append("client-ibsrv")
+        if sess.shared_client_key:
+            if _release_shared_file_server(sess.shared_client_key, session_id):
+                stopped.append("shared-client-ibsrv")
+        else:
+            runtime.kill_process(sess.client_runtime.server_process, "ibsrv-client")
+            stopped.append("client-ibsrv")
     if sess.file_client_runtime is not None:
-        runtime.kill_process(sess.file_client_runtime.server_process, "ibsrv-file-client")
-        stopped.append("file-client-ibsrv")
+        if sess.shared_file_key:
+            if _release_shared_file_server(sess.shared_file_key, session_id):
+                stopped.append("shared-file-ibsrv")
+        else:
+            runtime.kill_process(sess.file_client_runtime.server_process, "ibsrv-file-client")
+            stopped.append("file-client-ibsrv")
     try:
         await sess.bridge.stop()
         stopped.append("bridge")
@@ -1160,9 +1452,14 @@ def launch_manager(
     if load_configuration and cf_path:
         runtime.load_configuration(ibcmd, db, cf_path)
     if start_standalone:
+        with _port_allocation_lock():
+            port_offset = _stable_session_port_offset(f"launch:{session_id}:{port}")
+            direct_regport = _find_session_port(runtime.DEFAULT_IBSRV_DIRECT_PORT, port_offset, sub_offset=0)
         server_proc = runtime.start_standalone_server(
             ibsrv=ibsrv, address=ibsrv_address, port=port,
             name=ibsrv_name, data_dir=sdd, log_dir=log_dir, db_path=db,
+            direct_regport=direct_regport,
+            direct_range=_direct_range_from_regport(direct_regport),
         )
         runtime_state.server_process = server_proc
 
@@ -1287,39 +1584,40 @@ async def _connect_test_client_impl(
         db_path = Path(r_value).expanduser()
         if not db_path.exists():
             raise FileNotFoundError(f"File infobase directory not found: {db_path}")
-        if sess.file_client_runtime is not None:
+        if sess.shared_file_key:
+            _release_shared_file_server(sess.shared_file_key, sess.session_id)
+            sess.shared_file_key = ""
+        elif sess.file_client_runtime is not None:
             runtime.kill_process(sess.file_client_runtime.server_process, "ibsrv-file-client")
             sess.file_client_runtime = None
-        with _port_allocation_lock():
-            port_offset = _stable_session_port_offset(sess.session_id)
-            file_client_port = _find_session_port(runtime.DEFAULT_IBSRV_HTTP_PORT, port_offset, sub_offset=15)
-            file_client_direct_regport = _find_session_port(runtime.DEFAULT_IBSRV_DIRECT_PORT, port_offset, sub_offset=15)
-        file_client_log_dir = sess.file_client_log_dir
-        file_client_log_dir.mkdir(parents=True, exist_ok=True)
-        server_proc = runtime.start_standalone_server(
+        shared_file = _acquire_shared_file_server(
+            owner_session_id=sess.session_id,
+            kind="file",
+            platform_dir=sess.platform_dir,
+            ibcmd=sess.ibcmd,
             ibsrv=sess.ibsrv,
-            address="127.0.0.1",
-            port=file_client_port,
-            name="mcpfileclient",
-            data_dir=sess.file_client_server_data_dir,
-            log_dir=file_client_log_dir,
             db_path=db_path,
-            direct_regport=file_client_direct_regport,
+            create_if_missing=False,
+            port_seed=f"file:{db_path.resolve()}",
+            server_name="mcpfileclient",
         )
-        sess.file_client_ibsrv_port = file_client_port
+        sess.file_client_ibsrv_port = shared_file.port
+        sess.shared_file_key = shared_file.key
         sess.file_client_runtime = runtime.ManagerRuntime(
-            infobase=runtime.InfobaseSpec(db_path=db_path),
+            infobase=runtime.InfobaseSpec(db_path=shared_file.db_path),
             server=runtime.StandaloneServerSpec(
-                address="127.0.0.1", port=file_client_port,
-                name="mcpfileclient", data_dir=sess.file_client_server_data_dir,
+                address=shared_file.address,
+                port=shared_file.port,
+                name=shared_file.name,
+                data_dir=shared_file.data_dir,
             ),
             manager=runtime.TestManagerSpec(onec_path=sess.onec_thin),
-            server_process=server_proc,
-            log_dir=file_client_log_dir,
-            extra={"target_connection_mode": "file"},
+            server_process=shared_file.process,
+            log_dir=shared_file.log_dir,
+            extra={"target_connection_mode": "file", "shared_key": shared_file.key, "shared_refcount": len(shared_file.owners)},
         )
         r_base = str(db_path)
-        r_value = f"http://127.0.0.1:{file_client_port}"
+        r_value = shared_file.base_url
         mode = "ws"
         target_connection_mode = "file"
     elif mode == "server":
@@ -2431,7 +2729,15 @@ async def _run() -> None:
                 runtime.kill_process(sess.runtime.manager_process, "test-manager")
                 runtime.kill_process(sess.runtime.server_process, "ibsrv")
             if sess.client_runtime is not None:
-                runtime.kill_process(sess.client_runtime.server_process, "ibsrv-client")
+                if sess.shared_client_key:
+                    _release_shared_file_server(sess.shared_client_key, sid)
+                else:
+                    runtime.kill_process(sess.client_runtime.server_process, "ibsrv-client")
+            if sess.file_client_runtime is not None:
+                if sess.shared_file_key:
+                    _release_shared_file_server(sess.shared_file_key, sid)
+                else:
+                    runtime.kill_process(sess.file_client_runtime.server_process, "ibsrv-file-client")
             try:
                 await sess.bridge.stop()
             except Exception:
