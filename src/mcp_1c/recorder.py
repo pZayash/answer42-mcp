@@ -80,7 +80,7 @@ class RecordingSession:
         pdf = self.output_dir / "recording.pdf"
         html_deck = self.output_dir / "recording.html"
         html_deck.write_text(make_html_deck(slides), encoding="utf-8")
-        browser = first_existing(["google-chrome", "chromium", "chromium-browser"])
+        browser = first_existing(["google-chrome", "chromium", "chromium-browser", "chrome.exe", "msedge.exe"])
         if browser:
             run([
                 browser,
@@ -91,7 +91,8 @@ class RecordingSession:
                 str(html_deck.resolve()),
             ], timeout=240)
         if not pdf.exists():
-            converter = first_existing(["magick", "convert"])
+            converter_names = ["magick", "magick.exe"] if os.name == "nt" else ["magick", "convert"]
+            converter = first_existing(converter_names)
             if converter:
                 run([converter, *map(str, slides), str(pdf)], timeout=240)
         if html_deck.exists():
@@ -129,6 +130,23 @@ def first_existing(names: list[str]) -> str:
         path = which(name)
         if path:
             return path
+    if os.name == "nt":
+        env_paths = [
+            os.getenv("ProgramFiles"),
+            os.getenv("ProgramFiles(x86)"),
+            os.getenv("LocalAppData"),
+        ]
+        candidates = []
+        for root in filter(None, env_paths):
+            base = Path(str(root))
+            candidates.extend([
+                base / "Google/Chrome/Application/chrome.exe",
+                base / "Microsoft/Edge/Application/msedge.exe",
+                base / "Programs/Microsoft VS Code/chrome.exe",
+            ])
+        for candidate in candidates:
+            if candidate.exists():
+                return str(candidate)
     return ""
 
 

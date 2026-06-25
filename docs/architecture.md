@@ -21,12 +21,12 @@
 ```python
 class SessionState:
     session_id: str
-    display: str              # Xvfb display, например ":99"
-    platform_dir: Path        # /opt/1cv8/x86_64/8.3.27.1606
+    display: str              # X11 display (Linux) или пустая строка (Windows)
+    platform_dir: Path        # путь к платформе 1С (Linux: /opt/1cv8/..., Windows: C:\Program Files\1cv8\...)
     ws_port: int              # порт WebSocket bridge
-    ibsrv_port: int           # порт HTTP-gate автономного сервера
+    ibsrv_port: int           # порт HTTP-gate автономного сервера (0 если file-direct fallback)
     testclient_port: int      # TCP-порт клиента тестирования
-    data_dir: Path            # /tmp/onec-mcp/sessions/{session_id}
+    data_dir: Path            # временная директория сессии (tempdir/onec-mcp/sessions/{session_id})
     base_url: str
     username: str
     password: str
@@ -65,10 +65,10 @@ class SessionState:
 
 1. Определяет версию платформы по `base_url` или использует переданную.
 2. Проверяет требование: **1С:Предприятие 8.3.27+**.
-3. Подбирает свободный Xvfb display.
+3. Подбирает свободный X11 display (Linux) или пропускает (Windows).
 4. Подбирает свободные TCP-порты для bridge, ibsrv и test-client.
-5. Запускает Xvfb и WebSocket bridge.
-6. Создаёт файловую базу менеджера, загружает `MCPTestManager.cf`, запускает ibsrv и test-manager.
+5. Запускает Xvfb (Linux) и WebSocket bridge.
+6. Создаёт файловую базу менеджера, загружает `MCPTestManager.cf`. Если `ibsrv` доступен — запускает автономный сервер и test-manager через `/WS`; если нет — запускает test-manager напрямую через `/F` (file-direct fallback).
 7. Подключает клиент тестирования к `base_url` или к локальной тестовой базе, созданной для E2E. Если `username`/`password` не переданы, Answer42 ищет их в локальном credentials-файле по `base_url`; это основной безопасный режим, потому что секреты остаются в окружении MCP-процесса и не передаются агенту в аргументах tool-call. Дополнительные параметры запуска клиента передаются через `extra_args`, `execute` (`/Execute`) и `command_parameter` (`/C`); если `/C` уже есть в `extra_args`, части значения объединяются через `;`.
 8. Запоминает RAG snapshot, привязанный к `base_url`, если такой snapshot уже был создан раньше.
 9. Запускает idle watcher: после `idle_timeout_minutes` минут неактивности выполняется `stop_session()`.
@@ -82,7 +82,7 @@ class SessionState:
 Группы tools:
 
 - жизненный цикл: `start_session`, `stop_session`, `session_status`, `credentials_check`;
-- автоматизация UI: `active_window`, `windows_list`, `activate_window`, `goto_start_page`, `goto_previous_window`, `goto_next_window`, `ui_tree`, `find_object`, `activate_object`, `open_navigation_link`, `click_button`, `set_field_value`, `save_form`, `close_form`, `screenshot`;
+- автоматизация UI: `active_window`, `windows_list`, `activate_window`, `goto_start_page`, `goto_previous_window`, `goto_next_window`, `ui_tree`, `find_object`, `activate_object`, `open_navigation_link`, `click_button`, `set_field_value`, `save_form`, `close_form`, `screenshot`, `maximize_test_client_window`, `maximize_test_client_external_window`;
 - таблицы: `table_rows`, `table_find_row`, `table_goto_row`, `table_current_row`, `table_set_field`, `table_choose_field_from_list`, `table_move_row`;
 - динамические списки: `dynamic_list_available_fields`, `dynamic_list_apply_settings`, `dynamic_list_set_order`, `dynamic_list_output`, `dynamic_list_open_settings`, `dynamic_list_clear_settings`, `dynamic_list_open_form_settings`;
 - табличные документы: `tabular_documents`, `tabular_document_text`, `tabular_document_save`;
@@ -92,6 +92,18 @@ class SessionState:
 ### `mcp_1c.bridge`
 
 `OneCBridgeServer` слушает WebSocket endpoint и маршрутизирует JSON-RPC-like сообщения между Python и обработкой 1С.
+
+### `mcp_1c.os_support`
+
+Кроссплатформенные OS-хелперы: `file_lock` (POSIX `fcntl` / Windows `msvcrt`), `kill_process_tree` (SIGTERM/SIGKILL / `taskkill`), `subprocess_creation_kwargs` (start_new_session / CREATE_NEW_PROCESS_GROUP), `executable_name` (`.exe` на Windows), `default_data_dir` (tempdir/onec-mcp).
+
+### `mcp_1c.platform`
+
+Поиск установленной платформы 1С: Linux (`/opt/1cv8/x86_64/...`), Windows (`Program Files\1cv8\...\bin`), переопределение через `ONEC_PLATFORM_DIR`. Проверка версии и поддержки WebSocket.
+
+### `mcp_1c.window_control`
+
+Управление OS-окном тест-клиента: Linux (wmctrl → xdotool → python-xlib), Windows (WinAPI: EnumWindows, GetWindowRect, ShowWindow, MoveWindow). Также предоставляет `active_1c_window_geometry()` для скриншотов.
 
 ### `mcp_1c.runtime`
 

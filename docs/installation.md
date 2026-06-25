@@ -7,7 +7,11 @@ git clone https://gitlab.com/platform42/answer42-mcp.git answer42
 cd answer42
 python3 -m venv .venv
 . .venv/bin/activate
-pip install -e '.[screenshot]'
+# Linux/X11
+pip install -e '.[screenshot,linux-window-control]'
+
+# Windows
+# pip install -e ".[screenshot,windows-window-control]"
 ```
 
 ## Сборка конфигураций 1С
@@ -15,14 +19,16 @@ pip install -e '.[screenshot]'
 Сборка конфигурации менеджера:
 
 ```bash
-DISPLAY=:99 ./scripts/build_cf.sh src/cf build/MCPTestManager.cf
+PYTHONPATH=src python scripts/build_cf.py src/cf build/MCPTestManager.cf
 ```
 
 Сборка тестовой конфигурации:
 
 ```bash
-DISPLAY=:99 ./scripts/build_cf.sh src/client_cf build/MCPTestClient.cf
+PYTHONPATH=src python scripts/build_cf.py src/client_cf build/MCPTestClient.cf
 ```
+
+На Linux без серверных компонентов Answer42 может запускать менеджер и клиент напрямую через файловую базу (`/F`). На Windows это также поддерживается; запускайте MCP из интерактивной пользовательской сессии, потому что UI automation и screenshots требуют desktop session.
 
 ## MCP-сервер в OpenClaw
 
@@ -54,13 +60,14 @@ cp -a skills/answer42-rag ~/.openclaw/workspace/skills/
 ## Smoke checks
 
 ```bash
-PYTHONPATH=src python3 -m pytest -q
-DISPLAY=:99 ./scripts/build_cf.sh src/cf build/MCPTestManager.cf
-DISPLAY=:99 ./scripts/build_cf.sh src/client_cf build/MCPTestClient.cf
+PYTHONPATH=src python -m pytest -q
+PYTHONPATH=src python scripts/build_cf.py src/cf build/MCPTestManager.cf
+PYTHONPATH=src python scripts/build_cf.py src/client_cf build/MCPTestClient.cf
 ```
 
 Полный E2E:
 
 ```bash
-DISPLAY=:99 python3 scripts/e2e_stable.py
+# Linux/X11: DISPLAY=:99 python scripts/e2e_stable.py
+# Windows:  python scripts/e2e_stable.py
 ```

@@ -14,7 +14,6 @@ from datetime import datetime
 import shlex
 import subprocess
 import re
-import fcntl
 import hashlib
 from dataclasses import dataclass, field
 from contextlib import contextmanager
@@ -23,47 +22,39 @@ from typing import Annotated, Any
 
 from mcp.server.fastmcp import FastMCP
 
+from . import os_support
 from . import platform as _platform
 from . import runtime
 from .bridge import OneCBridgeServer
 from .credentials import get_store as _credentials_store
 from .rag import RagService
+from .window_control import active_1c_window_geometry as _active_windows_1c_window_geometry
 from .window_control import maximize_test_client_window as _maximize_external_window
 from .recorder import RecordingSession
 
 mcp = FastMCP("Answer42")
 _RAG = RagService()
 DEFAULT_SESSION = "default"
-STATE_FILE = Path(os.getenv("ONEC_MCP_SESSION_STATE", "/tmp/onec-mcp/sessions.json"))
-AUTORELOAD_PID_FILE = Path(os.getenv("ONEC_MCP_AUTORELOAD_PID_FILE", "/tmp/onec-mcp/answer42-autoreload.pid"))
-AUTORELOAD_LOG_FILE = Path(os.getenv("ONEC_MCP_AUTORELOAD_LOG_FILE", "/tmp/onec-mcp/answer42-autoreload.log"))
-RAG_BINDINGS_FILE = Path(os.getenv("ONEC_MCP_RAG_BINDINGS", "/tmp/onec-mcp/rag-bindings.json"))
+STATE_FILE = os_support.runtime_path("ONEC_MCP_SESSION_STATE", "sessions.json")
+AUTORELOAD_PID_FILE = os_support.runtime_path("ONEC_MCP_AUTORELOAD_PID_FILE", "answer42-autoreload.pid")
+AUTORELOAD_LOG_FILE = os_support.runtime_path("ONEC_MCP_AUTORELOAD_LOG_FILE", "answer42-autoreload.log")
+RAG_BINDINGS_FILE = os_support.runtime_path("ONEC_MCP_RAG_BINDINGS", "rag-bindings.json")
 
-_PORT_ALLOC_LOCK = Path(os.getenv("ONEC_MCP_PORT_ALLOC_LOCK", "/tmp/onec-mcp/port-allocation.lock"))
-_SHARED_FILE_SERVERS_FILE = Path(os.getenv("ONEC_MCP_SHARED_FILE_SERVERS", "/tmp/onec-mcp/shared-file-servers.json"))
-_SHARED_FILE_SERVERS_LOCK = Path(os.getenv("ONEC_MCP_SHARED_FILE_SERVERS_LOCK", "/tmp/onec-mcp/shared-file-servers.lock"))
+_PORT_ALLOC_LOCK = os_support.runtime_path("ONEC_MCP_PORT_ALLOC_LOCK", "port-allocation.lock")
+_SHARED_FILE_SERVERS_FILE = os_support.runtime_path("ONEC_MCP_SHARED_FILE_SERVERS", "shared-file-servers.json")
+_SHARED_FILE_SERVERS_LOCK = os_support.runtime_path("ONEC_MCP_SHARED_FILE_SERVERS_LOCK", "shared-file-servers.lock")
 
 
 @contextmanager
 def _port_allocation_lock():
-    _PORT_ALLOC_LOCK.parent.mkdir(parents=True, exist_ok=True)
-    with _PORT_ALLOC_LOCK.open("w") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    with os_support.file_lock(_PORT_ALLOC_LOCK):
+        yield
 
 
 @contextmanager
 def _shared_file_servers_lock():
-    _SHARED_FILE_SERVERS_LOCK.parent.mkdir(parents=True, exist_ok=True)
-    with _SHARED_FILE_SERVERS_LOCK.open("w") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    with os_support.file_lock(_SHARED_FILE_SERVERS_LOCK):
+        yield
 
 
 _PORT_BAND_SIZE = 20
@@ -165,11 +156,25 @@ def _shared_file_to_entry(shared: SharedFileServer) -> dict[str, Any]:
 
 
 def _kill_pid_group(pid: int, label: str, timeout: float = 5.0) -> None:
-    """Terminate a process group by pid when we do not own a Popen handle."""
-    if pid <= 0:
+    """Terminate a process tree by pid when we do not own a Popen handle."""
+    if pid <= 0 or not _pid_is_running(pid):
         return
-    if not _pid_is_running(pid):
+    if os_support.IS_WINDOWS:
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=max(1, int(timeout) + 5),
+            )
+            logging.info("Stopped %s (pid=%s) via taskkill", label, pid)
+        except Exception as exc:
+            logging.warning("Failed to stop %s (pid=%s) via taskkill: %s", label, pid, exc)
         return
+
+    import signal
+
     try:
         os.killpg(os.getpgid(pid), signal.SIGTERM)
     except Exception:
@@ -194,7 +199,7 @@ def _kill_pid_group(pid: int, label: str, timeout: float = 5.0) -> None:
 
 
 def _shared_file_paths(kind: str, digest: str) -> tuple[Path, Path, Path]:
-    root = Path(os.getenv("ONEC_MCP_SHARED_FILE_SERVERS_DIR", "/tmp/onec-mcp/shared-file-servers"))
+    root = Path(os.getenv("ONEC_MCP_SHARED_FILE_SERVERS_DIR", str(os_support.default_data_dir() / "shared-file-servers")))
     base = root / kind / digest
     return base / "ib", base / "ibsrv-data", base / "logs"
 
@@ -418,15 +423,15 @@ class SessionState:
 
     @property
     def onec_thin(self) -> str:
-        return str(self.platform_dir / "1cv8c")
+        return str(self.platform_dir / os_support.executable_name("1cv8c"))
 
     @property
     def ibcmd(self) -> str:
-        return str(self.platform_dir / "ibcmd")
+        return str(self.platform_dir / os_support.executable_name("ibcmd"))
 
     @property
     def ibsrv(self) -> str:
-        return str(self.platform_dir / "ibsrv")
+        return str(self.platform_dir / os_support.executable_name("ibsrv"))
 
     @property
     def db_path(self) -> Path:
@@ -527,7 +532,7 @@ def _start_autoreload_watcher(dev: str = "", dev_restart_timeout: float = 30.0) 
                 stdin=subprocess.DEVNULL,
                 stdout=log,
                 stderr=subprocess.STDOUT,
-                start_new_session=True,
+                **os_support.subprocess_creation_kwargs(),
             )
         AUTORELOAD_PID_FILE.write_text(str(proc.pid), encoding="utf-8")
         logging.info("Started autoreload watcher pid=%s log=%s", proc.pid, AUTORELOAD_LOG_FILE)
@@ -1021,7 +1026,7 @@ def _resolve_runtime(
             data_dir=server_data_dir,
         ),
         manager=runtime.TestManagerSpec(
-            onec_path=str(platform_dir / "1cv8c"),
+            onec_path=str(platform_dir / os_support.executable_name("1cv8c")),
         ),
     )
 
@@ -1218,11 +1223,11 @@ async def start_session(
     if sid in _SESSIONS:
         raise ValueError(f"Session {sid!r} already exists.")
 
-    data_dir = Path(f"/tmp/onec-mcp/sessions/{sid}")
+    data_dir = os_support.default_data_dir() / "sessions" / sid
     with _port_allocation_lock():
         port_offset = _stable_session_port_offset(sid)
         display_offset = port_offset // _PORT_BAND_SIZE
-        display = runtime.find_free_display(runtime.DEFAULT_DISPLAY_START + display_offset)
+        display = "" if os_support.IS_WINDOWS else runtime.find_free_display(runtime.DEFAULT_DISPLAY_START + display_offset)
         ws_port = _find_session_port(runtime.DEFAULT_WS_PORT, port_offset, sub_offset=0)
         ibsrv_port = _find_session_port(runtime.DEFAULT_IBSRV_HTTP_PORT, port_offset, sub_offset=0)
         ibsrv_direct_regport = _find_session_port(runtime.DEFAULT_IBSRV_DIRECT_PORT, port_offset, sub_offset=0)
@@ -1238,7 +1243,8 @@ async def start_session(
             bound_snapshot = _snapshot_for_base_url(base_url)
             if bound_snapshot:
                 sess.rag_snapshot = bound_snapshot
-        sess.xvfb_process = runtime.start_xvfb(display)
+        if display:
+            sess.xvfb_process = runtime.start_xvfb(display)
         await sess.bridge.start()
     _SESSIONS[sid] = sess
     _persist_sessions()
@@ -1263,20 +1269,32 @@ async def start_session(
             raise FileNotFoundError(f"MCPTestManager.cf not found at {cf_path}.")
         runtime.load_configuration(sess.ibcmd, sess.db_path, cf_path)
 
-    server_proc = runtime.start_standalone_server(
-        ibsrv=sess.ibsrv, address=ibsrv_address, port=ibsrv_port,
-        name=ibsrv_name, data_dir=sess.server_data_dir,
-        log_dir=log_dir, db_path=sess.db_path,
-        direct_regport=ibsrv_direct_regport,
-        direct_range=_direct_range_from_regport(ibsrv_direct_regport),
-    )
-    runtime_state.server_process = server_proc
-
-    ws_url = runtime.build_thin_client_ws_url(ibsrv_address, ibsrv_port)
-    manager_proc = runtime.start_thin_test_manager(
-        onec_path=sess.onec_thin, ws_url=ws_url,
-        websocket_url=sess.bridge.url, log_dir=log_dir, display=display,
-    )
+    ibsrv_available = Path(sess.ibsrv).exists()
+    if ibsrv_available:
+        server_proc = runtime.start_standalone_server(
+            ibsrv=sess.ibsrv, address=ibsrv_address, port=ibsrv_port,
+            name=ibsrv_name, data_dir=sess.server_data_dir,
+            log_dir=log_dir, db_path=sess.db_path,
+            direct_regport=ibsrv_direct_regport,
+            direct_range=_direct_range_from_regport(ibsrv_direct_regport),
+        )
+        runtime_state.server_process = server_proc
+        ws_url = runtime.build_thin_client_ws_url(ibsrv_address, ibsrv_port)
+        manager_proc = runtime.start_thin_test_manager(
+            onec_path=sess.onec_thin, ws_url=ws_url,
+            websocket_url=sess.bridge.url, log_dir=log_dir, display=display,
+        )
+    else:
+        logging.info("ibsrv not found; starting test-manager in file-direct mode")
+        sess.ibsrv_port = 0
+        ws_url = ""
+        manager_proc = runtime.start_thin_test_manager_file_direct(
+            onec_path=sess.onec_thin,
+            db_path=sess.db_path,
+            websocket_url=sess.bridge.url,
+            log_dir=log_dir,
+            display=display,
+        )
     runtime_state.manager_process = manager_proc
     sess.runtime = runtime_state
     await _wait_for_bridge_connected(sess, timeout=60.0)
@@ -1289,56 +1307,83 @@ async def start_session(
     # passed a target URL/file/server infobase, connect the test client to
     # that target instead of creating an extra demo infobase.
     if not (base_url or connection_value):
-        shared_client_id = os.getenv("ONEC_MCP_SHARED_CLIENT_BASE_ID") or "default"
-        shared_client_root = Path(os.getenv("ONEC_MCP_SHARED_CLIENT_BASE_DIR", "/tmp/onec-mcp/shared-client-bases"))
-        shared_client_db = shared_client_root / shared_client_id / "ib"
-        shared_client = _acquire_shared_file_server(
-            owner_session_id=sid,
-            kind="demo-client",
-            platform_dir=platform_dir,
-            ibcmd=sess.ibcmd,
-            ibsrv=sess.ibsrv,
-            db_path=shared_client_db,
-            cf_path=runtime.DEFAULT_CLIENT_CF_BUILT,
-            create_if_missing=True,
-            port_seed=f"demo-client:{shared_client_id}",
-            server_name="mcpclient",
-        )
-        sess.client_ibsrv_port = shared_client.port
-        sess.shared_client_key = shared_client.key
-        sess.client_runtime = runtime.ManagerRuntime(
-            infobase=runtime.InfobaseSpec(db_path=shared_client.db_path),
-            server=runtime.StandaloneServerSpec(
-                address=shared_client.address,
-                port=shared_client.port,
-                name=shared_client.name,
-                data_dir=shared_client.data_dir,
-            ),
-            manager=runtime.TestManagerSpec(onec_path=sess.onec_thin),
-            server_process=shared_client.process,
-            log_dir=shared_client.log_dir,
-            extra={"shared_key": shared_client.key, "shared_refcount": len(shared_client.owners)},
-        )
+        if ibsrv_available:
+            shared_client_id = os.getenv("ONEC_MCP_SHARED_CLIENT_BASE_ID") or "default"
+            shared_client_root = Path(os.getenv("ONEC_MCP_SHARED_CLIENT_BASE_DIR", str(os_support.default_data_dir() / "shared-client-bases")))
+            shared_client_db = shared_client_root / shared_client_id / "ib"
+            shared_client = _acquire_shared_file_server(
+                owner_session_id=sid,
+                kind="demo-client",
+                platform_dir=platform_dir,
+                ibcmd=sess.ibcmd,
+                ibsrv=sess.ibsrv,
+                db_path=shared_client_db,
+                cf_path=runtime.DEFAULT_CLIENT_CF_BUILT,
+                create_if_missing=True,
+                port_seed=f"demo-client:{shared_client_id}",
+                server_name="mcpclient",
+            )
+            sess.client_ibsrv_port = shared_client.port
+            sess.shared_client_key = shared_client.key
+            sess.client_runtime = runtime.ManagerRuntime(
+                infobase=runtime.InfobaseSpec(db_path=shared_client.db_path),
+                server=runtime.StandaloneServerSpec(
+                    address=shared_client.address,
+                    port=shared_client.port,
+                    name=shared_client.name,
+                    data_dir=shared_client.data_dir,
+                ),
+                manager=runtime.TestManagerSpec(onec_path=sess.onec_thin),
+                server_process=shared_client.process,
+                log_dir=shared_client.log_dir,
+                extra={"shared_key": shared_client.key, "shared_refcount": len(shared_client.owners)},
+            )
 
-        client_ws_url = runtime.build_thin_client_ws_url(shared_client.address, shared_client.port)
-        pipeline_info.update({
-            "client_ibsrv_port": shared_client.port,
-            "client_ws_url": client_ws_url,
-            "client_base_url": shared_client.base_url,
-            "client_shared": True,
-            "client_shared_refcount": len(shared_client.owners),
-        })
+            client_ws_url = runtime.build_thin_client_ws_url(shared_client.address, shared_client.port)
+            pipeline_info.update({
+                "client_ibsrv_port": shared_client.port,
+                "client_ws_url": client_ws_url,
+                "client_base_url": shared_client.base_url,
+                "client_shared": True,
+                "client_shared_refcount": len(shared_client.owners),
+            })
+        else:
+            logging.info("ibsrv not found; preparing demo test-client in file-direct mode")
+            runtime.create_file_infobase(sess.ibcmd, sess.client_db_path)
+            client_cf_path = runtime.DEFAULT_CLIENT_CF_BUILT
+            if not Path(client_cf_path).exists():
+                raise FileNotFoundError(f"MCPTestClient.cf not found at {client_cf_path}.")
+            runtime.load_configuration(sess.ibcmd, sess.client_db_path, client_cf_path)
+            sess.client_runtime = runtime.ManagerRuntime(
+                infobase=runtime.InfobaseSpec(db_path=sess.client_db_path),
+                server=runtime.StandaloneServerSpec(address="", port=0, name="file-direct", data_dir=sess.client_server_data_dir),
+                manager=runtime.TestManagerSpec(onec_path=sess.onec_thin),
+                server_process=None,
+                log_dir=sess.client_log_dir,
+                extra={"target_connection_mode": "file-direct"},
+            )
+            pipeline_info.update({
+                "client_connection_mode": "file-direct",
+                "client_connection_value": str(sess.client_db_path),
+                "client_base_url": str(sess.client_db_path),
+                "client_shared": False,
+            })
 
     connect_result: Any = None
     connect_base_url = base_url
+    connect_connection_value = connection_value
+    connect_connection_mode = connection_mode
     if not connect_base_url and pipeline_info.get("client_base_url"):
         connect_base_url = str(pipeline_info["client_base_url"])
-    if connect_base_url or connection_value:
+    if not connect_connection_value and pipeline_info.get("client_connection_value"):
+        connect_connection_value = str(pipeline_info["client_connection_value"])
+        connect_connection_mode = str(pipeline_info.get("client_connection_mode") or "file-direct")
+    if connect_base_url or connect_connection_value:
         connect_result = await _connect_test_client_impl(
             sess, base_url=connect_base_url, username=username, password=password,
             port=testclient_port, onec_path=sess.onec_thin, host="localhost",
             extra_args=extra_args, execute=execute, command_parameter=command_parameter,
-            connection_mode=connection_mode, connection_value=connection_value,
+            connection_mode=connect_connection_mode, connection_value=connect_connection_value,
         )
         _auto_maximize_test_client_result(connect_result, sess.display)
 
@@ -1443,9 +1488,9 @@ def launch_manager(
     log_dir.mkdir(parents=True, exist_ok=True)
     runtime_state.log_dir = log_dir
 
-    ibcmd = str(pd / "ibcmd")
-    ibsrv = str(pd / "ibsrv")
-    onec_thin = str(pd / "1cv8c")
+    ibcmd = str(pd / os_support.executable_name("ibcmd"))
+    ibsrv = str(pd / os_support.executable_name("ibsrv"))
+    onec_thin = str(pd / os_support.executable_name("1cv8c"))
 
     if create_infobase:
         runtime.create_file_infobase(ibcmd, db)
@@ -1501,7 +1546,7 @@ def export_eventlog(
         eventlog_path = sess.runtime.server.data_dir / "log-data"
         log_dir = sess.runtime.log_dir
     else:
-        eventlog_path = Path(eventlog_dir or "/home/openclaw/.1cv8/1C/1cv8/standalone-server/log-data")
+        eventlog_path = Path(eventlog_dir or str(Path.home() / ".1cv8/1C/1cv8/standalone-server/log-data"))
         log_dir = sess.log_dir
     if not out_path:
         out = log_dir / f"eventlog_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{fmt}"
@@ -2694,22 +2739,29 @@ def screenshot(
         import mss  # type: ignore
         import mss.tools  # type: ignore
 
-        if not resolved_display:
-            raise RuntimeError("Cannot capture screenshot: no display set for session and no display argument provided")
-
-        previous_display = os.environ.get("DISPLAY")
-        os.environ["DISPLAY"] = resolved_display
-        try:
-            geometry = _active_x11_window_geometry(resolved_display) if window else None
+        if os_support.IS_WINDOWS:
+            geometry = _active_windows_1c_window_geometry() if window else None
             with mss.mss() as sct:
                 monitor = geometry or sct.monitors[0]
                 image = sct.grab(monitor)
                 mss.tools.to_png(image.rgb, image.size, output=str(output_path))
-        finally:
-            if previous_display is None:
-                os.environ.pop("DISPLAY", None)
-            else:
-                os.environ["DISPLAY"] = previous_display
+        else:
+            if not resolved_display:
+                raise RuntimeError("Cannot capture screenshot: no display set for session and no display argument provided")
+
+            previous_display = os.environ.get("DISPLAY")
+            os.environ["DISPLAY"] = resolved_display
+            try:
+                geometry = _active_x11_window_geometry(resolved_display) if window else None
+                with mss.mss() as sct:
+                    monitor = geometry or sct.monitors[0]
+                    image = sct.grab(monitor)
+                    mss.tools.to_png(image.rgb, image.size, output=str(output_path))
+            finally:
+                if previous_display is None:
+                    os.environ.pop("DISPLAY", None)
+                else:
+                    os.environ["DISPLAY"] = previous_display
     except ImportError as exc:
         raise RuntimeError("Install screenshot extra: pip install '.[screenshot]' or mss") from exc
 

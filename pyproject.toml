@@ -16,6 +16,8 @@ authors = [
 [project.optional-dependencies]
 screenshot = ["mss>=9.0.0"]
 dev = ["pytest>=8.0", "ruff>=0.5"]
+linux-window-control = ["python-xlib>=0.33"]
+windows-window-control = ["pywin32>=306"]
 window-control = ["python-xlib>=0.33"]
 
 [project.scripts]

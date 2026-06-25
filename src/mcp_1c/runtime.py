@@ -17,13 +17,14 @@ from __future__ import annotations
 import logging
 import os
 import shutil
-import signal
 import socket
 import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from . import os_support
 
 LOGGER = logging.getLogger(__name__)
 
@@ -39,14 +40,15 @@ DEFAULT_THICK_CLIENT = f"{DEFAULT_PLATFORM_DIR}/1cv8"
 DEFAULT_THIN_CLIENT = f"{DEFAULT_PLATFORM_DIR}/1cv8c"
 DEFAULT_IBCMD = f"{DEFAULT_PLATFORM_DIR}/ibcmd"
 DEFAULT_IBSRV = f"{DEFAULT_PLATFORM_DIR}/ibsrv"
-DEFAULT_IB_PATH = "/tmp/onec-mcp/ib"
-DEFAULT_IBSRV_DATA = "/tmp/onec-mcp/ibsrv-data"
+DEFAULT_DATA_DIR = str(os_support.default_data_dir())
+DEFAULT_IB_PATH = str(os_support.default_data_dir() / "ib")
+DEFAULT_IBSRV_DATA = str(os_support.default_data_dir() / "ibsrv-data")
 DEFAULT_CF_BUILT = "build/MCPTestManager.cf"
 DEFAULT_CLIENT_CF_BUILT = "build/MCPTestClient.cf"
 
 
 def _default_inbox_dir() -> Path:
-    return Path(os.getenv("ONEC_MCP_DATA_DIR", "/tmp/onec-mcp"))
+    return os_support.default_data_dir()
 
 
 @dataclass(slots=True)
@@ -121,6 +123,8 @@ def find_free_port(start: int = DEFAULT_WS_PORT, end: int | None = None) -> int:
 def start_xvfb(display: str, resolution: str = DEFAULT_DISPLAY_RES) -> subprocess.Popen:
     """Start Xvfb for the given display and return the Popen handle."""
     num = display.lstrip(":")
+    if os_support.IS_WINDOWS:
+        raise RuntimeError("Xvfb is not available on Windows")
     xvfb_bin = shutil.which("Xvfb") or "/usr/bin/Xvfb"
     if not Path(xvfb_bin).exists():
         raise FileNotFoundError("Xvfb not found; install it to run headless sessions")
@@ -129,7 +133,7 @@ def start_xvfb(display: str, resolution: str = DEFAULT_DISPLAY_RES) -> subproces
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         stdin=subprocess.DEVNULL,
-        start_new_session=True,
+        **os_support.subprocess_creation_kwargs(),
     )
     # Give Xvfb a moment; caller should poll DISPLAY if needed.
     time.sleep(0.5)
@@ -162,36 +166,8 @@ def wait_for_port(host: str, port: int, timeout: float = 30.0, poll: float = 0.5
 
 
 def kill_process(proc: subprocess.Popen | None, label: str) -> None:
-    """Terminate a subprocess, escalating to SIGKILL if needed."""
-    if proc is None:
-        return
-    try:
-        if proc.poll() is not None:
-            return
-    except Exception:
-        return
-    try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-    except ProcessLookupError:
-        return
-    except Exception:
-        pass
-    try:
-        proc.wait(timeout=5)
-        LOGGER.info("Stopped %s (pid=%s) via SIGTERM", label, proc.pid)
-        return
-    except subprocess.TimeoutExpired:
-        pass
-    except Exception:
-        pass
-    try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        proc.wait(timeout=5)
-        LOGGER.warning("Killed %s (pid=%s) via SIGKILL", label, proc.pid)
-    except ProcessLookupError:
-        return
-    except subprocess.TimeoutExpired:
-        LOGGER.error("Failed to stop %s (pid=%s)", label, proc.pid)
+    """Terminate a subprocess tree, escalating when needed."""
+    os_support.kill_process_tree(proc, label, LOGGER)
 
 
 def create_file_infobase(
@@ -356,7 +332,7 @@ def start_standalone_server(
         stdout=log_handle,
         stderr=log_handle,
         stdin=subprocess.DEVNULL,
-        start_new_session=True,
+        **os_support.subprocess_creation_kwargs(),
     )
     if not wait_for_port(address, port, timeout=timeout):
         kill_process(proc, "ibsrv")
@@ -449,6 +425,53 @@ def build_thin_test_manager_argv(
     ]
 
 
+def build_thin_test_manager_file_argv(
+    onec_path: str,
+    db_path: Path,
+    websocket_url: str,
+) -> list[str]:
+    """Compose argv for 1cv8c /F <db-path> /TESTMANAGER /C <ws-bridge>."""
+    return [
+        onec_path,
+        "ENTERPRISE",
+        "/DisableStartupDialogs",
+        "/F",
+        str(db_path),
+        "/Lru",
+        "/VLru_RU",
+        "/TESTMANAGER",
+        "/C",
+        websocket_url,
+    ]
+
+
+def _start_thin_test_manager_argv(
+    argv: list[str],
+    log_dir: Path,
+    display: str = "",
+    log_name: str = "test_manager.log",
+) -> subprocess.Popen:
+    if not Path(argv[0]).exists():
+        raise FileNotFoundError(f"1cv8c (thin) not found: {argv[0]}")
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / log_name
+    log_handle = open(log_path, "ab", buffering=0)
+    LOGGER.info("Starting thin test manager: %s", " ".join(argv))
+    env = os.environ.copy()
+    if display:
+        env["DISPLAY"] = display
+    proc = subprocess.Popen(
+        argv,
+        stdout=log_handle,
+        stderr=log_handle,
+        stdin=subprocess.DEVNULL,
+        **os_support.subprocess_creation_kwargs(),
+        env=env,
+    )
+    LOGGER.info("Test manager launched (pid=%s); log=%s", proc.pid, log_path)
+    return proc
+
+
 def start_thin_test_manager(
     onec_path: str,
     ws_url: str,
@@ -456,23 +479,18 @@ def start_thin_test_manager(
     log_dir: Path,
     display: str = ":99",
 ) -> subprocess.Popen:
-    """Start the 1C test-manager (thin client, /WS ws://ibsv) and return Popen."""
-    if not Path(onec_path).exists():
-        raise FileNotFoundError(f"1cv8c (thin) not found: {onec_path}")
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / "test_manager.log"
-    log_handle = open(log_path, "ab", buffering=0)
-    argv = build_thin_test_manager_argv(
-        onec_path, ws_url, websocket_url
-    )
-    LOGGER.info("Starting thin test manager: %s", " ".join(argv))
-    proc = subprocess.Popen(
-        argv,
-        stdout=log_handle,
-        stderr=log_handle,
-        stdin=subprocess.DEVNULL,
-        start_new_session=True,
-        env={**os.environ, "DISPLAY": display},
-    )
-    LOGGER.info("Test manager launched (pid=%s); log=%s", proc.pid, log_path)
-    return proc
+    """Start the 1C test-manager (thin client, /WS HTTP gate) and return Popen."""
+    argv = build_thin_test_manager_argv(onec_path, ws_url, websocket_url)
+    return _start_thin_test_manager_argv(argv, log_dir=log_dir, display=display)
+
+
+def start_thin_test_manager_file_direct(
+    onec_path: str,
+    db_path: Path,
+    websocket_url: str,
+    log_dir: Path,
+    display: str = "",
+) -> subprocess.Popen:
+    """Start the 1C test-manager directly against a file infobase via /F."""
+    argv = build_thin_test_manager_file_argv(onec_path, db_path, websocket_url)
+    return _start_thin_test_manager_argv(argv, log_dir=log_dir, display=display)

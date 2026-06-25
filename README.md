@@ -19,7 +19,11 @@
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
-pip install -e '.[screenshot,dev,window-control]'
+# Linux/X11
+pip install -e '.[screenshot,dev,linux-window-control]'
+
+# Windows (запускать из интерактивной пользовательской сессии, не как service)
+# pip install -e ".[screenshot,dev,windows-window-control]"
 
 # Запуск MCP-сервера (transport: stdio)
 answer42 --ws-host 127.0.0.1 --ws-port 8765
@@ -37,7 +41,7 @@ start_session(
 )
 ```
 
-`start_session` определяет версию 1С по `base_url`, поднимает инфраструктуру Answer42 (Xvfb, свободные порты, WebSocket bridge, файловую базу менеджера, автономный сервер и test-manager) и сразу подключает клиент тестирования к целевой информационной базе. После `idle_timeout_minutes` минут неактивности сессия автоматически завершается; значение по умолчанию — 60 минут. Для запуска клиента можно передать `extra_args`, `execute` (параметр командной строки `/Execute`) и `command_parameter` (параметр `/C`); если `/C` уже указан в `extra_args`, значения склеиваются через `;`.
+`start_session` определяет версию 1С по `base_url`, поднимает инфраструктуру Answer42 (на Linux — Xvfb, если нужен headless; на Windows — интерактивная desktop-сессия), свободные порты, WebSocket bridge, файловую базу менеджера и test-manager. Если доступны серверные компоненты 1С (`ibsrv`), менеджер и встроенная тестовая база публикуются через автономный сервер; если доступен только тонкий клиент и `ibcmd`, Answer42 автоматически использует fallback `file-direct` (`/F`) для файловых баз менеджера и клиента. После `idle_timeout_minutes` минут неактивности сессия автоматически завершается; значение по умолчанию — 60 минут. Для запуска клиента можно передать `extra_args`, `execute` (параметр командной строки `/Execute`) и `command_parameter` (параметр `/C`); если `/C` уже указан в `extra_args`, значения склеиваются через `;`.
 
 Логин/пароль рекомендуется **не передавать явно**: `start_session` умеет брать их из локального credentials-файла по `base_url`. Параметры `username`/`password` остаются в API для разовых сценариев и обратной совместимости, но при передаче в MCP-вызове они видны вызывающему агенту в аргументах tool-call.
 
@@ -96,8 +100,9 @@ stop_session(session_id="my-session", clean_data=False)
 
 - Python 3.11+
 - 1С:Предприятие 8.3.27+
-- Пакеты Python: `mcp`, `websockets`, `pydantic`; для скриншотов — `mss`; для управления OS-окном — `python-xlib`/`wmctrl`/`xdotool`
-- GUI/Xvfb для headless-сервера
+- Пакеты Python: `mcp`, `websockets`, `pydantic`; для скриншотов — `mss`
+- Linux/X11: `python-xlib`/`wmctrl`/`xdotool`, GUI/Xvfb для headless-сервера
+- Windows: интерактивная пользовательская desktop-сессия; window-control и screenshots работают через WinAPI/`mss`
 
 ## Безопасность стендов и учётных данных
 
@@ -124,13 +129,13 @@ stop_session(session_id="my-session", clean_data=False)
 Конфигурация менеджера тестирования собирается из XML-исходников `src/cf/`:
 
 ```bash
-DISPLAY=:99 ./scripts/build_cf.sh src/cf build/MCPTestManager.cf
+PYTHONPATH=src python scripts/build_cf.py src/cf build/MCPTestManager.cf
 ```
 
 Тестовая конфигурация для E2E собирается из XML-исходников `src/client_cf/`:
 
 ```bash
-DISPLAY=:99 ./scripts/build_cf.sh src/client_cf build/MCPTestClient.cf
+PYTHONPATH=src python scripts/build_cf.py src/client_cf build/MCPTestClient.cf
 ```
 
 E2E-сценарий всегда пересобирает `build/MCPTestClient.cf` из `src/client_cf/`, чтобы тесты не использовали устаревший артефакт.
@@ -140,11 +145,14 @@ E2E можно запускать целиком или по независим�
 ```bash
 PYTHONPATH=src python3 scripts/e2e_stable.py                         # full
 E2E_SCENARIO=smoke PYTHONPATH=src python3 scripts/e2e_stable.py       # быстрый smoke
-E2E_SCENARIO=dynamic PYTHONPATH=src python3 scripts/e2e_stable.py     # таблицы/dynamic-list/отчёт
+E2E_SCENARIO=dynamic PYTHONPATH=src python3 scripts/e2e_stable.py     # legacy: таблицы/dynamic-list/отчёт
+E2E_SCENARIO=dynamic-tables PYTHONPATH=src python3 scripts/e2e_stable.py
+E2E_SCENARIO=dynamic-lists PYTHONPATH=src python3 scripts/e2e_stable.py
+E2E_SCENARIO=dynamic-reports PYTHONPATH=src python3 scripts/e2e_stable.py
 E2E_SCENARIO=coverage PYTHONPATH=src python3 scripts/e2e_stable.py    # diagnostic/negative tools
 ```
 
-Для реального распараллеливания сценарий умеет сам запустить три разные сессии (`smoke`, `dynamic`, `coverage`), а не три копии одного и того же теста. Встроенная тестовая файловая база при этом публикуется через один общий `ibsrv`, к которому подключаются все три `/TESTCLIENT`:
+Для реального распараллеливания сценарий умеет сам запустить пять разные сессий (`smoke`, `dynamic-tables`, `dynamic-lists`, `dynamic-reports`, `coverage`), а не копии одного и того же теста. Встроенная тестовая файловая база публикуется через один общий `ibsrv`, когда серверные компоненты доступны; без `ibsrv` demo-клиент запускается через `file-direct` (`/F`):
 
 ```bash
 E2E_PARALLEL=1 E2E_SESSION_ID=e2e-split PYTHONPATH=src python3 scripts/e2e_stable.py
@@ -156,7 +164,7 @@ E2E_PARALLEL=1 E2E_SESSION_ID=e2e-split PYTHONPATH=src python3 scripts/e2e_stabl
 
 ### Жизненный цикл
 
-- `start_session(...)` — единый запуск: определение версии по `base_url`, Xvfb, свободные порты, ibsrv, test-manager и подключение клиента тестирования. Если `username`/`password` не переданы, берёт их из credentials-файла по `base_url`. Поддерживает `extra_args`, `execute` → `/Execute`, `command_parameter` → `/C`; несколько частей `/C` объединяются через `;`.
+- `start_session(...)` — единый запуск: определение версии по `base_url`, Xvfb на Linux при необходимости, свободные порты, bridge, файловая база менеджера, `ibsrv` или fallback `file-direct`, test-manager и подключение клиента тестирования. Если `username`/`password` не переданы, берёт их из credentials-файла по `base_url`. Поддерживает `extra_args`, `execute` → `/Execute`, `command_parameter` → `/C`; несколько частей `/C` объединяются через `;`.
 - `session_status(session_id)` — состояние bridge, runtime, клиента тестирования и RAG snapshot.
 - `stop_session(session_id, clean_data)` — отключение клиента тестирования и остановка всех процессов, Xvfb и bridge.
 
