@@ -26,11 +26,13 @@ DISPLAY=:99 ./scripts/build_cf.sh src/client_cf build/MCPTestClient.cf
 
 ## MCP-сервер в OpenClaw
 
-OpenClaw хранит MCP-серверы в `mcp.servers`. Добавьте `answer42` как stdio server:
+OpenClaw хранит MCP-серверы в `mcp.servers`. Добавьте `Answer42` как stdio server:
 
 ```bash
-/mcp set answer42={"command":"/home/openclaw/.openclaw/workspace/answer42/.venv/bin/answer42","args":[],"cwd":"/home/openclaw/.openclaw/workspace/answer42","enabled":true,"requestTimeoutMs":120000,"connectionTimeoutMs":30000}
+/mcp set Answer42={"command":"/home/openclaw/.openclaw/workspace/answer42/.venv/bin/answer42","args":[],"cwd":"/home/openclaw/.openclaw/workspace/answer42","env":{"ONEC_MCP_CREDENTIALS_FILE":"/secure/path/credentials.json"},"enabled":true,"requestTimeoutMs":120000,"connectionTimeoutMs":30000,"toolFilter":{"exclude":["credentials_list"]}}
 ```
+
+`ONEC_MCP_CREDENTIALS_FILE` указывает на локальный JSON с логинами и паролями. В штатном режиме агент вызывает `start_session(base_url="...")` без `username`/`password`, а Answer42 сам подставляет креды внутри MCP-процесса. Для проверки наличия записи используйте tool `credentials_check(base_url="...")`; он не возвращает секреты. `credentials_list` рекомендуется скрывать через `toolFilter.exclude`, чтобы агент не видел список URL-шаблонов и логинов.
 
 После изменения MCP config перезапустите или перезагрузите OpenClaw gateway, если hot reload не подхватил конфигурацию.
 

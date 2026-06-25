@@ -14,6 +14,9 @@ from datetime import datetime
 import shlex
 import subprocess
 import re
+import fcntl
+import hashlib
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -34,6 +37,33 @@ STATE_FILE = Path(os.getenv("ONEC_MCP_SESSION_STATE", "/tmp/onec-mcp/sessions.js
 AUTORELOAD_PID_FILE = Path(os.getenv("ONEC_MCP_AUTORELOAD_PID_FILE", "/tmp/onec-mcp/answer42-autoreload.pid"))
 AUTORELOAD_LOG_FILE = Path(os.getenv("ONEC_MCP_AUTORELOAD_LOG_FILE", "/tmp/onec-mcp/answer42-autoreload.log"))
 RAG_BINDINGS_FILE = Path(os.getenv("ONEC_MCP_RAG_BINDINGS", "/tmp/onec-mcp/rag-bindings.json"))
+
+_PORT_ALLOC_LOCK = Path(os.getenv("ONEC_MCP_PORT_ALLOC_LOCK", "/tmp/onec-mcp/port-allocation.lock"))
+
+
+@contextmanager
+def _port_allocation_lock():
+    _PORT_ALLOC_LOCK.parent.mkdir(parents=True, exist_ok=True)
+    with _PORT_ALLOC_LOCK.open("w") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+_PORT_BAND_SIZE = 20
+_PORT_SCAN_WIDTH = 10
+
+
+def _stable_session_port_offset(session_id: str) -> int:
+    digest = hashlib.sha1(session_id.encode("utf-8")).digest()
+    return (int.from_bytes(digest[:2], "big") % 100) * _PORT_BAND_SIZE
+
+
+def _find_session_port(base: int, offset: int, *, sub_offset: int = 0) -> int:
+    start = base + offset + sub_offset
+    return runtime.find_free_port(start, start + _PORT_SCAN_WIDTH)
 
 
 class SessionState:
@@ -62,8 +92,10 @@ class SessionState:
         self.base_url = base_url
         self.username = username
         self.password = password
-        self.client_ibsrv_port = 0  # to be set in start_session
+        self.client_ibsrv_port = 0  # to be set in start_session for the built-in demo client
         self.client_runtime: runtime.ManagerRuntime | None = None
+        self.file_client_ibsrv_port = 0  # to be set when a file infobase target is served through ibsrv
+        self.file_client_runtime: runtime.ManagerRuntime | None = None
         self.xvfb_process: subprocess.Popen | None = None
         self.runtime: runtime.ManagerRuntime | None = None
         self.bridge = OneCBridgeServer(
@@ -89,6 +121,7 @@ class SessionState:
             "username": self.username,
             # Password is intentionally not persisted.
             "client_ibsrv_port": self.client_ibsrv_port,
+            "file_client_ibsrv_port": self.file_client_ibsrv_port,
             "rag_snapshot": self.rag_snapshot,
             "idle_timeout_seconds": self.idle_timeout_seconds,
         }
@@ -108,6 +141,7 @@ class SessionState:
             password="",
         )
         sess.client_ibsrv_port = int(data.get("client_ibsrv_port") or 0)
+        sess.file_client_ibsrv_port = int(data.get("file_client_ibsrv_port") or 0)
         sess.rag_snapshot = str(data.get("rag_snapshot", ""))
         sess.idle_timeout_seconds = int(data.get("idle_timeout_seconds") or 60 * 60)
         return sess
@@ -147,6 +181,14 @@ class SessionState:
     @property
     def client_log_dir(self) -> Path:
         return self.data_dir / "logs-client"
+
+    @property
+    def file_client_server_data_dir(self) -> Path:
+        return self.data_dir / "ibsrv-data-file-client"
+
+    @property
+    def file_client_log_dir(self) -> Path:
+        return self.data_dir / "logs-file-client"
 
 
 _SESSIONS: dict[str, SessionState] = {}
@@ -258,6 +300,27 @@ def _save_rag_binding(base_url: str, snapshot: str) -> None:
 
 def _snapshot_for_base_url(base_url: str) -> str:
     return _load_rag_bindings().get(_normalize_base_url(base_url), "")
+
+
+def _normalize_connection_mode(mode: str, value: str, base_url: str = "") -> str:
+    requested = (mode or "auto").strip().lower()
+    if requested in {"http", "url"}:
+        return "ws"
+    if requested in {"direct-file", "direct_file", "file-direct", "file_direct"}:
+        return "file-direct"
+    if requested in {"ws", "file", "server"}:
+        return requested
+    if requested not in {"", "auto"}:
+        raise ValueError(f"Unsupported connection_mode: {mode!r}. Expected auto, ws, file, file-direct or server.")
+    effective = (value or base_url or "").strip()
+    lowered = effective.lower()
+    if lowered.startswith(("http://", "https://")):
+        return "ws"
+    if effective and (Path(effective).is_absolute() or Path(effective, "1Cv8.1CD").exists() or Path(effective, "1cv8.1cd").exists()):
+        return "file"
+    if effective:
+        return "server"
+    return "ws"
 
 
 def _touch_session(sess: SessionState) -> None:
@@ -811,6 +874,7 @@ def session_status(*,
     bridge = sess.bridge.status()
     rt = sess.runtime
     client_rt = sess.client_runtime
+    file_client_rt = sess.file_client_runtime
     return {
         "running": True,
         "session_id": session_id,
@@ -831,6 +895,8 @@ def session_status(*,
             "base_url": sess.base_url,
             "client_ibsrv_port": sess.client_ibsrv_port,
             "server_alive": client_rt.server_process.poll() is None if client_rt and client_rt.server_process else False,
+            "file_client_ibsrv_port": sess.file_client_ibsrv_port,
+            "file_client_server_alive": file_client_rt.server_process.poll() is None if file_client_rt and file_client_rt.server_process else False,
         },
         "rag_snapshot": sess.rag_snapshot,
         "idle_timeout_seconds": sess.idle_timeout_seconds,
@@ -849,10 +915,13 @@ async def start_session(
     extra_args: Annotated[str, "Extra raw 1C command-line arguments for the test client"] = "",
     execute: Annotated[str, "External data processor/report path for the test-client /Execute command-line parameter"] = "",
     command_parameter: Annotated[str, "Additional test-client /C value; when extra_args already contains /C, this value is appended with ';'"] = "",
+    connection_mode: Annotated[str, "Test-client connection mode: auto, ws (HTTP/WS URL), file (file infobase via ibsrv), file-direct (direct /F), or server (server/infobase)"] = "auto",
+    connection_value: Annotated[str, "Connection target: URL for ws, directory path for file, server/infobase for server"] = "",
 ) -> dict[str, Any]:
     """One-shot session factory: detect version, start infrastructure and connect the 1C test client."""
+    initial_connection_mode = _normalize_connection_mode(connection_mode, connection_value or base_url, base_url)
     resolved_version = version or None
-    if not resolved_version and base_url:
+    if not resolved_version and base_url and initial_connection_mode == "ws":
         resolved_version = _platform.detect_version_from_url(base_url)
     if resolved_version:
         _platform.require_websocket_support(resolved_version)
@@ -862,28 +931,32 @@ async def start_session(
     _platform.require_websocket_support(actual_version)
     logging.info("start_session: version=%s platform_dir=%s", actual_version, platform_dir)
 
-    display = runtime.find_free_display()
-    ws_port = runtime.find_free_port(runtime.DEFAULT_WS_PORT)
-    ibsrv_port = runtime.find_free_port(runtime.DEFAULT_IBSRV_HTTP_PORT)
-    testclient_port = runtime.find_free_port(runtime.DEFAULT_TEST_CLIENT_PORT)
-
     sid = session_id or DEFAULT_SESSION
     if sid in _SESSIONS:
         raise ValueError(f"Session {sid!r} already exists.")
 
     data_dir = Path(f"/tmp/onec-mcp/sessions/{sid}")
-    sess = SessionState(
-        session_id=sid, display=display, platform_dir=platform_dir,
-        ws_port=ws_port, ibsrv_port=ibsrv_port, testclient_port=testclient_port,
-        data_dir=data_dir, base_url=base_url, username=username, password=password
-    )
-    sess.idle_timeout_seconds = max(0, int(idle_timeout_minutes)) * 60
-    if base_url:
-        bound_snapshot = _snapshot_for_base_url(base_url)
-        if bound_snapshot:
-            sess.rag_snapshot = bound_snapshot
-    sess.xvfb_process = runtime.start_xvfb(display)
-    await sess.bridge.start()
+    with _port_allocation_lock():
+        port_offset = _stable_session_port_offset(sid)
+        display_offset = port_offset // _PORT_BAND_SIZE
+        display = runtime.find_free_display(runtime.DEFAULT_DISPLAY_START + display_offset)
+        ws_port = _find_session_port(runtime.DEFAULT_WS_PORT, port_offset, sub_offset=0)
+        ibsrv_port = _find_session_port(runtime.DEFAULT_IBSRV_HTTP_PORT, port_offset, sub_offset=0)
+        ibsrv_direct_regport = _find_session_port(runtime.DEFAULT_IBSRV_DIRECT_PORT, port_offset, sub_offset=0)
+        testclient_port = _find_session_port(runtime.DEFAULT_TEST_CLIENT_PORT, port_offset, sub_offset=0)
+
+        sess = SessionState(
+            session_id=sid, display=display, platform_dir=platform_dir,
+            ws_port=ws_port, ibsrv_port=ibsrv_port, testclient_port=testclient_port,
+            data_dir=data_dir, base_url=base_url, username=username, password=password
+        )
+        sess.idle_timeout_seconds = max(0, int(idle_timeout_minutes)) * 60
+        if base_url:
+            bound_snapshot = _snapshot_for_base_url(base_url)
+            if bound_snapshot:
+                sess.rag_snapshot = bound_snapshot
+        sess.xvfb_process = runtime.start_xvfb(display)
+        await sess.bridge.start()
     _SESSIONS[sid] = sess
     _persist_sessions()
     logging.info("start_session: bridge listening on ws://127.0.0.1:%s", ws_port)
@@ -902,16 +975,18 @@ async def start_session(
         )
         runtime_state.log_dir = log_dir
 
-        runtime.create_file_infobase(sess.ibcmd, sess.db_path)
-        cf_path = runtime.DEFAULT_CF_BUILT
-        if not Path(cf_path).exists():
-            raise FileNotFoundError(f"MCPTestManager.cf not found at {cf_path}.")
-        runtime.load_configuration(sess.ibcmd, sess.db_path, cf_path)
+        with _port_allocation_lock():
+            runtime.create_file_infobase(sess.ibcmd, sess.db_path)
+            cf_path = runtime.DEFAULT_CF_BUILT
+            if not Path(cf_path).exists():
+                raise FileNotFoundError(f"MCPTestManager.cf not found at {cf_path}.")
+            runtime.load_configuration(sess.ibcmd, sess.db_path, cf_path)
 
         server_proc = runtime.start_standalone_server(
             ibsrv=sess.ibsrv, address=ibsrv_address, port=ibsrv_port,
             name=ibsrv_name, data_dir=sess.server_data_dir,
             log_dir=log_dir, db_path=sess.db_path,
+            direct_regport=ibsrv_direct_regport,
         )
         runtime_state.server_process = server_proc
 
@@ -925,55 +1000,64 @@ async def start_session(
         await _wait_for_bridge_connected(sess, timeout=60.0)
         _persist_sessions()
 
-        # --- Client ibsrv (second autonomous server for /TESTCLIENT) ---
-        client_ibsrv_port = runtime.find_free_port(runtime.DEFAULT_IBSRV_HTTP_PORT + 100)
-        client_log_dir = sess.client_log_dir
-        client_log_dir.mkdir(parents=True, exist_ok=True)
-        client_ibsrv_name = "mcpclient"
+        pipeline_info = {"manager_pid": manager_proc.pid, "ws_url": ws_url, "log_dir": str(log_dir)}
 
-        runtime.create_file_infobase(sess.ibcmd, sess.client_db_path)
-        # Load a dedicated tested-client configuration.  It intentionally does
-        # not contain MCPTestManager code (which uses /TESTMANAGER-only types),
-        # but it does contain real metadata objects for positive UI E2E.
-        client_cf_path = runtime.DEFAULT_CLIENT_CF_BUILT
-        if not Path(client_cf_path).exists():
-            raise FileNotFoundError(f"MCPTestClient.cf not found at {client_cf_path}.")
-        runtime.load_configuration(sess.ibcmd, sess.client_db_path, client_cf_path)
+        # --- Built-in demo client ibsrv (second autonomous server for /TESTCLIENT) ---
+        # It is only needed for self-contained E2E sessions.  When the caller
+        # passed a target URL/file/server infobase, connect the test client to
+        # that target instead of creating an extra demo infobase.
+        if not (base_url or connection_value):
+            with _port_allocation_lock():
+                client_ibsrv_port = _find_session_port(runtime.DEFAULT_IBSRV_HTTP_PORT, port_offset, sub_offset=10)
+                client_direct_regport = _find_session_port(runtime.DEFAULT_IBSRV_DIRECT_PORT, port_offset, sub_offset=10)
+            client_log_dir = sess.client_log_dir
+            client_log_dir.mkdir(parents=True, exist_ok=True)
+            client_ibsrv_name = "mcpclient"
 
-        client_server_proc = runtime.start_standalone_server(
-            ibsrv=sess.ibsrv, address=ibsrv_address, port=client_ibsrv_port,
-            name=client_ibsrv_name, data_dir=sess.client_server_data_dir,
-            log_dir=client_log_dir, db_path=sess.client_db_path,
-            direct_regport=1542,  # different from default 1541 used by manager ibsrv
-        )
-        sess.client_ibsrv_port = client_ibsrv_port
-        sess.client_runtime = runtime.ManagerRuntime(
-            infobase=runtime.InfobaseSpec(db_path=sess.client_db_path),
-            server=runtime.StandaloneServerSpec(
-                address=ibsrv_address, port=client_ibsrv_port,
+            with _port_allocation_lock():
+                runtime.create_file_infobase(sess.ibcmd, sess.client_db_path)
+                # Load a dedicated tested-client configuration.  It intentionally does
+                # not contain MCPTestManager code (which uses /TESTMANAGER-only types),
+                # but it does contain real metadata objects for positive UI E2E.
+                client_cf_path = runtime.DEFAULT_CLIENT_CF_BUILT
+                if not Path(client_cf_path).exists():
+                    raise FileNotFoundError(f"MCPTestClient.cf not found at {client_cf_path}.")
+                runtime.load_configuration(sess.ibcmd, sess.client_db_path, client_cf_path)
+
+            client_server_proc = runtime.start_standalone_server(
+                ibsrv=sess.ibsrv, address=ibsrv_address, port=client_ibsrv_port,
                 name=client_ibsrv_name, data_dir=sess.client_server_data_dir,
-            ),
-            manager=runtime.TestManagerSpec(onec_path=sess.onec_thin),
-            server_process=client_server_proc,
-            log_dir=client_log_dir,
-        )
+                log_dir=client_log_dir, db_path=sess.client_db_path,
+                direct_regport=client_direct_regport,
+            )
+            sess.client_ibsrv_port = client_ibsrv_port
+            sess.client_runtime = runtime.ManagerRuntime(
+                infobase=runtime.InfobaseSpec(db_path=sess.client_db_path),
+                server=runtime.StandaloneServerSpec(
+                    address=ibsrv_address, port=client_ibsrv_port,
+                    name=client_ibsrv_name, data_dir=sess.client_server_data_dir,
+                ),
+                manager=runtime.TestManagerSpec(onec_path=sess.onec_thin),
+                server_process=client_server_proc,
+                log_dir=client_log_dir,
+            )
 
-        client_ws_url = runtime.build_thin_client_ws_url(ibsrv_address, client_ibsrv_port)
-        pipeline_info = {
-            "manager_pid": manager_proc.pid, "ws_url": ws_url, "log_dir": str(log_dir),
-            "client_ibsrv_port": client_ibsrv_port, "client_ws_url": client_ws_url,
-            "client_base_url": f"http://{ibsrv_address}:{client_ibsrv_port}",
-        }
+            client_ws_url = runtime.build_thin_client_ws_url(ibsrv_address, client_ibsrv_port)
+            pipeline_info.update({
+                "client_ibsrv_port": client_ibsrv_port, "client_ws_url": client_ws_url,
+                "client_base_url": f"http://{ibsrv_address}:{client_ibsrv_port}",
+            })
 
     connect_result: Any = None
     connect_base_url = base_url
     if start_pipeline and not connect_base_url and pipeline_info.get("client_base_url"):
         connect_base_url = str(pipeline_info["client_base_url"])
-    if connect_base_url:
+    if connect_base_url or connection_value:
         connect_result = await _connect_test_client_impl(
             sess, base_url=connect_base_url, username=username, password=password,
             port=testclient_port, onec_path=sess.onec_thin, host="localhost",
             extra_args=extra_args, execute=execute, command_parameter=command_parameter,
+            connection_mode=connection_mode, connection_value=connection_value,
         )
         _auto_maximize_test_client_result(connect_result, sess.display)
 
@@ -1011,6 +1095,9 @@ async def _stop_session_impl(session_id: str = DEFAULT_SESSION, clean_data: bool
     if sess.client_runtime is not None:
         runtime.kill_process(sess.client_runtime.server_process, "ibsrv-client")
         stopped.append("client-ibsrv")
+    if sess.file_client_runtime is not None:
+        runtime.kill_process(sess.file_client_runtime.server_process, "ibsrv-file-client")
+        stopped.append("file-client-ibsrv")
     try:
         await sess.bridge.stop()
         stopped.append("bridge")
@@ -1131,6 +1218,20 @@ def export_eventlog(
 
 
 @mcp.tool()
+def credentials_check(base_url: str) -> dict[str, object]:
+    """Check whether credentials exist for a base URL without returning secrets."""
+    credentials = _credentials_store().lookup(base_url)
+    if credentials is None:
+        return {"base_url": base_url, "found": False}
+    return {
+        "base_url": base_url,
+        "found": True,
+        "username": credentials.get("username", ""),
+        "password": "***",
+    }
+
+
+@mcp.tool()
 def credentials_list() -> list[dict[str, str]]:
     """List configured credential URL patterns with passwords redacted."""
     return _credentials_store().list_entries()
@@ -1148,38 +1249,113 @@ async def _connect_test_client_impl(
     extra_args: str = "",
     execute: str = "",
     command_parameter: str = "",
+    connection_mode: str = "auto",
+    connection_value: str = "",
 ) -> Any:
     """Launch 1cv8c /TESTCLIENT inside the manager processor and connect."""
     await _wait_for_bridge_connected(sess, timeout=60.0)
     r_base = base_url or sess.base_url
+    r_value = connection_value or r_base
+    mode = _normalize_connection_mode(connection_mode, r_value, r_base)
     r_user = username or sess.username
     r_pass = password if password else sess.password
     r_port = port if port else sess.testclient_port
     r_onec = onec_path or sess.onec_thin
-    if not r_base and sess.client_ibsrv_port:
-        r_base = f"http://127.0.0.1:{sess.client_ibsrv_port}"
-        r_user = r_user or ""
-        r_pass = r_pass or ""
-    if not r_base:
-        raise ValueError("base_url is required")
-    if not r_user and not r_pass:
+
+    if mode == "ws":
+        if not r_value and sess.client_ibsrv_port:
+            r_value = f"http://127.0.0.1:{sess.client_ibsrv_port}"
+            r_user = r_user or ""
+            r_pass = r_pass or ""
+        if not r_value:
+            raise ValueError("base_url or connection_value is required")
+        r_base = r_value
+        if not r_user and not r_pass:
+            credentials = _credentials_store().lookup(r_base)
+            if credentials:
+                r_user = credentials["username"]
+                r_pass = credentials["password"]
+    elif mode == "file-direct":
+        if not r_value:
+            raise ValueError("connection_value or base_url must contain a file infobase directory for connection_mode='file-direct'")
+        db_path = Path(r_value).expanduser()
+        if not db_path.exists():
+            raise FileNotFoundError(f"File infobase directory not found: {db_path}")
+        r_base = str(db_path)
+        r_value = str(db_path)
+        target_connection_mode = "file-direct"
+    elif mode == "file":
+        if not r_value:
+            raise ValueError("connection_value or base_url must contain a file infobase directory for connection_mode='file'")
+        db_path = Path(r_value).expanduser()
+        if not db_path.exists():
+            raise FileNotFoundError(f"File infobase directory not found: {db_path}")
+        if sess.file_client_runtime is not None:
+            runtime.kill_process(sess.file_client_runtime.server_process, "ibsrv-file-client")
+            sess.file_client_runtime = None
+        with _port_allocation_lock():
+            port_offset = _stable_session_port_offset(sess.session_id)
+            file_client_port = _find_session_port(runtime.DEFAULT_IBSRV_HTTP_PORT, port_offset, sub_offset=15)
+            file_client_direct_regport = _find_session_port(runtime.DEFAULT_IBSRV_DIRECT_PORT, port_offset, sub_offset=15)
+        file_client_log_dir = sess.file_client_log_dir
+        file_client_log_dir.mkdir(parents=True, exist_ok=True)
+        server_proc = runtime.start_standalone_server(
+            ibsrv=sess.ibsrv,
+            address="127.0.0.1",
+            port=file_client_port,
+            name="mcpfileclient",
+            data_dir=sess.file_client_server_data_dir,
+            log_dir=file_client_log_dir,
+            db_path=db_path,
+            direct_regport=file_client_direct_regport,
+        )
+        sess.file_client_ibsrv_port = file_client_port
+        sess.file_client_runtime = runtime.ManagerRuntime(
+            infobase=runtime.InfobaseSpec(db_path=db_path),
+            server=runtime.StandaloneServerSpec(
+                address="127.0.0.1", port=file_client_port,
+                name="mcpfileclient", data_dir=sess.file_client_server_data_dir,
+            ),
+            manager=runtime.TestManagerSpec(onec_path=sess.onec_thin),
+            server_process=server_proc,
+            log_dir=file_client_log_dir,
+            extra={"target_connection_mode": "file"},
+        )
+        r_base = str(db_path)
+        r_value = f"http://127.0.0.1:{file_client_port}"
+        mode = "ws"
+        target_connection_mode = "file"
+    elif mode == "server":
+        if not r_value:
+            raise ValueError("connection_value or base_url must contain server/infobase for connection_mode='server'")
+        r_base = r_value
+        target_connection_mode = "server"
+    else:
+        raise ValueError(f"Unsupported connection mode after normalization: {mode!r}")
+    if "target_connection_mode" not in locals():
+        target_connection_mode = mode
+
+    if not r_user and not r_pass and r_base:
         credentials = _credentials_store().lookup(r_base)
         if credentials:
             r_user = credentials["username"]
             r_pass = credentials["password"]
+
     sess.base_url = r_base
     sess.username = r_user
     sess.password = r_pass
-    if sess.rag_snapshot:
+    if sess.rag_snapshot and r_base:
         _save_rag_binding(r_base, sess.rag_snapshot)
     else:
-        bound_snapshot = _snapshot_for_base_url(r_base)
+        bound_snapshot = _snapshot_for_base_url(r_base) if r_base else ""
         if bound_snapshot:
             sess.rag_snapshot = bound_snapshot
     params = {"base_url": r_base, "username": r_user, "password": r_pass,
               "port": r_port, "onec_path": r_onec, "host": host,
               "extra_args": extra_args, "execute": execute,
-              "command_parameter": command_parameter}
+              "command_parameter": command_parameter,
+              "connection_mode": mode, "connection_value": r_value,
+              "target_connection_mode": target_connection_mode}
     _touch_session(sess)
     result = await sess.bridge.call("connect_test_client", params)
     return _record_tool(sess.session_id, "connect_test_client", params, result)
@@ -1274,6 +1450,242 @@ async def goto_next_window(*,
         "goto_next_window",
         {"max_depth": max_depth},
     )
+
+
+
+@mcp.tool()
+async def wait_object(
+    name: Annotated[str, "Object technical name"] = "",
+    title: Annotated[str, "Object title substring"] = "",
+    type: Annotated[str, "1C test object type"] = "",
+    timeout: Annotated[int, "Timeout in seconds"] = 15,
+    max_depth: Annotated[int, "Serialization depth for returned object"] = 2,
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Wait until an object appears in the tested client UI tree."""
+    return await _bridge_call_recorded(session_id, "wait_object", {"name": name, "title": title, "type": type, "timeout": timeout, "max_depth": max_depth})
+
+
+@mcp.tool()
+async def wait_form(
+    form_name: Annotated[str, "1C metadata form name, e.g. Catalog.X.Form.ItemForm"] = "",
+    title: Annotated[str, "Form title substring"] = "",
+    timeout: Annotated[int, "Timeout in seconds"] = 15,
+    max_depth: Annotated[int, "Serialization depth for returned form"] = 2,
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Wait until a form appears."""
+    return await _bridge_call_recorded(session_id, "wait_form", {"form_name": form_name, "title": title, "timeout": timeout, "max_depth": max_depth})
+
+
+@mcp.tool()
+async def wait_window(
+    title: Annotated[str, "Window title substring"] = "",
+    name: Annotated[str, "Window exact name when available"] = "",
+    timeout: Annotated[int, "Timeout in seconds"] = 15,
+    max_depth: Annotated[int, "Serialization depth for returned window"] = 2,
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Wait until a client window appears."""
+    return await _bridge_call_recorded(session_id, "wait_window", {"title": title, "name": name, "timeout": timeout, "max_depth": max_depth})
+
+
+@mcp.tool()
+async def user_messages(*,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Return current user messages shown in the active test-client window."""
+    return await _bridge_call_recorded(session_id, "user_messages", {})
+
+
+@mcp.tool()
+async def close_user_messages_panel(*,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Close the user messages panel in the active test-client window."""
+    return await _bridge_call_recorded(session_id, "close_user_messages_panel", {})
+
+
+@mcp.tool()
+async def current_error_info(*,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Return current 1C script error information displayed in the tested client, if any."""
+    return await _bridge_call_recorded(session_id, "current_error_info", {})
+
+
+@mcp.tool()
+async def set_file_dialog_result(
+    paths: Annotated[str, "JSON array of file paths, or a single file path string"],
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Preload the result for the next 1C file selection dialog."""
+    return await _bridge_call_recorded(session_id, "set_file_dialog_result", {"paths": paths})
+
+
+@mcp.tool()
+async def clear_file_dialog_result(*,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Clear queued file selection dialog results."""
+    return await _bridge_call_recorded(session_id, "clear_file_dialog_result", {})
+
+
+@mcp.tool()
+async def field_info(
+    field_name: Annotated[str, "Field name, or title when search_by_title=true"],
+    search_by_title: Annotated[bool, "Search by visible title instead of technical name"] = False,
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Return diagnostics for a form field: visibility, availability, readonly, kind, title."""
+    return await _bridge_call_recorded(session_id, "field_info", {"field_name": field_name, "search_by_title": search_by_title})
+
+
+@mcp.tool()
+async def field_value_text(
+    field_name: Annotated[str, "Field name, or title when search_by_title=true"],
+    search_by_title: Annotated[bool, "Search by visible title instead of technical name"] = False,
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Return field data presentation text via ПолучитьПредставлениеДанных()."""
+    return await _bridge_call_recorded(session_id, "field_value_text", {"field_name": field_name, "search_by_title": search_by_title})
+
+
+@mcp.tool()
+async def field_tooltip(
+    field_name: Annotated[str, "Field name, or title when search_by_title=true"],
+    search_by_title: Annotated[bool, "Search by visible title instead of technical name"] = False,
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Return field tooltip text."""
+    return await _bridge_call_recorded(session_id, "field_tooltip", {"field_name": field_name, "search_by_title": search_by_title})
+
+
+@mcp.tool()
+async def form_next_element(*,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Move focus to the next form element and return the current element."""
+    return await _bridge_call_recorded(session_id, "form_next_element", {})
+
+
+@mcp.tool()
+async def form_previous_element(*,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Move focus to the previous form element and return the current element."""
+    return await _bridge_call_recorded(session_id, "form_previous_element", {})
+
+
+@mcp.tool()
+async def form_state(*,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Return active form availability/modified/readonly state."""
+    return await _bridge_call_recorded(session_id, "form_state", {})
+
+
+@mcp.tool()
+async def form_default_button(*,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Return the active form default button, when available."""
+    return await _bridge_call_recorded(session_id, "form_default_button", {})
+
+
+@mcp.tool()
+async def wait_form_closed(
+    timeout: Annotated[int, "Timeout in seconds"] = 15,
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Wait until the active form closes."""
+    return await _bridge_call_recorded(session_id, "wait_form_closed", {"timeout": timeout})
+
+
+@mcp.tool()
+async def object_command_panel(
+    name: Annotated[str, "Object technical name"] = "",
+    title: Annotated[str, "Object title substring"] = "",
+    type: Annotated[str, "1C test object type"] = "",
+    max_depth: Annotated[int, "Serialization depth for returned panel"] = 2,
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Return command panel for a found UI object, when supported."""
+    return await _bridge_call_recorded(session_id, "object_command_panel", {"name": name, "title": title, "type": type, "max_depth": max_depth})
+
+
+@mcp.tool()
+async def object_context_menu(
+    name: Annotated[str, "Object technical name"] = "",
+    title: Annotated[str, "Object title substring"] = "",
+    type: Annotated[str, "1C test object type"] = "",
+    max_depth: Annotated[int, "Serialization depth for returned menu"] = 2,
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Return context menu for a found UI object, when supported."""
+    return await _bridge_call_recorded(session_id, "object_context_menu", {"name": name, "title": title, "type": type, "max_depth": max_depth})
+
+
+@mcp.tool()
+async def window_command_interface(
+    max_depth: Annotated[int, "Serialization depth for returned command interface"] = 2,
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Return active window command interface, when supported."""
+    return await _bridge_call_recorded(session_id, "window_command_interface", {"max_depth": max_depth})
+
+
+@mcp.tool()
+async def group_expand(name: Annotated[str, "Group technical name"] = "", title: Annotated[str, "Group title substring"] = "", *, session_id: Annotated[str, "Session id"] = DEFAULT_SESSION) -> Any:
+    """Expand a collapsible form group."""
+    return await _bridge_call_recorded(session_id, "group_expand", {"name": name, "title": title})
+
+
+@mcp.tool()
+async def group_collapse(name: Annotated[str, "Group technical name"] = "", title: Annotated[str, "Group title substring"] = "", *, session_id: Annotated[str, "Session id"] = DEFAULT_SESSION) -> Any:
+    """Collapse a collapsible form group."""
+    return await _bridge_call_recorded(session_id, "group_collapse", {"name": name, "title": title})
+
+
+@mcp.tool()
+async def group_current_page(name: Annotated[str, "Group technical name"] = "", title: Annotated[str, "Group title substring"] = "", max_depth: Annotated[int, "Serialization depth for returned page"] = 2, *, session_id: Annotated[str, "Session id"] = DEFAULT_SESSION) -> Any:
+    """Return current page of a page-group form element."""
+    return await _bridge_call_recorded(session_id, "group_current_page", {"name": name, "title": title, "max_depth": max_depth})
+
+
+@mcp.tool()
+async def group_state(name: Annotated[str, "Group technical name"] = "", title: Annotated[str, "Group title substring"] = "", *, session_id: Annotated[str, "Session id"] = DEFAULT_SESSION) -> Any:
+    """Return form group expanded/visible/available state."""
+    return await _bridge_call_recorded(session_id, "group_state", {"name": name, "title": title})
+
+
+@mcp.tool()
+async def decoration_links(name: Annotated[str, "Decoration technical name"] = "", title: Annotated[str, "Decoration title substring"] = "", *, session_id: Annotated[str, "Session id"] = DEFAULT_SESSION) -> Any:
+    """Return hyperlink presentations from a formatted-string decoration."""
+    return await _bridge_call_recorded(session_id, "decoration_links", {"name": name, "title": title})
+
+
+@mcp.tool()
+async def decoration_click_link(name: Annotated[str, "Decoration technical name"] = "", title: Annotated[str, "Decoration title substring"] = "", presentation: Annotated[str, "Hyperlink presentation to click"] = "", *, session_id: Annotated[str, "Session id"] = DEFAULT_SESSION) -> Any:
+    """Click a hyperlink inside a formatted-string decoration."""
+    return await _bridge_call_recorded(session_id, "decoration_click_link", {"name": name, "title": title, "presentation": presentation})
+
+
+@mcp.tool()
+async def decoration_click(name: Annotated[str, "Decoration technical name"] = "", title: Annotated[str, "Decoration title substring"] = "", *, session_id: Annotated[str, "Session id"] = DEFAULT_SESSION) -> Any:
+    """Click a form decoration."""
+    return await _bridge_call_recorded(session_id, "decoration_click", {"name": name, "title": title})
 
 
 @mcp.tool()
@@ -1652,6 +2064,94 @@ async def table_edit_info(
 
 
 @mcp.tool()
+async def table_select_all(
+    name: Annotated[str, "Table technical name"] = "",
+    title: Annotated[str, "Table title substring"] = "",
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Select all rows in a form table."""
+    return await _bridge_call_recorded(session_id, "table_select_all", {"name": name, "title": title})
+
+
+@mcp.tool()
+async def table_clear_selection(
+    name: Annotated[str, "Table technical name"] = "",
+    title: Annotated[str, "Table title substring"] = "",
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Clear all row selection in a form table."""
+    return await _bridge_call_recorded(session_id, "table_clear_selection", {"name": name, "title": title})
+
+
+@mcp.tool()
+async def table_delete_row(
+    name: Annotated[str, "Table technical name"] = "",
+    title: Annotated[str, "Table title substring"] = "",
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Delete the current row in a form table."""
+    return await _bridge_call_recorded(session_id, "table_delete_row", {"name": name, "title": title})
+
+
+@mcp.tool()
+async def table_copy_row(
+    name: Annotated[str, "Table technical name"] = "",
+    title: Annotated[str, "Table title substring"] = "",
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Copy the current row in a form table."""
+    return await _bridge_call_recorded(session_id, "table_copy_row", {"name": name, "title": title})
+
+
+@mcp.tool()
+async def table_toggle_delete_mark(
+    name: Annotated[str, "Table technical name"] = "",
+    title: Annotated[str, "Table title substring"] = "",
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Toggle the delete mark on the current row."""
+    return await _bridge_call_recorded(session_id, "table_toggle_delete_mark", {"name": name, "title": title})
+
+
+@mcp.tool()
+async def table_begin_edit(
+    name: Annotated[str, "Table technical name"] = "",
+    title: Annotated[str, "Table title substring"] = "",
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Begin editing the current row in a form table."""
+    return await _bridge_call_recorded(session_id, "table_begin_edit", {"name": name, "title": title})
+
+
+@mcp.tool()
+async def table_end_edit(
+    name: Annotated[str, "Table technical name"] = "",
+    title: Annotated[str, "Table title substring"] = "",
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """End editing the current row in a form table."""
+    return await _bridge_call_recorded(session_id, "table_end_edit", {"name": name, "title": title})
+
+
+@mcp.tool()
+async def table_editing_state(
+    name: Annotated[str, "Table technical name"] = "",
+    title: Annotated[str, "Table title substring"] = "",
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Return whether a form table is currently in edit mode."""
+    return await _bridge_call_recorded(session_id, "table_editing_state", {"name": name, "title": title})
+
+
+@mcp.tool()
 async def dynamic_list_available_fields(
     object: Annotated[str, "1C metadata object full name, e.g. Catalog.ПС_Справочник1; empty = derive from active window"] = "",
     rag_snapshot: Annotated[str, "Optional RAG snapshot name/id"] = "",
@@ -1876,7 +2376,7 @@ def recording_capture(
 def recording_stop(*,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> dict[str, Any]:
-    """Stop recording and build PDF/GIF/MP4 from captured slides."""
+    """Stop recording and build PDF/MP4/HTML from captured slides."""
     return _session(session_id).recorder.stop()
 
 
