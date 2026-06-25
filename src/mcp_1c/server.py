@@ -910,7 +910,6 @@ async def start_session(
     password: Annotated[str, "1C password"] = "",
     version: Annotated[str, "1C platform version override (auto-detected from base_url if empty)"] = "",
     session_id: Annotated[str, "Desired session id; auto-generated when empty"] = "",
-    start_pipeline: Annotated[bool, "Create manager/client infobases, start ibsrv/test-manager and connect test-client"] = True,
     idle_timeout_minutes: Annotated[int, "Minutes of inactivity before automatic stop_session; 0 disables"] = 60,
     extra_args: Annotated[str, "Extra raw 1C command-line arguments for the test client"] = "",
     execute: Annotated[str, "External data processor/report path for the test-client /Execute command-line parameter"] = "",
@@ -961,96 +960,94 @@ async def start_session(
     _persist_sessions()
     logging.info("start_session: bridge listening on ws://127.0.0.1:%s", ws_port)
 
-    pipeline_info: dict[str, Any] = {}
-    if start_pipeline:
-        log_dir = sess.log_dir
-        log_dir.mkdir(parents=True, exist_ok=True)
-        ibsrv_address = "127.0.0.1"
-        ibsrv_name = "mcp"
+    log_dir = sess.log_dir
+    log_dir.mkdir(parents=True, exist_ok=True)
+    ibsrv_address = "127.0.0.1"
+    ibsrv_name = "mcp"
 
-        runtime_state = _resolve_runtime(
-            platform_dir=platform_dir, db_path=sess.db_path,
-            ibsrv_address=ibsrv_address, ibsrv_port=ibsrv_port,
-            ibsrv_name=ibsrv_name, server_data_dir=sess.server_data_dir,
-        )
-        runtime_state.log_dir = log_dir
+    runtime_state = _resolve_runtime(
+        platform_dir=platform_dir, db_path=sess.db_path,
+        ibsrv_address=ibsrv_address, ibsrv_port=ibsrv_port,
+        ibsrv_name=ibsrv_name, server_data_dir=sess.server_data_dir,
+    )
+    runtime_state.log_dir = log_dir
+
+    with _port_allocation_lock():
+        runtime.create_file_infobase(sess.ibcmd, sess.db_path)
+        cf_path = runtime.DEFAULT_CF_BUILT
+        if not Path(cf_path).exists():
+            raise FileNotFoundError(f"MCPTestManager.cf not found at {cf_path}.")
+        runtime.load_configuration(sess.ibcmd, sess.db_path, cf_path)
+
+    server_proc = runtime.start_standalone_server(
+        ibsrv=sess.ibsrv, address=ibsrv_address, port=ibsrv_port,
+        name=ibsrv_name, data_dir=sess.server_data_dir,
+        log_dir=log_dir, db_path=sess.db_path,
+        direct_regport=ibsrv_direct_regport,
+    )
+    runtime_state.server_process = server_proc
+
+    ws_url = runtime.build_thin_client_ws_url(ibsrv_address, ibsrv_port)
+    manager_proc = runtime.start_thin_test_manager(
+        onec_path=sess.onec_thin, ws_url=ws_url,
+        websocket_url=sess.bridge.url, log_dir=log_dir, display=display,
+    )
+    runtime_state.manager_process = manager_proc
+    sess.runtime = runtime_state
+    await _wait_for_bridge_connected(sess, timeout=60.0)
+    _persist_sessions()
+
+    pipeline_info: dict[str, Any] = {"manager_pid": manager_proc.pid, "ws_url": ws_url, "log_dir": str(log_dir)}
+
+    # --- Built-in demo client ibsrv (second autonomous server for /TESTCLIENT) ---
+    # It is only needed for self-contained E2E sessions.  When the caller
+    # passed a target URL/file/server infobase, connect the test client to
+    # that target instead of creating an extra demo infobase.
+    if not (base_url or connection_value):
+        with _port_allocation_lock():
+            client_ibsrv_port = _find_session_port(runtime.DEFAULT_IBSRV_HTTP_PORT, port_offset, sub_offset=10)
+            client_direct_regport = _find_session_port(runtime.DEFAULT_IBSRV_DIRECT_PORT, port_offset, sub_offset=10)
+        client_log_dir = sess.client_log_dir
+        client_log_dir.mkdir(parents=True, exist_ok=True)
+        client_ibsrv_name = "mcpclient"
 
         with _port_allocation_lock():
-            runtime.create_file_infobase(sess.ibcmd, sess.db_path)
-            cf_path = runtime.DEFAULT_CF_BUILT
-            if not Path(cf_path).exists():
-                raise FileNotFoundError(f"MCPTestManager.cf not found at {cf_path}.")
-            runtime.load_configuration(sess.ibcmd, sess.db_path, cf_path)
+            runtime.create_file_infobase(sess.ibcmd, sess.client_db_path)
+            # Load a dedicated tested-client configuration.  It intentionally does
+            # not contain MCPTestManager code (which uses /TESTMANAGER-only types),
+            # but it does contain real metadata objects for positive UI E2E.
+            client_cf_path = runtime.DEFAULT_CLIENT_CF_BUILT
+            if not Path(client_cf_path).exists():
+                raise FileNotFoundError(f"MCPTestClient.cf not found at {client_cf_path}.")
+            runtime.load_configuration(sess.ibcmd, sess.client_db_path, client_cf_path)
 
-        server_proc = runtime.start_standalone_server(
-            ibsrv=sess.ibsrv, address=ibsrv_address, port=ibsrv_port,
-            name=ibsrv_name, data_dir=sess.server_data_dir,
-            log_dir=log_dir, db_path=sess.db_path,
-            direct_regport=ibsrv_direct_regport,
+        client_server_proc = runtime.start_standalone_server(
+            ibsrv=sess.ibsrv, address=ibsrv_address, port=client_ibsrv_port,
+            name=client_ibsrv_name, data_dir=sess.client_server_data_dir,
+            log_dir=client_log_dir, db_path=sess.client_db_path,
+            direct_regport=client_direct_regport,
         )
-        runtime_state.server_process = server_proc
-
-        ws_url = runtime.build_thin_client_ws_url(ibsrv_address, ibsrv_port)
-        manager_proc = runtime.start_thin_test_manager(
-            onec_path=sess.onec_thin, ws_url=ws_url,
-            websocket_url=sess.bridge.url, log_dir=log_dir, display=display,
-        )
-        runtime_state.manager_process = manager_proc
-        sess.runtime = runtime_state
-        await _wait_for_bridge_connected(sess, timeout=60.0)
-        _persist_sessions()
-
-        pipeline_info = {"manager_pid": manager_proc.pid, "ws_url": ws_url, "log_dir": str(log_dir)}
-
-        # --- Built-in demo client ibsrv (second autonomous server for /TESTCLIENT) ---
-        # It is only needed for self-contained E2E sessions.  When the caller
-        # passed a target URL/file/server infobase, connect the test client to
-        # that target instead of creating an extra demo infobase.
-        if not (base_url or connection_value):
-            with _port_allocation_lock():
-                client_ibsrv_port = _find_session_port(runtime.DEFAULT_IBSRV_HTTP_PORT, port_offset, sub_offset=10)
-                client_direct_regport = _find_session_port(runtime.DEFAULT_IBSRV_DIRECT_PORT, port_offset, sub_offset=10)
-            client_log_dir = sess.client_log_dir
-            client_log_dir.mkdir(parents=True, exist_ok=True)
-            client_ibsrv_name = "mcpclient"
-
-            with _port_allocation_lock():
-                runtime.create_file_infobase(sess.ibcmd, sess.client_db_path)
-                # Load a dedicated tested-client configuration.  It intentionally does
-                # not contain MCPTestManager code (which uses /TESTMANAGER-only types),
-                # but it does contain real metadata objects for positive UI E2E.
-                client_cf_path = runtime.DEFAULT_CLIENT_CF_BUILT
-                if not Path(client_cf_path).exists():
-                    raise FileNotFoundError(f"MCPTestClient.cf not found at {client_cf_path}.")
-                runtime.load_configuration(sess.ibcmd, sess.client_db_path, client_cf_path)
-
-            client_server_proc = runtime.start_standalone_server(
-                ibsrv=sess.ibsrv, address=ibsrv_address, port=client_ibsrv_port,
+        sess.client_ibsrv_port = client_ibsrv_port
+        sess.client_runtime = runtime.ManagerRuntime(
+            infobase=runtime.InfobaseSpec(db_path=sess.client_db_path),
+            server=runtime.StandaloneServerSpec(
+                address=ibsrv_address, port=client_ibsrv_port,
                 name=client_ibsrv_name, data_dir=sess.client_server_data_dir,
-                log_dir=client_log_dir, db_path=sess.client_db_path,
-                direct_regport=client_direct_regport,
-            )
-            sess.client_ibsrv_port = client_ibsrv_port
-            sess.client_runtime = runtime.ManagerRuntime(
-                infobase=runtime.InfobaseSpec(db_path=sess.client_db_path),
-                server=runtime.StandaloneServerSpec(
-                    address=ibsrv_address, port=client_ibsrv_port,
-                    name=client_ibsrv_name, data_dir=sess.client_server_data_dir,
-                ),
-                manager=runtime.TestManagerSpec(onec_path=sess.onec_thin),
-                server_process=client_server_proc,
-                log_dir=client_log_dir,
-            )
+            ),
+            manager=runtime.TestManagerSpec(onec_path=sess.onec_thin),
+            server_process=client_server_proc,
+            log_dir=client_log_dir,
+        )
 
-            client_ws_url = runtime.build_thin_client_ws_url(ibsrv_address, client_ibsrv_port)
-            pipeline_info.update({
-                "client_ibsrv_port": client_ibsrv_port, "client_ws_url": client_ws_url,
-                "client_base_url": f"http://{ibsrv_address}:{client_ibsrv_port}",
-            })
+        client_ws_url = runtime.build_thin_client_ws_url(ibsrv_address, client_ibsrv_port)
+        pipeline_info.update({
+            "client_ibsrv_port": client_ibsrv_port, "client_ws_url": client_ws_url,
+            "client_base_url": f"http://{ibsrv_address}:{client_ibsrv_port}",
+        })
 
     connect_result: Any = None
     connect_base_url = base_url
-    if start_pipeline and not connect_base_url and pipeline_info.get("client_base_url"):
+    if not connect_base_url and pipeline_info.get("client_base_url"):
         connect_base_url = str(pipeline_info["client_base_url"])
     if connect_base_url or connection_value:
         connect_result = await _connect_test_client_impl(
