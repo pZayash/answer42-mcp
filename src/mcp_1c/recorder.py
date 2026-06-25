@@ -76,11 +76,8 @@ class RecordingSession:
     def build_media(self) -> dict[str, Any]:
         slides = sorted(self.slides_dir.glob("*.svg"))
         if not slides:
-            return {"mp4": "", "pdf": "", "html": ""}
-        mp4 = self.output_dir / "recording.mp4"
+            return {"pdf": ""}
         pdf = self.output_dir / "recording.pdf"
-        pattern = str(self.slides_dir / "*.svg")
-        run(["ffmpeg", "-y", "-framerate", "0.8", "-pattern_type", "glob", "-i", pattern, "-vf", "fps=24,scale=1920:1080:flags=lanczos,format=yuv420p", "-movflags", "+faststart", str(mp4)])
         html_deck = self.output_dir / "recording.html"
         html_deck.write_text(make_html_deck(slides), encoding="utf-8")
         browser = first_existing(["google-chrome", "chromium", "chromium-browser"])
@@ -97,11 +94,12 @@ class RecordingSession:
             converter = first_existing(["magick", "convert"])
             if converter:
                 run([converter, *map(str, slides), str(pdf)], timeout=240)
-        return {
-            "mp4": str(mp4) if mp4.exists() else "",
-            "pdf": str(pdf) if pdf.exists() else "",
-            "html": str(html_deck) if html_deck.exists() else "",
-        }
+        if html_deck.exists():
+            try:
+                html_deck.unlink()
+            except OSError:
+                pass
+        return {"pdf": str(pdf) if pdf.exists() else ""}
 
 
 def make_html_deck(slides: list[Path]) -> str:
