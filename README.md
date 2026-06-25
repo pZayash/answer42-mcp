@@ -144,11 +144,13 @@ E2E_SCENARIO=dynamic PYTHONPATH=src python3 scripts/e2e_stable.py     # табл
 E2E_SCENARIO=coverage PYTHONPATH=src python3 scripts/e2e_stable.py    # diagnostic/negative tools
 ```
 
-Для реального распараллеливания сценарий умеет сам запустить три разные сессии (`smoke`, `dynamic`, `coverage`), а не три копии одного и того же теста:
+Для реального распараллеливания сценарий умеет сам запустить три разные сессии (`smoke`, `dynamic`, `coverage`), а не три копии одного и того же теста. Встроенная тестовая файловая база при этом публикуется через один общий `ibsrv`, к которому подключаются все три `/TESTCLIENT`:
 
 ```bash
 E2E_PARALLEL=1 E2E_SESSION_ID=e2e-split PYTHONPATH=src python3 scripts/e2e_stable.py
 ```
+
+`start_session` также переиспользует общий автономный сервер для одинаковой файловой базы. Последний `stop_session` освобождает refcount и завершает shared `ibsrv`.
 
 ## MCP-инструменты
 

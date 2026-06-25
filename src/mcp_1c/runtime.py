@@ -312,12 +312,18 @@ def start_standalone_server(
     db_path: Path | None = None,
     timeout: float = 30.0,
     direct_regport: int | None = None,
+    direct_range: tuple[int, int] | None = None,
 ) -> subprocess.Popen:
     """Start the autonomous 1C server (ibsrv) and wait for the HTTP-gate.
 
     `direct_regport` overrides the direct-connect gateway port (default
     1541 for current platform builds).  When running two ibsrv instances on the same
     host, each must use a different direct-regport.
+
+    `direct_range` must also be unique for concurrently running autonomous
+    servers.  The platform default 1560:1591 is shared, and otherwise several
+    ibsrv processes can fail with "Ошибка открытия порта '156x' шлюза
+    Конфигуратора" while the HTTP port itself looks free.
     """
     if not Path(ibsrv).exists():
         raise FileNotFoundError(f"ibsrv not found: {ibsrv}")
@@ -343,6 +349,8 @@ def start_standalone_server(
     ]
     if direct_regport is not None:
         argv.append(f"--direct-regport={direct_regport}")
+    if direct_range is not None:
+        argv.append(f"--direct-range={direct_range[0]}:{direct_range[1]}")
     proc = subprocess.Popen(
         argv,
         stdout=log_handle,
@@ -468,4 +476,3 @@ def start_thin_test_manager(
     )
     LOGGER.info("Test manager launched (pid=%s); log=%s", proc.pid, log_path)
     return proc
-
