@@ -160,8 +160,12 @@ async def capture_screenshot(session: ClientSession, sid: str, path: str) -> dic
 
 async def main() -> None:
     print("=== Autonomous Answer42 E2E (MCP protocol) ===", flush=True)
-    _build_client_cf_from_sources()
-    _kill_all_1c()
+    sid = os.environ.get("E2E_SESSION_ID", "e2e-mcp")
+    artifact_suffix = sid.replace("/", "_").replace("\\", "_")
+    if os.environ.get("E2E_SKIP_BUILD_CLIENT_CF") != "1":
+        _build_client_cf_from_sources()
+    if os.environ.get("E2E_SKIP_KILL_ALL_1C") != "1":
+        _kill_all_1c()
 
     server_params = StdioServerParameters(
         command=sys.executable,
@@ -169,14 +173,13 @@ async def main() -> None:
         env={**os.environ, "PYTHONPATH": "src"},
     )
 
-    sid = "e2e-mcp"
     async with stdio_client(server_params) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
             tools = await session.list_tools()
             tool_names = {tool.name for tool in tools.tools}
             print(f"MCP tools advertised: {len(tool_names)}", flush=True)
-            screenshot_dir = Path("build/e2e-screenshots")
+            screenshot_dir = Path("build") / f"e2e-screenshots-{artifact_suffix}"
             screenshot_dir.mkdir(parents=True, exist_ok=True)
             for old_png in screenshot_dir.glob("*.png"):
                 old_png.unlink()
@@ -197,7 +200,7 @@ async def main() -> None:
             assert start["ibsrv_port"] != start["client_ibsrv_port"], start
 
             rec = await call_ok(session, "recording_start", {
-                "output_dir": "build/recordings/e2e-mcp",
+                "output_dir": f"build/recordings/{artifact_suffix}",
                 "session_id": sid,
                 "window": True,
             })
@@ -205,14 +208,16 @@ async def main() -> None:
 
             # ── RAG tools (text-only evidence slides) ────────────────────
             src_path = str(Path("src/client_cf").resolve())
-            source_add = await call_ok(session, "rag_source_add", {"name": "E2E_SRC", "path": src_path, "kind": "configuration", "session_id": sid})
+            source_name = f"E2E_SRC_{artifact_suffix}"
+            snapshot_name = f"E2E_SNAP_{artifact_suffix}"
+            source_add = await call_ok(session, "rag_source_add", {"name": source_name, "path": src_path, "kind": "configuration", "session_id": sid})
             detected = source_add.get("detected", {})
             assert detected.get("format") == "designer_xml" or source_add.get("format") == "designer_xml", source_add
             sources = await call_ok(session, "rag_sources_list", {"session_id": sid})
-            assert any(src["name"] == "E2E_SRC" for src in sources), sources
-            await call_ok(session, "rag_snapshot_create", {"name": "E2E_SNAP", "sources": ["E2E_SRC"], "session_id": sid})
+            assert any(src["name"] == source_name for src in sources), sources
+            await call_ok(session, "rag_snapshot_create", {"name": snapshot_name, "sources": [source_name], "session_id": sid})
             snaps = await call_ok(session, "rag_snapshots_list", {"session_id": sid})
-            assert any(snap["name"] == "E2E_SNAP" for snap in snaps), snaps
+            assert any(snap["name"] == snapshot_name for snap in snaps), snaps
             await call_ok(session, "rag_index_build", {"session_id": sid})
             await call_ok(session, "rag_lookup_object", {"object": "Справочник.ПС_Справочник1", "session_id": sid})
             await call_ok(session, "rag_query", {"query": "ПС_Справочник1", "session_id": sid})
@@ -232,7 +237,12 @@ async def main() -> None:
                 assert len(windows.get("windows", [])) == windows.get("count"), windows
                 activated = await call_ui_ok(session, "activate_window", {"index": 0, "session_id": sid})
                 assert activated.get("activated") is True, activated
-                await call_ui_ok(session, "goto_start_page", {"session_id": sid})
+                # goto_start_page can fail when the active window is a configuration window
+                # (not a regular client window that supports ПерейтиКНачальнойСтранице).
+                start_page = await session.call_tool("goto_start_page", {"session_id": sid})
+                print("OK_OR_EXPECTED_ERROR goto_start_page", flush=True)
+                if not start_page.isError:
+                    _parse_tool_result(start_page)
                 # Navigation between opened windows can be unavailable when the client has only the start page open.
                 next_nav = await session.call_tool("goto_next_window", {"session_id": sid})
                 print("OK_OR_EXPECTED_ERROR goto_next_window", flush=True)
@@ -242,6 +252,26 @@ async def main() -> None:
                 print("OK_OR_EXPECTED_ERROR goto_previous_window", flush=True)
                 if not prev_nav.isError:
                     _parse_tool_result(prev_nav)
+
+                await call_ui_ok(session, "wait_window", {"title": windows.get("active_title", ""), "timeout": 3, "session_id": sid})
+                await call_ui_ok(session, "wait_object", {"type": "ТестируемаяФорма", "timeout": 3, "session_id": sid})
+                await call_ui_ok(session, "wait_form", {"timeout": 3, "session_id": sid})
+                await call_ui_ok(session, "user_messages", {"session_id": sid})
+                await call_ui_ok(session, "close_user_messages_panel", {"session_id": sid})
+                await call_ui_ok(session, "current_error_info", {"session_id": sid})
+                await call_ui_ok(session, "set_file_dialog_result", {"paths": "[]", "session_id": sid})
+                await call_ui_ok(session, "clear_file_dialog_result", {"session_id": sid})
+                await call_ui_ok(session, "form_state", {"session_id": sid})
+                await call_ui_ok(session, "form_default_button", {"session_id": sid})
+                await call_ui_ok(session, "window_command_interface", {"session_id": sid})
+                await call_ui_ok(session, "field_info", {"field_name": "DefinitelyMissingField", "session_id": sid})
+                await call_ui_ok(session, "field_value_text", {"field_name": "DefinitelyMissingField", "session_id": sid})
+                await call_ui_ok(session, "field_tooltip", {"field_name": "DefinitelyMissingField", "session_id": sid})
+                await call_ui_ok(session, "object_command_panel", {"name": "DefinitelyMissing", "session_id": sid})
+                await call_ui_ok(session, "object_context_menu", {"name": "DefinitelyMissing", "session_id": sid})
+                await call_ui_ok(session, "group_state", {"name": "DefinitelyMissingGroup", "session_id": sid})
+                await call_ui_ok(session, "group_current_page", {"name": "DefinitelyMissingGroup", "session_id": sid})
+                await call_ui_ok(session, "decoration_links", {"name": "DefinitelyMissingDecoration", "session_id": sid})
                 await capture_screenshot(session, sid, str(screenshot_dir / "01-initial-window.png"))
 
                 # ── negative: missing objects still return diagnostics ───
@@ -361,7 +391,7 @@ async def main() -> None:
                     or "SpreadsheetDocument" in tdocs_text
                     or "ТабличныйДокумент" in tdocs_text
                 ), f"No tabular documents: {tdocs}"
-                await call_ui_ok(session, "tabular_document_save", {"format": "pdf", "path": "build/e2e-screenshots/dynamic-list-output.pdf", "session_id": sid})
+                await call_ui_ok(session, "tabular_document_save", {"format": "pdf", "path": str(screenshot_dir / "dynamic-list-output.pdf"), "session_id": sid})
                 await call_ui_ok(session, "close_form", {"session_id": sid})
                 await call_ui_ok(session, "open_navigation_link", {
                     "navigation_link": "e1cib/list/Catalog.ПС_Справочник1", "session_id": sid,
@@ -427,7 +457,7 @@ async def main() -> None:
                 visible_report_result = "ТабличныйДокумент" in str(report_docs) or "ТабличныйДокумент" in str(report_text)
                 assert visible_report_result, f"Report result area is not visible: docs={report_docs}, text={report_text}"
                 if report_docs.get("count", 0) > 0 or report_text.get("found"):
-                    await call_ui_ok(session, "tabular_document_save", {"format": "pdf", "path": "build/e2e-screenshots/report-output.pdf", "session_id": sid})
+                    await call_ui_ok(session, "tabular_document_save", {"format": "pdf", "path": str(screenshot_dir / "report-output.pdf"), "session_id": sid})
                 await call_ui_ok(session, "close_form", {"session_id": sid})
                 await call_ui_ok(session, "open_navigation_link", {
                     "navigation_link": "e1cib/list/Catalog.ПС_Справочник1", "session_id": sid,
@@ -445,6 +475,20 @@ async def main() -> None:
                     ("table_set_field", {"table": "DefinitelyMissing", "field": "Код", "value": "1", "session_id": sid}, "Таблица не найдена"),
                     ("table_edit_info", {"table": "DefinitelyMissing", "session_id": sid}, "Таблица не найдена"),
                     ("table_selected_rows", {"name": "DefinitelyMissing", "session_id": sid}, "Таблица не найдена"),
+                    ("table_select_all", {"name": "DefinitelyMissing", "session_id": sid}, "Таблица не найдена"),
+                    ("table_clear_selection", {"name": "DefinitelyMissing", "session_id": sid}, "Таблица не найдена"),
+                    ("table_delete_row", {"name": "DefinitelyMissing", "session_id": sid}, "Таблица не найдена"),
+                    ("table_copy_row", {"name": "DefinitelyMissing", "session_id": sid}, "Таблица не найдена"),
+                    ("table_toggle_delete_mark", {"name": "DefinitelyMissing", "session_id": sid}, "Таблица не найдена"),
+                    ("table_begin_edit", {"name": "DefinitelyMissing", "session_id": sid}, "Таблица не найдена"),
+                    ("table_end_edit", {"name": "DefinitelyMissing", "session_id": sid}, "Таблица не найдена"),
+                    ("table_editing_state", {"name": "DefinitelyMissing", "session_id": sid}, "Таблица не найдена"),
+                    ("group_expand", {"name": "DefinitelyMissing", "session_id": sid}, "object_not_found"),
+                    ("group_collapse", {"name": "DefinitelyMissing", "session_id": sid}, "object_not_found"),
+                    ("decoration_click", {"name": "DefinitelyMissing", "session_id": sid}, "object_not_found"),
+                    ("decoration_click_link", {"name": "DefinitelyMissing", "presentation": "x", "session_id": sid}, "object_not_found"),
+                    ("form_next_element", {"session_id": sid}, ""),
+                    ("form_previous_element", {"session_id": sid}, ""),
                     ("tabular_document_text", {"name": "DefinitelyMissing", "session_id": sid}, "Табличный документ не найден"),
                 ]
                 for tool, args, expected in negative_calls:
