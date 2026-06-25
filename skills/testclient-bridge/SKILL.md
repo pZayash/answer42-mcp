@@ -29,41 +29,74 @@ description: "Работа с MCP testclient-bridge для 1С UI automation"
 ## Базовый порядок
 
 1. Проверь, что MCP-сервер `testclient-bridge` установлен и доступен.
-2. Запусти сессию через `start_session` (one-shot) или `launch_manager` (low-level).
-3. Проверь `bridge_status` и `runtime_status`.
-4. Подключи целевую базу через `connect_test_client`, передавая URL/логин/пароль из защищённого источника, а не из репозитория; окно тест-клиента максимизируется автоматически внутри tool-call.
-5. Работай только через tools testclient-bridge; не кликай X11 руками.
-6. Скриншоты допускаются системно через `screenshot`/`recording_*`.
-7. При ошибках 1С выгружай журнал через `export_eventlog`.
-8. В финальном ответе укажи реальные результаты: скриншоты/PDF, данные, ошибки, формы/фильтры.
-9. Заверши сессию через `stop_session`.
+2. Посмотри активные/восстановимые сессии через `sessions_list`; не плодить сессии с тем же стендом без причины.
+3. Запусти сессию через `start_session` (one-shot). Low-level `launch_manager` использовать только для диагностики/разработки bridge.
+4. Для подключения укажи корректный target:
+   - web/ws база: `base_url="https://..."` или `connection_mode="ws"`;
+   - серверная база: `connection_value="server/infobase"` или legacy `base_url="server/infobase"` (auto определит `/S`);
+   - файловая база: каталог с `1Cv8.1CD`, auto определит file; если `ibsrv` недоступен — использовать `file-direct` (`/F`).
+5. Передавай логин/пароль из защищённого источника, а не из репозитория; окно тест-клиента максимизируется автоматически внутри tool-call.
+6. Работай только через tools testclient-bridge; не кликай X11/WinAPI руками.
+7. Скриншоты допускаются системно через `screenshot`/`recording_*`.
+8. При ошибках 1С выгружай журнал через `export_eventlog`; для сетевых ошибок серверной базы отдельно проверяй DNS/доступность портов кластера 1С.
+9. В финальном ответе укажи реальные результаты: скриншоты/PDF, данные, ошибки, формы/фильтры.
+10. Заверши сессию через `stop_session`.
 
 ## Важные правила
 
 - `/TESTMANAGER` обязателен: не заменяй его обычным запуском 1С без явного указания пользователя.
 - 1С-клиенты запускай с русской локалью: `/Lru /VLru_RU`.
-- X11 использовать только для скриншотов, не для ввода/кликов/автоматизации.
+- Linux: X11/Xvfb использовать только для скриншотов и окна 1С, не для ввода/кликов/автоматизации.
+- Windows: Answer42 должен запускаться в интерактивной desktop-сессии пользователя; Windows service/headless/заблокированный RDP-сеанс для UI automation и screenshot ненадёжен.
 - Для ссылочных полей предпочитай стандартную форму выбора 1С (`choose_field_from_list`, `choose_field_first_row`, `choose_current_row`), а не ввод строки.
 - `execute_window_command` — только для явных навигационных ссылок `e1cib/...`. Не передавай туда псевдокоманды/команды формы вроде `ФормаНайти`, `СледующаяСтрока`, `СписокВывестиСписок`; для них нужны отдельные first-class MCP tools.
 - После каждого действия проверяй диагностику результата: `client_diagnostics.user_messages`, `error_info`, `modal_title`, `modal_buttons`, `modal_text`, `modal_texts`, `modal_is_error_window`.
 - Не закрывай автоматически сложные диалоги с несколькими кнопками (`OK`, `Restart`, `Finish`, `Yes/No/Cancel`). Допустимо автозакрытие только простых предупреждений/ошибок с одной кнопкой закрытия.
 - Для динамических списков предпочитай `table_move_row`, `table_current_row`, `table_selected_rows`, `table_cell_text`; `table_rows` использует навигационный fallback, но на больших списках может быть дорогим.
 - Не заявляй выполнение UI-задачи без реального состояния/скриншота/PDF evidence.
+- `base_url` — только web URL, если начинается с `http://` или `https://`. Строки вида `server/infobase` — серверные базы (`/S`), файловые базы — каталог на диске с `1Cv8.1CD` (`/F` или через `ibsrv`).
+- Если кластер 1С возвращает короткое имя рабочего сервера (`server_addr=...`), оно должно резолвиться и быть доступным по TCP с хоста Answer42; это не проблема ws/http.
 
 ## Типовой запуск
 
+Web/ws база:
+
 ```text
-bridge_status()
-launch_manager(platform_dir="/opt/1cv8/x86_64/8.5.1.1150")
-bridge_status()
-connect_test_client(
-  base_url="<TARGET_INFOBASE_URL>",
+sessions_list()
+start_session(
+  base_url="https://example.com/ib",
   username="<USERNAME>",
   password="<PASSWORD>",
-  port=1538
+  version="8.5.1.1150"
 )
 active_window()
 ```
+
+Серверная база кластера 1С:
+
+```text
+start_session(
+  connection_mode="server",
+  connection_value="server/infobase",
+  username="<USERNAME>",
+  password="<PASSWORD>",
+  version="8.5.1.1150"
+)
+```
+
+Файловая база:
+
+```text
+start_session(
+  connection_mode="file-direct",
+  connection_value="/path/to/file-infobase",
+  username="<USERNAME>",
+  password="<PASSWORD>",
+  version="8.5.1.1150"
+)
+```
+
+`connection_mode="auto"` выбирает: `http(s)` → `ws`, каталог/`1Cv8.1CD` → `file`, прочее непустое `server/infobase` → `server`.
 
 ## Навигация
 
@@ -107,14 +140,31 @@ active_window()
 При сбоях запуска или непонятных ошибках:
 
 ```text
-runtime_status()
+session_status(session_id="...")
+sessions_list()
 export_eventlog(...)
 ```
 
 Журнал автономного сервера — основной источник диагностики 1С runtime ошибок.
 
+Для серверной базы 1С (`/S server/infobase`) проверяй отдельно:
+
+- DNS/FQDN/короткое имя рабочего сервера, которое возвращает кластер;
+- доступность портов агента/рабочих процессов (`1540+`, `1560+` и фактический `server_addr=tcp://...` из лога клиента);
+- соответствие версии платформы клиента версии кластера;
+- фактическую ошибку в `/tmp/mcp_test_client/test_client_*.log`.
+
 ## Evidence recording
 
 - Включай `recording_start` перед демонстрационным workflow и завершай `recording_stop`.
-- Ожидаемые артефакты: `manifest.json`, `recording.mp4`, `recording.html`, `recording.pdf` при наличии ImageMagick.
-- GIF больше не генерируется.
+- Ожидаемые артефакты: `manifest.json` и `recording.pdf` при наличии Chrome/Chromium/Edge или ImageMagick.
+- MP4/GIF/HTML evidence больше не поддерживаются как публичные артефакты; не обещай и не прикладывай их.
+
+## Разработка bridge
+
+Если задача именно про доработку репозитория `testclient-bridge`:
+
+- CF собирать кроссплатформенно: `PYTHONPATH=src python scripts/build_cf.py src/cf build/MCPTestManager.cf` и аналогично для `src/client_cf`.
+- Не использовать удалённые `.sh`-скрипты (`build_cf.sh`, `export_eventlog.sh`).
+- Для E2E использовать `scripts/e2e_stable.py`; долгий `dynamic` сценарий разделён на `dynamic-tables`, `dynamic-lists`, `dynamic-reports`.
+- После изменения Python/BSL прогонять минимум `py_compile`, unit tests и сборку CF; для UI-изменений — smoke E2E с PDF evidence.
