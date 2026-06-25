@@ -180,7 +180,7 @@ python3 scripts/rag_cli.py lookup РегистрСведений.Регистр1
 - кратким ответом;
 - скриншотом окна 1С или text-only содержимым для RAG-вызовов.
 
-`recording_stop()` собирает `manifest.json`, MP4 и PDF, если доступен backend PDF.
+`recording_stop()` собирает `manifest.json` и `recording.pdf`, если доступен backend PDF. MP4/GIF больше не генерируются.
 
 ## Переменные окружения
 

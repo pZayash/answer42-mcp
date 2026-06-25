@@ -31,6 +31,15 @@ class RecordingSession:
         self.events = []
         self.frames_dir.mkdir(parents=True, exist_ok=True)
         self.slides_dir.mkdir(parents=True, exist_ok=True)
+        # MP4/GIF generation is intentionally unsupported. Remove stale files
+        # from older runs so evidence directories reflect current outputs only.
+        for obsolete in ("recording.mp4", "recording.gif"):
+            try:
+                (self.output_dir / obsolete).unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
         return {"active": True, "output_dir": str(self.output_dir)}
 
     def stop(self) -> dict[str, Any]:
