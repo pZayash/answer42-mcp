@@ -1,11 +1,11 @@
 ---
-name: "testclient-bridge-rag"
-description: "RAG-индекс 1С metadata через testclient-bridge"
+name: "answer42-rag"
+description: "RAG-индекс 1С metadata через Answer42"
 ---
 
-# testclient-bridge RAG
+# Answer42 RAG
 
-Используй этот скилл, когда нужно искать по исходникам 1С через RAG/index MCP `testclient-bridge`: EDT-исходники, XML-выгрузка Конфигуратора, base + extensions, регистры, формы, СКД отчётов.
+Используй этот скилл, когда нужно искать по исходникам 1С через RAG/index MCP `Answer42`: EDT-исходники, XML-выгрузка Конфигуратора, base + extensions, регистры, формы, СКД отчётов.
 
 ## Что индексируется
 
