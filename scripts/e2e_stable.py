@@ -165,7 +165,6 @@ async def common_start(session: ClientSession, sid: str, suffix: str) -> tuple[P
 
     start = await call_ok(session, "start_session", {
         "session_id": sid,
-        "start_pipeline": True,
         "command_parameter": "E2E_COMMAND_PARAMETER",
     })
     assert start["session_id"] == sid, start

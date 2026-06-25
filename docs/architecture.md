@@ -68,7 +68,7 @@ class SessionState:
 3. Подбирает свободный Xvfb display.
 4. Подбирает свободные TCP-порты для bridge, ibsrv и test-client.
 5. Запускает Xvfb и WebSocket bridge.
-6. При `start_pipeline=True` создаёт файловую базу менеджера, загружает `MCPTestManager.cf`, запускает ibsrv и test-manager.
+6. Создаёт файловую базу менеджера, загружает `MCPTestManager.cf`, запускает ibsrv и test-manager.
 7. Подключает клиент тестирования к `base_url` или к локальной тестовой базе, созданной для E2E. Если `username`/`password` не переданы, Answer42 ищет их в локальном credentials-файле по `base_url`; это основной безопасный режим, потому что секреты остаются в окружении MCP-процесса и не передаются агенту в аргументах tool-call. Дополнительные параметры запуска клиента передаются через `extra_args`, `execute` (`/Execute`) и `command_parameter` (`/C`); если `/C` уже есть в `extra_args`, части значения объединяются через `;`.
 8. Запоминает RAG snapshot, привязанный к `base_url`, если такой snapshot уже был создан раньше.
 9. Запускает idle watcher: после `idle_timeout_minutes` минут неактивности выполняется `stop_session()`.

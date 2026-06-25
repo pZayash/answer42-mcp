@@ -32,7 +32,6 @@ start_session(
   session_id="my-session",
   base_url="<TARGET_INFOBASE_URL>",
   idle_timeout_minutes=60,
-  start_pipeline=True,
   execute="/path/to/external.epf",  # опционально: /Execute
   command_parameter="InitScenario" # опционально: /C
 )
