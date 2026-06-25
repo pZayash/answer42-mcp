@@ -7,12 +7,15 @@
 
 from __future__ import annotations
 
+import os
 import re
 import socket
 import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Optional
+
+from . import os_support
 
 
 def find_free_display(start: int = 99) -> str:
@@ -60,22 +63,48 @@ def find_platform_dir(version: Optional[str] = None) -> Path:
     """Locate the platform directory for a given version.
 
     If `version` is omitted the maximum available version is selected.
-    Searches `/opt/1cv8/x86_64`, `/opt/1cv8/x86`. No other paths are used.
+    Searches standard Linux and Windows installation locations. The
+    ``ONEC_PLATFORM_DIR`` environment variable can point directly to the
+    platform ``bin`` directory and takes precedence.
     """
+    override = os.getenv("ONEC_PLATFORM_DIR")
+    if override:
+        path = Path(override)
+        if (path / os_support.executable_name("1cv8c")).exists():
+            return path
+        raise ValueError(f"ONEC_PLATFORM_DIR does not contain {os_support.executable_name('1cv8c')}: {path}")
+
     candidates: list[Path] = []
-    for base in [Path("/opt/1cv8/x86_64"), Path("/opt/1cv8/x86"), Path("/opt/1c/x86_64"), Path("/opt/1c/x86")]:
-        if not base.exists():
-            continue
-        for sub in base.iterdir():
-            if sub.is_dir() and (sub / "1cv8c").exists():
-                candidates.append(sub)
+    executable = os_support.executable_name("1cv8c")
+    if os_support.IS_WINDOWS:
+        bases = []
+        for env_name in ("ProgramFiles", "ProgramFiles(x86)"):
+            root = os.getenv(env_name)
+            if root:
+                bases.append(Path(root) / "1cv8")
+        for base in bases:
+            if not base.exists():
+                continue
+            for sub in base.iterdir():
+                bin_dir = sub / "bin"
+                if bin_dir.is_dir() and (bin_dir / executable).exists():
+                    candidates.append(bin_dir)
+                elif sub.is_dir() and (sub / executable).exists():
+                    candidates.append(sub)
+    else:
+        for base in [Path("/opt/1cv8/x86_64"), Path("/opt/1cv8/x86"), Path("/opt/1c/x86_64"), Path("/opt/1c/x86")]:
+            if not base.exists():
+                continue
+            for sub in base.iterdir():
+                if sub.is_dir() and (sub / executable).exists():
+                    candidates.append(sub)
     if not candidates:
-        raise RuntimeError("No platform directories found under /opt/1cv8/x86_64 or /opt/1cv8/x86")
+        raise RuntimeError("No 1C platform directories found. Set ONEC_PLATFORM_DIR to the platform bin directory.")
     if version:
         for c in candidates:
-            if c.name == version:
+            if c.name == version or c.parent.name == version:
                 return c
-        raise ValueError(f"Версия {version} не найдена в /opt/1cv8/x86_64 или /opt/1cv8/x86")
+        raise ValueError(f"Версия {version} не найдена среди установленных платформ 1С")
     # Numeric compare using the first three components to avoid treating the
     # build number as the most significant part.
     return max(

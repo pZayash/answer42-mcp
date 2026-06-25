@@ -20,6 +20,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -27,7 +28,7 @@ from typing import Any
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-SCENARIOS = ("smoke", "dynamic", "coverage")
+SCENARIOS = ("smoke", "dynamic-tables", "dynamic-lists", "dynamic-reports", "coverage")
 
 
 def _build_client_cf_from_sources() -> None:
@@ -36,12 +37,16 @@ def _build_client_cf_from_sources() -> None:
     if not src_dir.exists():
         raise FileNotFoundError(f"Client CF source is missing: {src_dir}")
     print(f"Building tested-client configuration from sources: {src_dir} -> {target}", flush=True)
-    subprocess.run(["bash", "scripts/build_cf.sh", str(src_dir), str(target)], check=True)
+    subprocess.run([sys.executable, "scripts/build_cf.py", str(src_dir), str(target)], check=True)
 
 
 def _kill_all_1c() -> None:
-    for name in ("1cv8", "ibcmd", "ibsrv", "Xvfb"):
-        subprocess.run(["pkill", "-9", "-f", name], check=False)
+    if os.name == "nt":
+        for name in ("1cv8.exe", "1cv8c.exe", "ibcmd.exe", "ibsrv.exe"):
+            subprocess.run(["taskkill", "/IM", name, "/T", "/F"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    else:
+        for name in ("1cv8", "ibcmd", "ibsrv", "Xvfb"):
+            subprocess.run(["pkill", "-9", "-f", name], check=False)
     time.sleep(1)
 
 
@@ -304,7 +309,7 @@ async def seed_dynamic_data(session: ClientSession, sid: str) -> None:
         await call_ui_ok(session, "click_button", {"name": "ФормаЗаписатьИЗакрыть", "session_id": sid})
 
 
-async def run_dynamic(session: ClientSession, sid: str, suffix: str, screenshot_dir: Path) -> None:
+async def run_dynamic_tables(session: ClientSession, sid: str, suffix: str, screenshot_dir: Path) -> None:
     await run_rag(session, sid, suffix)
     await seed_dynamic_data(session, sid)
 
@@ -337,7 +342,21 @@ async def run_dynamic(session: ClientSession, sid: str, suffix: str, screenshot_
     assert row_pair_value(cur_ts, "N") == "2", cur_ts
     await call_ui_ok(session, "click_button", {"name": "ФормаЗаписатьИЗакрыть", "session_id": sid})
 
+    await call_ui_ok(session, "open_navigation_link", {"navigation_link": "e1cib/list/Catalog.ПС_Справочник1", "session_id": sid})
     await call_ui_ok(session, "table_find_row", {"name": "Список", "text": "Тестовый элемент 1", "session_id": sid})
+    await call_ui_ok(session, "table_goto_row", {"name": "Список", "text": "Тестовый элемент 1", "session_id": sid})
+    await call_ui_ok(session, "click_button", {"name": "ФормаИзменить", "session_id": sid})
+    await call_ui_ok(session, "choose_field_from_list", {"field_name": "ВладелецСсылка", "session_id": sid})
+    await capture_screenshot(session, sid, str(screenshot_dir / "10-owner-selection-form.png"))
+    await call_ui_ok(session, "choose_current_row", {"session_id": sid})
+    await call_ui_ok(session, "choose_field_first_row", {"field_name": "ВладелецСсылка", "session_id": sid})
+    await call_ui_ok(session, "click_button", {"name": "ФормаЗаписатьИЗакрыть", "session_id": sid})
+
+
+async def run_dynamic_lists(session: ClientSession, sid: str, suffix: str, screenshot_dir: Path) -> None:
+    await seed_dynamic_data(session, sid)
+
+    await call_ui_ok(session, "open_navigation_link", {"navigation_link": "e1cib/list/Catalog.ПС_Справочник1", "session_id": sid})
     await call_ui_ok(session, "table_goto_row", {"name": "Список", "text": "Тестовый элемент 2", "session_id": sid})
     await call_ui_ok(session, "dynamic_list_set_order", {"column_title": "Наименование", "name": "Список", "session_id": sid})
     await call_ui_ok(session, "dynamic_list_output", {"session_id": sid})
@@ -365,15 +384,6 @@ async def run_dynamic(session: ClientSession, sid: str, suffix: str, screenshot_
     await call_ui_ok(session, "dynamic_list_open_form_settings", {"session_id": sid})
     await call_ui_ok(session, "close_form", {"session_id": sid})
 
-    await call_ui_ok(session, "open_navigation_link", {"navigation_link": "e1cib/list/Catalog.ПС_Справочник1", "session_id": sid})
-    await call_ui_ok(session, "table_goto_row", {"name": "Список", "text": "Тестовый элемент 1", "session_id": sid})
-    await call_ui_ok(session, "click_button", {"name": "ФормаИзменить", "session_id": sid})
-    await call_ui_ok(session, "choose_field_from_list", {"field_name": "ВладелецСсылка", "session_id": sid})
-    await capture_screenshot(session, sid, str(screenshot_dir / "10-owner-selection-form.png"))
-    await call_ui_ok(session, "choose_current_row", {"session_id": sid})
-    await call_ui_ok(session, "choose_field_first_row", {"field_name": "ВладелецСсылка", "session_id": sid})
-    await call_ui_ok(session, "click_button", {"name": "ФормаЗаписатьИЗакрыть", "session_id": sid})
-
     available = await call_ui_ok(session, "dynamic_list_available_fields", {"session_id": sid})
     assert available.get("count", 0) > 0, available
     assert "Наименование" in str(available), available
@@ -384,6 +394,10 @@ async def run_dynamic(session: ClientSession, sid: str, suffix: str, screenshot_
         "session_id": sid,
     })
     await capture_screenshot(session, sid, str(screenshot_dir / "12-final-list.png"))
+
+
+async def run_dynamic_reports(session: ClientSession, sid: str, suffix: str, screenshot_dir: Path) -> None:
+    await seed_dynamic_data(session, sid)
 
     await call_ui_ok(session, "open_navigation_link", {"navigation_link": "e1cib/app/Report.ПС_СписокЭлементов", "session_id": sid})
     await capture_screenshot(session, sid, str(screenshot_dir / "13-report-open.png"))
@@ -398,6 +412,12 @@ async def run_dynamic(session: ClientSession, sid: str, suffix: str, screenshot_
         await call_ui_ok(session, "tabular_document_save", {"format": "pdf", "path": str(screenshot_dir / "report-output.pdf"), "session_id": sid})
     await call_ui_ok(session, "close_form", {"session_id": sid})
 
+
+async def run_dynamic(session: ClientSession, sid: str, suffix: str, screenshot_dir: Path) -> None:
+    """Legacy full dynamic scenario kept for explicit E2E_SCENARIO=dynamic."""
+    await run_dynamic_tables(session, sid, suffix, screenshot_dir)
+    await run_dynamic_lists(session, sid, suffix, screenshot_dir)
+    await run_dynamic_reports(session, sid, suffix, screenshot_dir)
 
 async def run_coverage(session: ClientSession, sid: str, suffix: str, screenshot_dir: Path) -> None:
     await call_ui_ok(session, "set_file_dialog_result", {"paths": "[]", "session_id": sid})
@@ -451,7 +471,7 @@ async def run_coverage(session: ClientSession, sid: str, suffix: str, screenshot
 
 
 async def run_one_scenario(scenario: str) -> None:
-    if scenario not in (*SCENARIOS, "full"):
+    if scenario not in (*SCENARIOS, "dynamic", "full"):
         raise ValueError(f"Unknown E2E_SCENARIO={scenario!r}; expected full/{'/'.join(SCENARIOS)}")
 
     sid = os.environ.get("E2E_SESSION_ID", "e2e-mcp")
@@ -476,7 +496,13 @@ async def run_one_scenario(scenario: str) -> None:
             try:
                 if scenario in ("smoke", "full"):
                     await run_smoke(session, sid, suffix, screenshot_dir)
-                if scenario in ("dynamic", "full"):
+                if scenario in ("dynamic-tables", "full"):
+                    await run_dynamic_tables(session, sid, suffix, screenshot_dir)
+                if scenario in ("dynamic-lists", "full"):
+                    await run_dynamic_lists(session, sid, suffix, screenshot_dir)
+                if scenario in ("dynamic-reports", "full"):
+                    await run_dynamic_reports(session, sid, suffix, screenshot_dir)
+                if scenario == "dynamic":
                     await run_dynamic(session, sid, suffix, screenshot_dir)
                 if scenario in ("coverage", "full"):
                     await run_coverage(session, sid, suffix, screenshot_dir)
@@ -502,7 +528,7 @@ def run_parallel_split() -> None:
     procs: list[tuple[str, subprocess.Popen[str], Path]] = []
     for scenario in SCENARIOS:
         sid = f"{base_sid}-{scenario}"
-        log_path = Path("/tmp") / f"{sid}.log"
+        log_path = Path(tempfile.gettempdir()) / f"{sid}.log"
         env = {
             **os.environ,
             "PYTHONPATH": "src",

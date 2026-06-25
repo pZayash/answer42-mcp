@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ctypes
+import ctypes.wintypes
 import os
 import shutil
 import subprocess
@@ -36,9 +38,12 @@ def maximize_test_client_window(
 ) -> dict[str, Any]:
     """Maximize/resize a 1C test-client window.
 
-    Priority: wmctrl -> xdotool -> python-xlib fallback. This function controls only
-    window geometry; it doesn't click or type in the application.
+    Priority: Windows WinAPI on Windows; wmctrl -> xdotool -> python-xlib on X11.
+    This function controls only window geometry; it doesn't click or type in the application.
     """
+    if os.name == "nt":
+        return _maximize_with_winapi(title_contains, width, height).as_dict()
+
     env = os.environ.copy()
     if display:
         env["DISPLAY"] = display
@@ -50,6 +55,16 @@ def maximize_test_client_window(
             return result.as_dict()
         last = result
     return last.as_dict()
+
+
+def active_1c_window_geometry(title_contains: str = "") -> dict[str, int] | None:
+    """Return best visible 1C window geometry on Windows, or None elsewhere."""
+    if os.name != "nt":
+        return None
+    chosen = _find_windows_1c_window(title_contains)
+    if not chosen:
+        return None
+    return chosen.get("geometry")
 
 
 def _screen_size(display: str, env: dict[str, str]) -> tuple[int, int]:
@@ -180,3 +195,82 @@ def _maximize_with_xlib(title_contains: str, display: str, width: int | None, he
         return WindowControlResult(True, "xlib", title=item["title"], geometry={"x":0,"y":0,"width":sw,"height":sh}, candidates=candidates)
     except Exception as e:
         return WindowControlResult(False, "xlib", error=str(e))
+
+
+def _find_windows_1c_window(title_contains: str = "") -> dict[str, Any] | None:
+    user32 = ctypes.windll.user32
+    candidates: list[dict[str, Any]] = []
+
+    EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+
+    def callback(hwnd: int, _lparam: int) -> bool:
+        try:
+            if not user32.IsWindowVisible(hwnd):
+                return True
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length <= 0:
+                return True
+            buf = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, buf, length + 1)
+            title = buf.value
+            if not _title_matches(title, title_contains):
+                return True
+            rect = ctypes.wintypes.RECT()  # type: ignore[attr-defined]
+            if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+                return True
+            width = int(rect.right - rect.left)
+            height = int(rect.bottom - rect.top)
+            if width < 300 or height < 150:
+                return True
+            priority = min(width * height // 10000, 50)
+            if "1С:Предприятие" in title:
+                priority += 50
+            if title and title not in {"1cv8c", "1cv8", "Конфигурация"}:
+                priority += 100
+            candidates.append({
+                "hwnd": hwnd,
+                "title": title,
+                "priority": priority,
+                "geometry": {"left": int(rect.left), "top": int(rect.top), "width": width, "height": height, "title": title},
+            })
+        except Exception:
+            pass
+        return True
+
+    try:
+        user32.EnumWindows(EnumWindowsProc(callback), 0)
+    except Exception:
+        return None
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: int(item.get("priority") or 0), reverse=True)
+    return candidates[0]
+
+
+def _maximize_with_winapi(title_contains: str, width: int | None, height: int | None) -> WindowControlResult:
+    try:
+        import ctypes.wintypes  # type: ignore  # noqa: F401
+
+        user32 = ctypes.windll.user32
+        chosen = _find_windows_1c_window(title_contains)
+        if chosen is None:
+            return WindowControlResult(False, "winapi", error="window not found")
+        hwnd = int(chosen["hwnd"])
+        screen_w = width or user32.GetSystemMetrics(0) or 1920
+        screen_h = height or user32.GetSystemMetrics(1) or 1080
+        user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+        user32.MoveWindow(hwnd, 0, 0, int(screen_w), int(screen_h), True)
+        user32.ShowWindow(hwnd, 3)  # SW_MAXIMIZE
+        try:
+            user32.SetForegroundWindow(hwnd)
+        except Exception:
+            pass
+        return WindowControlResult(
+            True,
+            "winapi",
+            title=str(chosen.get("title") or ""),
+            geometry={"x": 0, "y": 0, "width": int(screen_w), "height": int(screen_h)},
+            candidates=[{"title": str(chosen.get("title") or ""), "hwnd": hwnd}],
+        )
+    except Exception as e:
+        return WindowControlResult(False, "winapi", error=str(e))
