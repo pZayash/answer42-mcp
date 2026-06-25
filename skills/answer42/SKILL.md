@@ -165,7 +165,7 @@ export_eventlog(...)
 
 Если задача именно про доработку репозитория `Answer42`:
 
-- CF собирать кроссплатформенно: `python scripts/build_cf.py src/cf build/MCPTestManager.cf` и аналогично для `src/client_cf`. Скрипт сам добавляет `src` в `sys.path`; Bash-синтаксис `PYTHONPATH=src python ...` в PowerShell не работает.
+- CF собирать кроссплатформенно: `python scripts/build_cf.py src/cf build/MCPTestManager.cf` и аналогично для `src/client_cf`. Приоритетный способ — `ibcmd config import` (не требует Конфигуратора); если `ibcmd` отсутствует, скрипт автоматически переключается на Конфигуратор/DESIGNER через `1cv8`. Скрипт сам добавляет `src` в `sys.path`; Bash-синтаксис `PYTHONPATH=src python ...` в PowerShell не работает.
 - Не использовать удалённые `.sh`-скрипты (`build_cf.sh`, `export_eventlog.sh`).
 - Для E2E использовать `scripts/e2e_stable.py`; долгий `dynamic` сценарий разделён на `dynamic-tables`, `dynamic-lists`, `dynamic-reports`.
 - `start_session` автоматически пересобирает `build/MCPTestManager.cf`, если он отсутствует или XML-исходники новее; demo-клиент аналогично пересобирает `build/MCPTestClient.cf`. Но после изменения Python/BSL всё равно прогонять минимум `py_compile`, unit tests и сборку CF; для UI-изменений — smoke E2E с PDF evidence.

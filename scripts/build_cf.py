@@ -4,11 +4,15 @@
 Usage:
   python scripts/build_cf.py [SRC_DIR] [OUT_CF]
 
+Build order:
+  1. Prefer ibcmd: ``ibcmd config import --out=<OUT_CF> <SRC_DIR>``.
+  2. If ibcmd is not installed, fall back to Configurator/DESIGNER via 1cv8.
+
 Environment:
   PLATFORM_DIR / ONEC_PLATFORM_DIR - 1C platform bin directory override
-  DB_PATH                         - temporary file infobase directory
-  BUILD_CF_LOG                    - designer log path
-  DISPLAY                         - used on Linux/X11 only
+  DB_PATH                         - temporary file infobase directory for DESIGNER fallback
+  BUILD_CF_LOG                    - build log path
+  DISPLAY                         - used by DESIGNER fallback on Linux/X11 only
 """
 
 from __future__ import annotations
@@ -33,21 +37,27 @@ def _platform_dir() -> Path:
     return find_platform_dir(os.getenv("ONEC_VERSION") or None)
 
 
+def _ibcmd_executable(platform_dir: Path) -> Path | None:
+    """Return ibcmd when available in the platform bin directory."""
+    candidate = platform_dir / os_support.executable_name("ibcmd")
+    return candidate if candidate.exists() else None
+
+
 def _onec_designer_executable(platform_dir: Path) -> Path:
-    """Return the thick-client executable required for DESIGNER mode.
+    """Return the thick-client executable required for DESIGNER fallback.
 
     1cv8c.exe is the thin client and does not include Конфигуратор/DESIGNER.
-    Building .cf from XML sources therefore requires 1cv8.exe (Windows) or
-    1cv8 (Linux) from the thick client / Configurator installation.
+    The fallback therefore requires 1cv8.exe (Windows) or 1cv8 (Linux).
     """
     candidate = platform_dir / os_support.executable_name("1cv8")
     if candidate.exists():
         return candidate
     raise SystemExit(
-        "1C Designer executable not found: "
-        f"{candidate}. Install 1C thick client / Конфигуратор for this "
-        "platform version, or provide a prebuilt .cf artifact. "
-        "1cv8c.exe is a thin client and cannot build .cf from XML sources."
+        "Cannot build .cf: neither ibcmd nor 1C Designer executable was found. "
+        f"Missing ibcmd and {candidate}. Install server administration tools "
+        "(ibcmd) or thick client / Конфигуратор for this platform version, "
+        "or provide a prebuilt .cf artifact. 1cv8c.exe is a thin client and "
+        "cannot build .cf from XML sources."
     )
 
 
@@ -58,28 +68,19 @@ def _run(argv: list[str], *, env: dict[str, str], timeout: int = 300) -> None:
         raise SystemExit(f"Command failed rc={completed.returncode}: {' '.join(map(str, argv))}")
 
 
-def main(argv: list[str]) -> int:
-    src_dir = Path(argv[1]) if len(argv) > 1 else Path("src/cf")
-    out_cf = Path(argv[2]) if len(argv) > 2 else Path("build/MCPTestManager.cf")
-    db_path = Path(os.getenv("DB_PATH") or str(os_support.default_data_dir() / "ib-build-cf"))
-    log_path = Path(os.getenv("BUILD_CF_LOG") or "build/build_cf.log")
+def _build_with_ibcmd(ibcmd: Path, src_dir: Path, out_cf: Path, *, env: dict[str, str]) -> None:
+    """Build CF directly from XML sources via ibcmd config import."""
+    _run([
+        str(ibcmd), "config", "import",
+        f"--out={out_cf}",
+        str(src_dir),
+    ], env=env, timeout=600)
 
-    platform_dir = _platform_dir()
-    version_name = platform_version_from_dir(platform_dir)
-    require_websocket_support(version_name)
-    onec = _onec_designer_executable(platform_dir)
-    if not src_dir.exists():
-        raise SystemExit(f"Source directory not found: {src_dir}")
 
+def _build_with_designer(onec: Path, src_dir: Path, out_cf: Path, db_path: Path, log_path: Path, *, env: dict[str, str]) -> None:
+    """Legacy fallback through Configurator/DESIGNER."""
     if db_path.exists():
         shutil.rmtree(db_path, ignore_errors=True)
-    out_cf.parent.mkdir(parents=True, exist_ok=True)
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-
-    env = os.environ.copy()
-    if not os_support.IS_WINDOWS and "DISPLAY" not in env:
-        env["DISPLAY"] = ":99"
-
     _run([str(onec), "CREATEINFOBASE", f"File={db_path}", "/DisableStartupDialogs"], env=env, timeout=180)
     _run([
         str(onec), "DESIGNER", "/F", str(db_path),
@@ -99,6 +100,36 @@ def main(argv: list[str]) -> int:
         "/Out", str(log_path),
         "/DisableStartupDialogs",
     ], env=env, timeout=600)
+
+
+def main(argv: list[str]) -> int:
+    src_dir = Path(argv[1]) if len(argv) > 1 else Path("src/cf")
+    out_cf = Path(argv[2]) if len(argv) > 2 else Path("build/MCPTestManager.cf")
+    db_path = Path(os.getenv("DB_PATH") or str(os_support.default_data_dir() / "ib-build-cf"))
+    log_path = Path(os.getenv("BUILD_CF_LOG") or "build/build_cf.log")
+
+    platform_dir = _platform_dir()
+    version_name = platform_version_from_dir(platform_dir)
+    require_websocket_support(version_name)
+    if not src_dir.exists():
+        raise SystemExit(f"Source directory not found: {src_dir}")
+
+    out_cf.parent.mkdir(parents=True, exist_ok=True)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    env = os.environ.copy()
+    if not os_support.IS_WINDOWS and "DISPLAY" not in env:
+        env["DISPLAY"] = ":99"
+
+    ibcmd = _ibcmd_executable(platform_dir)
+    if ibcmd is not None:
+        print(f"Building {out_cf} via ibcmd config import ({ibcmd})", flush=True)
+        _build_with_ibcmd(ibcmd, src_dir, out_cf, env=env)
+    else:
+        onec = _onec_designer_executable(platform_dir)
+        print(f"ibcmd not found; building {out_cf} via DESIGNER ({onec})", flush=True)
+        _build_with_designer(onec, src_dir, out_cf, db_path, log_path, env=env)
+
     print(out_cf)
     return 0
 

@@ -16,7 +16,7 @@ pip install -e '.[screenshot,linux-window-control]'
 
 ## Сборка конфигураций 1С
 
-Сборка конфигурации менеджера:
+Сборка через `ibcmd config import` (приоритетный способ, не требует Конфигуратора):
 
 ```bash
 python scripts/build_cf.py src/cf build/MCPTestManager.cf
@@ -28,7 +28,7 @@ python scripts/build_cf.py src/cf build/MCPTestManager.cf
 python scripts/build_cf.py src/client_cf build/MCPTestClient.cf
 ```
 
-Скрипт сам добавляет `src` в `sys.path`, поэтому `PYTHONPATH=src` не нужен. На PowerShell синтаксис `PYTHONPATH=src python ...` не работает; если когда-нибудь нужно задать переменную окружения вручную, используйте `$env:PYTHONPATH="src"; python ...`.
+Скрипт сам добавляет `src` в `sys.path`, поэтому `PYTHONPATH=src` не нужен. Если `ibcmd` отсутствует, скрипт автоматически переключается на Конфигуратор/DESIGNER через `1cv8`. На PowerShell синтаксис `PYTHONPATH=src python ...` не работает; если когда-нибудь нужно задать переменную окружения вручную, используйте `$env:PYTHONPATH="src"; python ...`.
 
 `start_session` автоматически собирает `build/MCPTestManager.cf`, если файл отсутствует или XML-исходники `src/cf/` новее. Встроенная demo-база клиента автоматически собирает `build/MCPTestClient.cf` из `src/client_cf/`.
 
