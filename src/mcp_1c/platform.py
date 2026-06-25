@@ -102,15 +102,29 @@ def find_platform_dir(version: Optional[str] = None) -> Path:
         raise RuntimeError("No 1C platform directories found. Set ONEC_PLATFORM_DIR to the platform bin directory.")
     if version:
         for c in candidates:
-            if c.name == version or c.parent.name == version:
+            if platform_version_from_dir(c) == version:
                 return c
         raise ValueError(f"Версия {version} не найдена среди установленных платформ 1С")
     # Numeric compare using the first three components to avoid treating the
-    # build number as the most significant part.
+    # build number as the most significant part. Windows candidates usually
+    # point to .../<version>/bin, so the version is in the parent directory.
     return max(
         candidates,
-        key=lambda p: _version_tuple(p.name),
+        key=lambda p: _version_tuple(platform_version_from_dir(p)),
     )
+
+
+def platform_version_from_dir(platform_dir: Path) -> str:
+    """Return the 1C version represented by a platform directory.
+
+    Linux installs typically use /opt/1cv8/x86_64/<version>/1cv8c, while
+    Windows installs use C:\\Program Files\\1cv8\\<version>\\bin\\1cv8c.exe.
+    For Windows bin directories, the version is therefore the parent name.
+    """
+    path = Path(platform_dir)
+    if path.name.lower() == "bin" and path.parent.name:
+        return path.parent.name
+    return path.name
 
 
 def _version_tuple(version: str) -> tuple[int, int, int, int]:
