@@ -129,33 +129,45 @@ stop_session(session_id="my-session", clean_data=False)
 Конфигурация менеджера тестирования собирается из XML-исходников `src/cf/`:
 
 ```bash
-PYTHONPATH=src python scripts/build_cf.py src/cf build/MCPTestManager.cf
+python scripts/build_cf.py src/cf build/MCPTestManager.cf
+```
+
+PowerShell:
+
+```powershell
+python scripts/build_cf.py src/cf build/MCPTestManager.cf
 ```
 
 Тестовая конфигурация для E2E собирается из XML-исходников `src/client_cf/`:
 
 ```bash
-PYTHONPATH=src python scripts/build_cf.py src/client_cf build/MCPTestClient.cf
+python scripts/build_cf.py src/client_cf build/MCPTestClient.cf
 ```
 
-E2E-сценарий всегда пересобирает `build/MCPTestClient.cf` из `src/client_cf/`, чтобы тесты не использовали устаревший артефакт.
+PowerShell:
+
+```powershell
+python scripts/build_cf.py src/client_cf build/MCPTestClient.cf
+```
+
+`start_session` автоматически собирает `build/MCPTestManager.cf`, если файл отсутствует или XML-исходники `src/cf/` новее. Встроенный demo-клиент аналогично собирает `build/MCPTestClient.cf` из `src/client_cf/`. E2E-сценарий также пересобирает `build/MCPTestClient.cf`, чтобы тесты не использовали устаревший артефакт.
 
 E2E можно запускать целиком или по независимым сценариям:
 
 ```bash
-PYTHONPATH=src python3 scripts/e2e_stable.py                         # full
-E2E_SCENARIO=smoke PYTHONPATH=src python3 scripts/e2e_stable.py       # быстрый smoke
-E2E_SCENARIO=dynamic PYTHONPATH=src python3 scripts/e2e_stable.py     # legacy: таблицы/dynamic-list/отчёт
-E2E_SCENARIO=dynamic-tables PYTHONPATH=src python3 scripts/e2e_stable.py
-E2E_SCENARIO=dynamic-lists PYTHONPATH=src python3 scripts/e2e_stable.py
-E2E_SCENARIO=dynamic-reports PYTHONPATH=src python3 scripts/e2e_stable.py
-E2E_SCENARIO=coverage PYTHONPATH=src python3 scripts/e2e_stable.py    # diagnostic/negative tools
+python3 scripts/e2e_stable.py                         # full
+E2E_SCENARIO=smoke python3 scripts/e2e_stable.py       # быстрый smoke
+E2E_SCENARIO=dynamic python3 scripts/e2e_stable.py     # legacy: таблицы/dynamic-list/отчёт
+E2E_SCENARIO=dynamic-tables python3 scripts/e2e_stable.py
+E2E_SCENARIO=dynamic-lists python3 scripts/e2e_stable.py
+E2E_SCENARIO=dynamic-reports python3 scripts/e2e_stable.py
+E2E_SCENARIO=coverage python3 scripts/e2e_stable.py    # diagnostic/negative tools
 ```
 
 Для реального распараллеливания сценарий умеет сам запустить пять разные сессий (`smoke`, `dynamic-tables`, `dynamic-lists`, `dynamic-reports`, `coverage`), а не копии одного и того же теста. Встроенная тестовая файловая база публикуется через один общий `ibsrv`, когда серверные компоненты доступны; без `ibsrv` demo-клиент запускается через `file-direct` (`/F`):
 
 ```bash
-E2E_PARALLEL=1 E2E_SESSION_ID=e2e-split PYTHONPATH=src python3 scripts/e2e_stable.py
+E2E_PARALLEL=1 E2E_SESSION_ID=e2e-split python3 scripts/e2e_stable.py
 ```
 
 `start_session` также переиспользует общий автономный сервер для одинаковой файловой базы. Последний `stop_session` освобождает refcount и завершает shared `ibsrv`.

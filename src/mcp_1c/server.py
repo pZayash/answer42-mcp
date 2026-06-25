@@ -548,6 +548,51 @@ def _persist_sessions() -> None:
     )
 
 
+def _source_newer_than(target: Path, src_dir: Path) -> bool:
+    if not target.exists():
+        return True
+    if not src_dir.exists():
+        return False
+    target_mtime = target.stat().st_mtime
+    for path in src_dir.rglob("*"):
+        if path.is_file() and path.stat().st_mtime > target_mtime:
+            return True
+    return False
+
+
+def _ensure_cf_built(out_cf: str, *, src_dir: str, platform_dir: Path) -> str:
+    """Build a .cf artifact when it is missing or older than XML sources."""
+    target = Path(out_cf)
+    source = Path(src_dir)
+    if not _source_newer_than(target, source):
+        return str(target)
+    if not source.exists():
+        raise FileNotFoundError(f"CF source directory not found: {source}")
+    script = Path(__file__).resolve().parents[2] / "scripts" / "build_cf.py"
+    if not script.exists():
+        raise FileNotFoundError(f"CF build script not found: {script}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    env["ONEC_PLATFORM_DIR"] = str(platform_dir)
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+    logging.info("Building CF artifact %s from %s", target, source)
+    completed = subprocess.run(
+        [sys.executable, str(script), str(source), str(target)],
+        cwd=str(Path(__file__).resolve().parents[2]),
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=900,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"Failed to build CF artifact {target} from {source} "
+            f"(rc={completed.returncode}):\n{completed.stdout}"
+        )
+    return str(target)
+
+
 def _normalize_base_url(url: str) -> str:
     return str(url or "").strip().rstrip("/")
 
@@ -1312,9 +1357,11 @@ async def start_session(
 
     with _port_allocation_lock():
         runtime.create_file_infobase(sess.ibcmd, sess.db_path)
-        cf_path = runtime.DEFAULT_CF_BUILT
-        if not Path(cf_path).exists():
-            raise FileNotFoundError(f"MCPTestManager.cf not found at {cf_path}.")
+        cf_path = _ensure_cf_built(
+            runtime.DEFAULT_CF_BUILT,
+            src_dir="src/cf",
+            platform_dir=platform_dir,
+        )
         runtime.load_configuration(sess.ibcmd, sess.db_path, cf_path)
 
     ibsrv_available = Path(sess.ibsrv).exists()
@@ -1359,6 +1406,11 @@ async def start_session(
             shared_client_id = os.getenv("ONEC_MCP_SHARED_CLIENT_BASE_ID") or "default"
             shared_client_root = Path(os.getenv("ONEC_MCP_SHARED_CLIENT_BASE_DIR", str(os_support.default_data_dir() / "shared-client-bases")))
             shared_client_db = shared_client_root / shared_client_id / "ib"
+            client_cf_path = _ensure_cf_built(
+                runtime.DEFAULT_CLIENT_CF_BUILT,
+                src_dir="src/client_cf",
+                platform_dir=platform_dir,
+            )
             shared_client = _acquire_shared_file_server(
                 owner_session_id=sid,
                 kind="demo-client",
@@ -1366,7 +1418,7 @@ async def start_session(
                 ibcmd=sess.ibcmd,
                 ibsrv=sess.ibsrv,
                 db_path=shared_client_db,
-                cf_path=runtime.DEFAULT_CLIENT_CF_BUILT,
+                cf_path=client_cf_path,
                 create_if_missing=True,
                 port_seed=f"demo-client:{shared_client_id}",
                 server_name="mcpclient",
@@ -1398,9 +1450,11 @@ async def start_session(
         else:
             logging.info("ibsrv not found; preparing demo test-client in file-direct mode")
             runtime.create_file_infobase(sess.ibcmd, sess.client_db_path)
-            client_cf_path = runtime.DEFAULT_CLIENT_CF_BUILT
-            if not Path(client_cf_path).exists():
-                raise FileNotFoundError(f"MCPTestClient.cf not found at {client_cf_path}.")
+            client_cf_path = _ensure_cf_built(
+                runtime.DEFAULT_CLIENT_CF_BUILT,
+                src_dir="src/client_cf",
+                platform_dir=platform_dir,
+            )
             runtime.load_configuration(sess.ibcmd, sess.client_db_path, client_cf_path)
             sess.client_runtime = runtime.ManagerRuntime(
                 infobase=runtime.InfobaseSpec(db_path=sess.client_db_path),
@@ -1543,7 +1597,10 @@ def launch_manager(
     if create_infobase:
         runtime.create_file_infobase(ibcmd, db)
     if load_configuration and cf_path:
-        runtime.load_configuration(ibcmd, db, cf_path)
+        resolved_cf_path = cf_path
+        if cf_path == runtime.DEFAULT_CF_BUILT:
+            resolved_cf_path = _ensure_cf_built(cf_path, src_dir="src/cf", platform_dir=pd)
+        runtime.load_configuration(ibcmd, db, resolved_cf_path)
     if start_standalone:
         with _port_allocation_lock():
             port_offset = _stable_session_port_offset(f"launch:{session_id}:{port}")
