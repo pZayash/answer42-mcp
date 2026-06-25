@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from mcp_1c import os_support  # noqa: E402
-from mcp_1c.platform import find_platform_dir, require_websocket_support  # noqa: E402
+from mcp_1c.platform import find_platform_dir, platform_version_from_dir, require_websocket_support  # noqa: E402
 
 
 def _platform_dir() -> Path:
@@ -31,6 +31,26 @@ def _platform_dir() -> Path:
     if override:
         return Path(override)
     return find_platform_dir(os.getenv("ONEC_VERSION") or None)
+
+
+def _onec_designer_executable(platform_dir: Path) -> Path:
+    """Return an executable suitable for CREATEINFOBASE/DESIGNER.
+
+    Some Windows 8.5 installations ship only 1cv8c.exe in the bin directory.
+    Prefer the thick client when present, but fall back to the thin executable
+    so the builder works with C:\\Program Files\\1cv8\\<version>\\bin layouts.
+    """
+    candidates = [
+        platform_dir / os_support.executable_name("1cv8"),
+        platform_dir / os_support.executable_name("1cv8c"),
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    raise SystemExit(
+        "1C executable not found in platform directory: "
+        f"{platform_dir}. Tried: {', '.join(str(c) for c in candidates)}"
+    )
 
 
 def _run(argv: list[str], *, env: dict[str, str], timeout: int = 300) -> None:
@@ -47,11 +67,9 @@ def main(argv: list[str]) -> int:
     log_path = Path(os.getenv("BUILD_CF_LOG") or "build/build_cf.log")
 
     platform_dir = _platform_dir()
-    version_name = platform_dir.parent.name if platform_dir.name.lower() == "bin" else platform_dir.name
+    version_name = platform_version_from_dir(platform_dir)
     require_websocket_support(version_name)
-    onec = platform_dir / os_support.executable_name("1cv8")
-    if not onec.exists():
-        raise SystemExit(f"1cv8 executable not found: {onec}")
+    onec = _onec_designer_executable(platform_dir)
     if not src_dir.exists():
         raise SystemExit(f"Source directory not found: {src_dir}")
 

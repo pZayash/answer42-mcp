@@ -19,14 +19,18 @@ pip install -e '.[screenshot,linux-window-control]'
 Сборка конфигурации менеджера:
 
 ```bash
-PYTHONPATH=src python scripts/build_cf.py src/cf build/MCPTestManager.cf
+python scripts/build_cf.py src/cf build/MCPTestManager.cf
 ```
 
 Сборка тестовой конфигурации:
 
 ```bash
-PYTHONPATH=src python scripts/build_cf.py src/client_cf build/MCPTestClient.cf
+python scripts/build_cf.py src/client_cf build/MCPTestClient.cf
 ```
+
+Скрипт сам добавляет `src` в `sys.path`, поэтому `PYTHONPATH=src` не нужен. На PowerShell синтаксис `PYTHONPATH=src python ...` не работает; если когда-нибудь нужно задать переменную окружения вручную, используйте `$env:PYTHONPATH="src"; python ...`.
+
+`start_session` автоматически собирает `build/MCPTestManager.cf`, если файл отсутствует или XML-исходники `src/cf/` новее. Встроенная demo-база клиента автоматически собирает `build/MCPTestClient.cf` из `src/client_cf/`.
 
 На Linux без серверных компонентов Answer42 может запускать менеджер и клиент напрямую через файловую базу (`/F`). На Windows это также поддерживается; запускайте MCP из интерактивной пользовательской сессии, потому что UI automation и screenshots требуют desktop session.
 
@@ -60,9 +64,9 @@ cp -a skills/answer42-rag ~/.openclaw/workspace/skills/
 ## Smoke checks
 
 ```bash
-PYTHONPATH=src python -m pytest -q
-PYTHONPATH=src python scripts/build_cf.py src/cf build/MCPTestManager.cf
-PYTHONPATH=src python scripts/build_cf.py src/client_cf build/MCPTestClient.cf
+python -m pytest -q
+python scripts/build_cf.py src/cf build/MCPTestManager.cf
+python scripts/build_cf.py src/client_cf build/MCPTestClient.cf
 ```
 
 Полный E2E:
