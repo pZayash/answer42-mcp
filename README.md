@@ -196,7 +196,7 @@ E2E-сценарий всегда пересобирает `build/MCPTestClient.
 
 - `recording_start(output_dir, display, window)` — включить доказательную запись.
 - `recording_capture(action, note)` — вручную добавить доказательный слайд.
-- `recording_stop()` — собрать `manifest.json`, `recording.gif`, `recording.mp4`, `recording.pdf` (если доступен backend PDF).
+- `recording_stop()` — собрать `manifest.json`, `recording.mp4`, `recording.pdf` (если доступен backend PDF).
 
 ### RAG / индекс метаданных
 
