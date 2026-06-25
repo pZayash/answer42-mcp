@@ -34,22 +34,20 @@ def _platform_dir() -> Path:
 
 
 def _onec_designer_executable(platform_dir: Path) -> Path:
-    """Return an executable suitable for CREATEINFOBASE/DESIGNER.
+    """Return the thick-client executable required for DESIGNER mode.
 
-    Some Windows 8.5 installations ship only 1cv8c.exe in the bin directory.
-    Prefer the thick client when present, but fall back to the thin executable
-    so the builder works with C:\\Program Files\\1cv8\\<version>\\bin layouts.
+    1cv8c.exe is the thin client and does not include Конфигуратор/DESIGNER.
+    Building .cf from XML sources therefore requires 1cv8.exe (Windows) or
+    1cv8 (Linux) from the thick client / Configurator installation.
     """
-    candidates = [
-        platform_dir / os_support.executable_name("1cv8"),
-        platform_dir / os_support.executable_name("1cv8c"),
-    ]
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
+    candidate = platform_dir / os_support.executable_name("1cv8")
+    if candidate.exists():
+        return candidate
     raise SystemExit(
-        "1C executable not found in platform directory: "
-        f"{platform_dir}. Tried: {', '.join(str(c) for c in candidates)}"
+        "1C Designer executable not found: "
+        f"{candidate}. Install 1C thick client / Конфигуратор for this "
+        "platform version, or provide a prebuilt .cf artifact. "
+        "1cv8c.exe is a thin client and cannot build .cf from XML sources."
     )
 
 
