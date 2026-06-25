@@ -1137,6 +1137,47 @@ def rag_query(
 
 
 @mcp.tool()
+def sessions_list() -> dict[str, Any]:
+    """List active/restorable Answer42 sessions and their connection state."""
+    persisted = _load_persisted_sessions()
+    session_ids = sorted(set(persisted) | set(_SESSIONS))
+    items: list[dict[str, Any]] = []
+    for sid in session_ids:
+        sess = _SESSIONS.get(sid) or persisted.get(sid)
+        if sess is None:
+            continue
+        rt = sess.runtime
+        client_rt = sess.client_runtime
+        file_client_rt = sess.file_client_runtime
+        bridge_status = sess.bridge.status()
+        items.append({
+            "session_id": sid,
+            "running": sid in _SESSIONS,
+            "base_url": sess.base_url,
+            "version": sess.platform_dir.name,
+            "display": sess.display,
+            "ws_port": sess.ws_port,
+            "bridge_connected": bool(bridge_status.get("connected")),
+            "manager_alive": bool(rt and rt.manager_process and rt.manager_process.poll() is None),
+            "ibsrv_alive": bool(rt and rt.server_process and rt.server_process.poll() is None),
+            "testclient_port": sess.testclient_port,
+            "client_ibsrv_port": sess.client_ibsrv_port,
+            "client_ibsrv_alive": bool(client_rt and (
+                (client_rt.server_process and client_rt.server_process.poll() is None)
+                or (not client_rt.server_process and runtime.is_port_listening(client_rt.server.address, client_rt.server.port))
+            )),
+            "file_client_ibsrv_port": sess.file_client_ibsrv_port,
+            "file_client_ibsrv_alive": bool(file_client_rt and (
+                (file_client_rt.server_process and file_client_rt.server_process.poll() is None)
+                or (not file_client_rt.server_process and runtime.is_port_listening(file_client_rt.server.address, file_client_rt.server.port))
+            )),
+            "rag_snapshot": sess.rag_snapshot,
+            "idle_timeout_seconds": sess.idle_timeout_seconds,
+        })
+    return {"count": len(items), "sessions": items}
+
+
+@mcp.tool()
 def session_status(*,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> dict[str, Any]:
@@ -1208,6 +1249,13 @@ async def start_session(
 ) -> dict[str, Any]:
     """One-shot session factory: detect version, start infrastructure and connect the 1C test client."""
     initial_connection_mode = _normalize_connection_mode(connection_mode, connection_value or base_url, base_url)
+    if base_url and not connection_value and initial_connection_mode != "ws":
+        # Backward-compatible parameter handling: base_url historically carried
+        # the target connection string. Treat http(s) as web/ws URL only; plain
+        # server/infobase strings and file infobase directories belong to
+        # connection_value so they are passed to the test client as /S or /F.
+        connection_value = base_url
+        base_url = ""
     resolved_version = version or None
     if not resolved_version and base_url and initial_connection_mode == "ws":
         resolved_version = _platform.detect_version_from_url(base_url)
