@@ -167,7 +167,7 @@ stop_session(session_id="my-session", clean_data=False)
 - Linux/X11: `python-xlib`/`wmctrl`/`xdotool`, GUI/Xvfb для headless-сервера
 - Windows: интерактивная пользовательская desktop-сессия; window-control и screenshots работают через WinAPI/`mss`
 
-Проверяйте наличие платформы 1С в стандартных каталогах: Linux `/opt/1cv8/x86_64/<version>/` и `/opt/1cv8/i386/<version>/`; Windows `C:\Program Files\1cv8\<version>\bin\` и `C:\Program Files (x86)\1cv8\<version>\bin\`; macOS `/Applications/1cv8/<version>/` или `/opt/1cv8/<version>/`. Для штатной работы нужны `1cv8c` и `ibcmd`; `ibsrv` желателен, но при его отсутствии Answer42 может использовать fallback `/F`. Если автоопределение ошиблось, задайте `ONEC_PLATFORM_DIR`.
+Проверяйте наличие платформы 1С в стандартных каталогах: Linux `/opt/1cv8/x86_64/<version>/` и `/opt/1cv8/i386/<version>/`; Windows `C:\Program Files\1cv8\<version>\bin\` и `C:\Program Files (x86)\1cv8\<version>\bin\`; macOS `/Applications/1cv8/<version>/` или `/opt/1cv8/<version>/`. Для штатной работы нужны `1cv8c` и `ibcmd`; `ibsrv` желателен, но при его отсутствии Answer42 может использовать fallback `/F`. Если автоопределение ошиблось, задайте `ONEC_PLATFORM_DIR`. Для очень медленного старта web-клиента можно увеличить `ONEC_MCP_TEST_CLIENT_READY_TIMEOUT` и timeout MCP-клиента; по умолчанию Answer42 ждёт открытия `-TPort` 55 секунд и затем отдаёт явную ошибку с логами клиента.
 
 ## Безопасность стендов и учётных данных
 

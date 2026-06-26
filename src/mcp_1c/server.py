@@ -1998,6 +1998,26 @@ def _client_failure_diagnostics(sess: SessionState, error: Exception, target_con
     return RuntimeError(message)
 
 
+async def _wait_for_test_client_ready(sess: SessionState, host: str, port: int, timeout: float) -> None:
+    deadline = time.time() + timeout
+    proc = sess.test_client_process
+    while time.time() < deadline:
+        if proc is not None and proc.poll() is not None:
+            message = f"Test client process exited before opening test port {host}:{port}; exit_code={proc.returncode}"
+            message = _append_file_tail(message, "Лог stdout/stderr клиента тестирования", sess.client_log_dir / "test_client_stdout.log")
+            message = _append_file_tail(message, "Лог 1С /Out клиента тестирования", sess.client_log_dir / "test_client_1c_out.log")
+            raise RuntimeError(message)
+        if await asyncio.to_thread(runtime.wait_for_port, host, port, 0.2, 0.05):
+            return
+        await asyncio.sleep(0.4)
+    message = f"Test client did not open test port {host}:{port} within {timeout:.0f}s"
+    message = _append_file_tail(message, "Лог stdout/stderr клиента тестирования", sess.client_log_dir / "test_client_stdout.log")
+    message = _append_file_tail(message, "Лог 1С /Out клиента тестирования", sess.client_log_dir / "test_client_1c_out.log")
+    if proc is not None:
+        message += f"\nprocess_pid={proc.pid}; process_exit_code={proc.poll()}"
+    raise RuntimeError(message)
+
+
 async def _connect_test_client_impl(
     sess: SessionState,
     *,
@@ -2147,6 +2167,8 @@ async def _connect_test_client_impl(
               "target_connection_mode": target_connection_mode}
     _touch_session(sess)
     try:
+        wait_timeout = float(os.getenv("ONEC_MCP_TEST_CLIENT_READY_TIMEOUT", "55"))
+        await _wait_for_test_client_ready(sess, host, r_port, timeout=wait_timeout)
         result = await sess.bridge.call("attach_test_client", params)
     except Exception:
         runtime.kill_process(sess.test_client_process, "test-client")
@@ -2456,6 +2478,12 @@ async def group_collapse(name: Annotated[str, "Group technical name"] = "", titl
 async def group_current_page(name: Annotated[str, "Group technical name"] = "", title: Annotated[str, "Group title substring"] = "", max_depth: Annotated[int, "Serialization depth for returned page"] = 2, *, session_id: Annotated[str, "Session id"] = DEFAULT_SESSION) -> Any:
     """Return current page of a page-group form element."""
     return await _bridge_call_recorded(session_id, "group_current_page", {"name": name, "title": title, "max_depth": max_depth})
+
+
+@mcp.tool()
+async def group_activate_page(name: Annotated[str, "Page-group technical name"] = "", title: Annotated[str, "Page-group title substring"] = "", page_name: Annotated[str, "Target page technical name"] = "", page_title: Annotated[str, "Target page title"] = "", max_depth: Annotated[int, "Search depth"] = 8, *, session_id: Annotated[str, "Session id"] = DEFAULT_SESSION) -> Any:
+    """Activate/switch to another page in a page-group form element."""
+    return await _bridge_call_recorded(session_id, "group_activate_page", {"name": name, "title": title, "page_name": page_name, "page_title": page_title, "max_depth": max_depth})
 
 
 @mcp.tool()
