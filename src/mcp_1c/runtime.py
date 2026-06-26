@@ -170,6 +170,27 @@ def kill_process(proc: subprocess.Popen | None, label: str) -> None:
     os_support.kill_process_tree(proc, label, LOGGER)
 
 
+def _decode_process_output(data: bytes) -> str:
+    encodings = ["utf-8-sig", "utf-8", "cp866", "cp1251"] if os_support.IS_WINDOWS else ["utf-8-sig", "utf-8", "cp866"]
+    for encoding in encodings:
+        try:
+            return data.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return data.decode(encodings[-1], errors="replace")
+
+
+def _run_capture(argv: list[str], *, timeout: float, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
+    input_bytes = input_text.encode("utf-8") if input_text is not None else None
+    completed = subprocess.run(argv, input=input_bytes, capture_output=True, text=False, timeout=timeout)
+    return subprocess.CompletedProcess(
+        args=completed.args,
+        returncode=completed.returncode,
+        stdout=_decode_process_output(completed.stdout or b""),
+        stderr=_decode_process_output(completed.stderr or b""),
+    )
+
+
 def create_file_infobase(
     ibcmd: str,
     db_path: Path,
@@ -192,7 +213,7 @@ def create_file_infobase(
         "--create-database",
     ]
     LOGGER.info("Creating file infobase at %s via %s", db_path, ibcmd)
-    completed = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    completed = _run_capture(argv, timeout=timeout)
     if completed.returncode != 0:
         raise RuntimeError(
             f"ibcmd infobase create failed (rc={completed.returncode}): "
@@ -222,7 +243,7 @@ def load_configuration(
         str(cf_path),
     ]
     LOGGER.info("Loading configuration %s into %s", cf_path, db_path)
-    completed = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    completed = _run_capture(argv, timeout=timeout)
     if completed.returncode != 0:
         raise RuntimeError(
             f"ibcmd config load failed (rc={completed.returncode}): "
@@ -244,7 +265,7 @@ def apply_configuration(ibcmd: str, db_path: Path, timeout: float = 120.0) -> No
         "--session-terminate=force",
     ]
     LOGGER.info("Applying configuration to %s", db_path)
-    completed = subprocess.run(argv, input="3\n", capture_output=True, text=True, timeout=timeout)
+    completed = _run_capture(argv, input_text="3\n", timeout=timeout)
     if completed.returncode != 0:
         raise RuntimeError(
             f"ibcmd config apply failed (rc={completed.returncode}): "
@@ -376,7 +397,7 @@ def export_eventlog(
         argv.append(f"--to={to_time}")
     argv.append(str(eventlog_dir))
     LOGGER.info("Exporting 1C event log: %s", " ".join(argv))
-    completed = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    completed = _run_capture(argv, timeout=timeout)
     if completed.returncode != 0:
         raise RuntimeError(
             f"ibcmd eventlog export failed (rc={completed.returncode}): "
