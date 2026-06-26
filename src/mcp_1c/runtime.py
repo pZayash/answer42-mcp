@@ -415,6 +415,7 @@ def build_thin_test_manager_argv(
     return [
         onec_path,
         "ENTERPRISE",
+        "/DisableStartupMessages",
         "/DisableStartupDialogs",
         f"/WS{ws_url}",
         "/Lru",
@@ -434,6 +435,7 @@ def build_thin_test_manager_file_argv(
     return [
         onec_path,
         "ENTERPRISE",
+        "/DisableStartupMessages",
         "/DisableStartupDialogs",
         "/F",
         str(db_path),
@@ -455,6 +457,8 @@ def _start_thin_test_manager_argv(
         raise FileNotFoundError(f"1cv8c (thin) not found: {argv[0]}")
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / log_name
+    onec_out_path = log_dir / f"{Path(log_name).stem}_1c_out.log"
+    argv = [*argv, "/DisableUnrecoverableErrorMessage", "/Out", str(onec_out_path)]
     log_handle = open(log_path, "ab", buffering=0)
     LOGGER.info("Starting thin test manager: %s", " ".join(argv))
     env = os.environ.copy()
@@ -468,7 +472,10 @@ def _start_thin_test_manager_argv(
         **os_support.subprocess_creation_kwargs(),
         env=env,
     )
-    LOGGER.info("Test manager launched (pid=%s); log=%s", proc.pid, log_path)
+    proc.answer42_stdout_log_path = str(log_path)  # type: ignore[attr-defined]
+    proc.answer42_out_log_path = str(onec_out_path)  # type: ignore[attr-defined]
+    proc.answer42_argv = argv  # type: ignore[attr-defined]
+    LOGGER.info("Test manager launched (pid=%s); log=%s out=%s", proc.pid, log_path, onec_out_path)
     return proc
 
 
