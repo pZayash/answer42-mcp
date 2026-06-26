@@ -50,6 +50,9 @@ table { width:100%; border-collapse:collapse; margin:1.2em 0; display:block; ove
 th,td { border:1px solid var(--line); padding:9px 11px; vertical-align:top; }
 th { background:rgba(255,255,255,.07); }
 img { max-width:100%; height:auto; }
+.brand { margin-left:auto; display:flex; align-items:center; gap:10px; padding:8px 12px; border:1px solid var(--line); border-radius:18px; background:rgba(255,255,255,.06); }
+.brand span { color:var(--muted); font-size:.82rem; }
+.brand img { width:92px; height:auto; display:block; }
 .footer { color:var(--muted); margin-top:22px; font-size:.92rem; }
 """.strip()
 
@@ -58,6 +61,18 @@ def slugify(text: str) -> str:
     text = text.strip().lower()
     text = re.sub(r"[^0-9a-zа-яё_-]+", "-", text, flags=re.I)
     return text.strip("-") or "section"
+
+
+def page_link(url: str) -> str:
+    mapping = {
+        "README.md": "index.html",
+        "docs/installation.md": "installation.html",
+        "docs/agent-installation.md": "agent-installation.html",
+        "docs/architecture.md": "architecture.html",
+        "docs/assets/answer42-logo.png": "assets/answer42-logo.png",
+        "docs/assets/platform42-logo.svg": "assets/platform42-logo.svg",
+    }
+    return mapping.get(url, url)
 
 
 def convert_inline(text: str) -> str:
@@ -69,8 +84,8 @@ def convert_inline(text: str) -> str:
 
     text = html.escape(text)
     text = re.sub(r"`([^`]+)`", lambda m: stash(f"<code>{m.group(1)}</code>"), text)
-    text = re.sub(r"!\[([^\]]*)\]\(([^)]+)\)", lambda m: stash(f'<img src="{html.escape(m.group(2), quote=True)}" alt="{html.escape(m.group(1), quote=True)}">'), text)
-    text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", lambda m: stash(f'<a href="{html.escape(m.group(2), quote=True)}">{m.group(1)}</a>'), text)
+    text = re.sub(r"!\[([^\]]*)\]\(([^)]+)\)", lambda m: stash(f'<img src="{html.escape(page_link(m.group(2)), quote=True)}" alt="{html.escape(m.group(1), quote=True)}">'), text)
+    text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", lambda m: stash(f'<a href="{html.escape(page_link(m.group(2)), quote=True)}">{m.group(1)}</a>'), text)
     text = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", text)
     text = re.sub(r"(?<!\*)\*([^*]+)\*(?!\*)", r"<em>\1</em>", text)
     # Some placeholders can be nested, for example Markdown links with code-formatted text:
@@ -240,6 +255,10 @@ def page_html(title: str, body: str) -> str:
         <p class="kicker">The Answer to Life, Universe, and 1C — UI Driver</p>
         <h1>Answer42</h1>
       </div>
+      <a class="brand" href="https://platform42.ru/" aria-label="Platform42">
+        <span>by</span>
+        <img src="assets/platform42-logo.svg" alt="Platform42">
+      </a>
     </header>
     <nav class="nav">{nav}</nav>
     <main>{body}</main>
@@ -255,6 +274,7 @@ def main() -> None:
         shutil.rmtree(PUBLIC)
     (PUBLIC / "assets").mkdir(parents=True)
     shutil.copy2(DOCS / "assets" / "answer42-logo.png", PUBLIC / "assets" / "answer42-logo.png")
+    shutil.copy2(DOCS / "assets" / "platform42-logo.svg", PUBLIC / "assets" / "platform42-logo.svg")
     for out_name, src, title in PAGES:
         if not src.exists():
             continue
