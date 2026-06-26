@@ -28,6 +28,7 @@ from mcp.server.fastmcp import FastMCP
 from . import os_support
 from . import platform as _platform
 from . import runtime
+from . import skill_installer
 from .bridge import OneCBridgeServer
 from .credentials import get_store as _credentials_store
 from .rag import RagService
@@ -3253,6 +3254,9 @@ async def _run() -> None:
 
 
 def main() -> None:
+    if len(sys.argv) > 1 and sys.argv[1] in {"install-skills", "skills-install"}:
+        raise SystemExit(skill_installer.main(sys.argv[2:]))
+
     parser = argparse.ArgumentParser(description="MCP server for 1C:Enterprise test manager")
     parser.add_argument("--log-level", default=os.getenv("ONEC_MCP_LOG_LEVEL", "INFO"))
     parser.add_argument(

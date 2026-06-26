@@ -1,7 +1,5 @@
 # Answer42
 
-<!-- mcp-name: io.gitlab.platform42/answer42 -->
-
 <p align="center">
   <img src="docs/assets/answer42-logo.png" alt="Answer42 logo" width="220">
 </p>
@@ -303,19 +301,44 @@ pipx install 'answer42[screenshot,linux-window-control]'
 # pipx install "answer42[screenshot,windows-window-control]"
 ```
 
-Для MCP Registry в репозитории есть `server.json`; PyPI-пакет содержит проверочную строку `mcp-name` в README, как требует официальный registry для `registryType=pypi`. Публикация автоматизирована в `.gitlab-ci.yml`:
+Публикация автоматизирована в `.gitlab-ci.yml` и оставлена только для PyPI:
 
 1. tag `vX.Y.Z` запускает unit/ruff/package checks;
-2. `publish_pypi` публикует wheel/sdist в PyPI через `PYPI_API_TOKEN`;
-3. `pages` публикует HTTP-auth proof file в `/.well-known/mcp-registry-auth` из `MCP_REGISTRY_AUTH`;
-4. `publish_mcp_registry_http` обновляет версию в `server.json` и публикует запись через `mcp-publisher` + HTTP-auth (`MCP_HTTP_DOMAIN`, `MCP_PRIVATE_KEY`).
+2. `package` собирает wheel/sdist и проверяет их через `twine check`;
+3. `publish_pypi` публикует wheel/sdist в PyPI через `PYPI_API_TOKEN`.
 
-Секреты GitLab CI:
+Секрет GitLab CI:
 
 - `PYPI_API_TOKEN` — PyPI token для проекта `answer42`.
-- `MCP_REGISTRY_AUTH` — публичное содержимое файла `mcp-registry-auth`, например `v=MCPv1; k=ed25519; p=...`.
-- `MCP_HTTP_DOMAIN`, `MCP_PRIVATE_KEY` — HTTP-auth namespace для MCP Registry. Имя `io.gitlab.platform42/answer42` соответствует reverse-DNS namespace `platform42.gitlab.io`; proof file должен открываться строго как `https://platform42.gitlab.io/.well-known/mcp-registry-auth`. Если GitLab Pages доступен только с project path (`/answer42-mcp/...`), нужен root Pages project `platform42/platform42.gitlab.io` или другой домен, и тогда нужно синхронно поменять `mcp-name` в README и `name` в `server.json`.
 
 Перед релизом проверьте, что `src/mcp_1c/assets/MCPTestManager.cf` и `src/mcp_1c/assets/MCPTestClient.cf` пересобраны из актуальных XML-исходников. Runtime использует XML+`scripts/build_cf.py` в git checkout, а в установленном PyPI wheel при отсутствии исходников копирует packaged `.cf` из `mcp_1c.assets`.
 
-Дополнительные каталоги MCP, куда имеет смысл публиковаться после PyPI/MCP Registry: Smithery и PulseMCP. По Crawlhub на момент подготовки не удалось найти публичную CLI/API-документацию; если появится URL API или CLI, его можно добавить отдельным GitLab job рядом с `publish_mcp_registry`.
+### Установка packaged skills
+
+PyPI сам по себе не устанавливает agent skills в пользовательские каталоги, поэтому в CLI добавлена команда:
+
+```bash
+answer42 install-skills
+```
+
+По умолчанию она устанавливает `answer42` и `answer42-rag` в OpenClaw:
+
+```text
+~/.openclaw/workspace/skills
+```
+
+Другие агенты/варианты:
+
+```bash
+answer42 install-skills --agent claude
+answer42 install-skills --agent codex
+answer42 install-skills --agent opencode
+answer42 install-skills --agent pi
+answer42 install-skills --agent hermes
+answer42 install-skills --agent all
+answer42 install-skills --target-dir /path/to/skills
+answer42 install-skills --list-agents
+answer42 install-skills --dry-run --agent all
+```
+
+Для агентов без стабильного стандарта skill-директорий (`codex`, `opencode`, `pi`, `hermes`) presets best-effort; если у конкретной установки другой путь, используйте `--target-dir`.

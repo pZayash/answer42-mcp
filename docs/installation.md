@@ -52,6 +52,28 @@ python scripts/build_cf.py src/client_cf build/MCPTestClient.cf
 
 На Linux без серверных компонентов Answer42 может запускать менеджер и клиент напрямую через файловую базу (`/F`). На Windows это также поддерживается; запускайте MCP из интерактивной пользовательской сессии, потому что UI automation и screenshots требуют desktop session.
 
+## Установка skills
+
+PyPI-пакет не может сам записывать skills в профили агентов. После установки пакета выполните:
+
+```bash
+answer42 install-skills
+```
+
+По умолчанию устанавливаются `answer42` и `answer42-rag` для OpenClaw в `~/.openclaw/workspace/skills`.
+
+Для других агентов или явного пути:
+
+```bash
+answer42 install-skills --agent claude
+answer42 install-skills --agent codex
+answer42 install-skills --agent opencode
+answer42 install-skills --agent pi
+answer42 install-skills --agent hermes
+answer42 install-skills --target-dir /path/to/skills
+answer42 install-skills --list-agents
+```
+
 ## MCP-сервер в OpenClaw
 
 OpenClaw хранит MCP-серверы в `mcp.servers`. Добавьте `Answer42` как stdio server:

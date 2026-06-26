@@ -44,7 +44,7 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mcp_1c"]
-artifacts = ["src/mcp_1c/assets/*.cf"]
+artifacts = ["src/mcp_1c/assets/*.cf", "src/mcp_1c/assets/skills/**"]
 
 [tool.hatch.build.targets.sdist]
 include = [

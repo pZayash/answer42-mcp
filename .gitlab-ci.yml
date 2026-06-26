@@ -1,7 +1,6 @@
 stages:
   - test
   - package
-  - pages
   - publish
 
 variables:
@@ -21,7 +20,7 @@ unit_tests:
   extends: .python-job
   stage: test
   script:
-    - python -m py_compile src/mcp_1c/*.py
+    - python -m py_compile src/mcp_1c/*.py src/mcp_1c/rag/*.py
     - python -m pytest -q -c /dev/null tests/test_credentials.py tests/test_protocol.py tests/test_server_tools.py
     - python -m ruff check src/mcp_1c tests
 
@@ -32,6 +31,8 @@ package:
   script:
     - test -s src/mcp_1c/assets/MCPTestManager.cf
     - test -s src/mcp_1c/assets/MCPTestClient.cf
+    - test -s src/mcp_1c/assets/skills/answer42/SKILL.md
+    - test -s src/mcp_1c/assets/skills/answer42-rag/SKILL.md
     - python -m pip install build twine
     - python -m build
     - python -m twine check dist/*
@@ -39,18 +40,6 @@ package:
     expire_in: 7 days
     paths:
       - dist/
-
-pages:
-  image: alpine:3.20
-  stage: pages
-  rules:
-    - if: '$MCP_REGISTRY_AUTH'
-  script:
-    - mkdir -p public/.well-known
-    - printf '%s\n' "$MCP_REGISTRY_AUTH" > public/.well-known/mcp-registry-auth
-  artifacts:
-    paths:
-      - public
 
 publish_pypi:
   image: python:3.13-slim
@@ -62,20 +51,3 @@ publish_pypi:
     - python -m pip install --upgrade pip twine
   script:
     - python -m twine upload --non-interactive -u __token__ -p "$PYPI_API_TOKEN" dist/*
-
-publish_mcp_registry_http:
-  image: alpine:3.20
-  stage: publish
-  needs: ["publish_pypi"]
-  rules:
-    - if: '$CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+.*$/ && $MCP_HTTP_DOMAIN && $MCP_PRIVATE_KEY'
-  before_script:
-    - apk add --no-cache curl jq tar
-    - |
-      curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
-  script:
-    - VERSION="${CI_COMMIT_TAG#v}"
-    - jq --arg v "$VERSION" '.version = $v | .packages[0].version = $v' server.json > server.tmp
-    - mv server.tmp server.json
-    - ./mcp-publisher login http --domain "$MCP_HTTP_DOMAIN" --private-key "$MCP_PRIVATE_KEY"
-    - ./mcp-publisher publish
