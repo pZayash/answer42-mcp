@@ -548,38 +548,40 @@ def run_parallel_split() -> None:
     os.environ["ONEC_MCP_SHARED_CLIENT_BASE_ID"] = shared_id
     _prebuild_shared_client_base(shared_id)
 
-    procs: list[tuple[str, subprocess.Popen[str], Path]] = []
-    for scenario in SCENARIOS:
-        sid = f"{base_sid}-{scenario}"
-        log_path = Path(tempfile.gettempdir()) / f"{sid}.log"
-        env = {
-            **os.environ,
-            "PYTHONPATH": "src",
-            "E2E_SESSION_ID": sid,
-            "E2E_SCENARIO": scenario,
-            "E2E_SKIP_BUILD_CLIENT_CF": "1",
-            "E2E_SKIP_KILL_ALL_1C": "1",
-        }
-        # Child processes must run a single assigned scenario.  Do not inherit
-        # E2E_PARALLEL=1, otherwise each child recursively spawns another
-        # smoke+dynamic+coverage fan-out.
-        env.pop("E2E_PARALLEL", None)
-        log = log_path.open("w", encoding="utf-8")
-        proc = subprocess.Popen([sys.executable, __file__], env=env, stdout=log, stderr=subprocess.STDOUT, text=True)
-        log.close()
-        procs.append((scenario, proc, log_path))
-        print(f"STARTED {scenario}: pid={proc.pid} sid={sid} log={log_path}", flush=True)
-
+    max_parallel = int(os.environ.get("E2E_PARALLEL_MAX", "4"))
     failed: list[str] = []
-    for scenario, proc, log_path in procs:
-        code = proc.wait()
-        print(f"FINISHED {scenario}: code={code} log={log_path}", flush=True)
-        if code != 0:
-            failed.append(f"{scenario} code={code} log={log_path}")
-            try:
-                print(log_path.read_text(encoding="utf-8", errors="replace")[-8000:], flush=True)
-            except OSError:
-                pass
+    for start in range(0, len(SCENARIOS), max_parallel):
+        procs: list[tuple[str, subprocess.Popen[str], Path]] = []
+        for scenario in SCENARIOS[start : start + max_parallel]:
+            sid = f"{base_sid}-{scenario}"
+            log_path = Path(tempfile.gettempdir()) / f"{sid}.log"
+            env = {
+                **os.environ,
+                "PYTHONPATH": "src",
+                "E2E_SESSION_ID": sid,
+                "E2E_SCENARIO": scenario,
+                "E2E_SKIP_BUILD_CLIENT_CF": "1",
+                "E2E_SKIP_KILL_ALL_1C": "1",
+            }
+            # Child processes must run a single assigned scenario.  Do not inherit
+            # E2E_PARALLEL=1, otherwise each child recursively spawns another
+            # smoke+dynamic+coverage fan-out.
+            env.pop("E2E_PARALLEL", None)
+            log = log_path.open("w", encoding="utf-8")
+            proc = subprocess.Popen([sys.executable, __file__], env=env, stdout=log, stderr=subprocess.STDOUT, text=True)
+            log.close()
+            procs.append((scenario, proc, log_path))
+            print(f"STARTED {scenario}: pid={proc.pid} sid={sid} log={log_path}", flush=True)
+
+        for scenario, proc, log_path in procs:
+            code = proc.wait()
+            print(f"FINISHED {scenario}: code={code} log={log_path}", flush=True)
+            if code != 0:
+                failed.append(f"{scenario} code={code} log={log_path}")
+                try:
+                    print(log_path.read_text(encoding="utf-8", errors="replace")[-8000:], flush=True)
+                except OSError:
+                    pass
     if failed:
         raise SystemExit("Parallel E2E failed: " + "; ".join(failed))
     print("=== AUTONOMOUS PARALLEL E2E SPLIT PASSED ===", flush=True)
