@@ -1,0 +1,37 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.prodoomman/answer42",
+  "title": "Answer42",
+  "description": "MCP-powered 1C:Enterprise UI automation through the test-client API.",
+  "repository": {
+    "url": "https://gitlab.com/platform42/answer42-mcp",
+    "source": "gitlab"
+  },
+  "version": "0.2.0",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "answer42",
+      "version": "0.2.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "ONEC_MCP_CREDENTIALS_FILE",
+          "description": "Optional path to a local JSON credentials file. Defaults to ~/.onec-mcp-credentials.json.",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "filepath"
+        },
+        {
+          "name": "ONEC_PLATFORM_DIR",
+          "description": "Optional path to the 1C platform bin directory when auto-detection is not enough.",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "filepath"
+        }
+      ]
+    }
+  ]
+}

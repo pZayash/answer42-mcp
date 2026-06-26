@@ -1,5 +1,7 @@
 # Answer42
 
+<!-- mcp-name: io.github.prodoomman/answer42 -->
+
 <p align="center">
   <img src="docs/assets/answer42-logo.png" alt="Answer42 logo" width="220">
 </p>
@@ -17,13 +19,20 @@
 ## Быстрый старт
 
 ```bash
+# Рекомендуется для обычной установки из PyPI
+pipx install 'answer42[screenshot,linux-window-control]'
+
+# Альтернатива без pipx
 python3 -m venv .venv
 . .venv/bin/activate
-# Linux/X11
+pip install 'answer42[screenshot,linux-window-control]'
+
+# Разработка из git checkout
 pip install -e '.[screenshot,dev,linux-window-control]'
 
-# Windows (запускать из интерактивной пользовательской сессии, не как service)
-# pip install -e ".[screenshot,dev,windows-window-control]"
+# Windows: запускать из интерактивной пользовательской сессии, не как service
+# pipx install "answer42[screenshot,windows-window-control]"
+# pip install "answer42[screenshot,windows-window-control]"
 
 # Запуск MCP-сервера (transport: stdio)
 answer42 --ws-host 127.0.0.1 --ws-port 8765
@@ -202,7 +211,7 @@ E2E_PARALLEL=1 E2E_SESSION_ID=e2e-split python3 scripts/e2e_stable.py
 - `windows_list(max_depth)` — список окон тестируемого приложения; если открыто два окна клиента, возвращает оба, потому что читает подчинённые объекты `ТестируемоеПриложение`, а не окна менеджера тестирования.
 - `activate_window(index, title, name)` — переключить активное окно по индексу, заголовку или имени.
 - `goto_start_page()`, `goto_previous_window()`, `goto_next_window()` — навигация основного окна: `ПерейтиКНачальнойСтранице`, `ПерейтиКПредыдущемуОкну`, `ПерейтиКСледующемуОкну`.
-- `ui_tree(max_depth, include_rag_types, rag_snapshot)` — дерево UI с RAG-типами элементов, когда доступен индекс метаданных.
+- `ui_tree(max_depth, include_rag_types, include_hidden, rag_snapshot)` — дерево UI с `visible`, `available`, `enabled`, `read_only`; скрытые элементы и неактивные страницы page-group по умолчанию опускаются, `include_hidden=true` возвращает полное дерево. RAG-типы добавляются, когда доступен индекс метаданных.
 - `command_bar()` — диагностическая информация по командной панели, когда она доступна API тест-клиента.
 - `current_element()` — диагностическая информация по текущему элементу, когда она доступна API тест-клиента.
 - `find_object(name, title, type)` — найти объект в дереве UI.
@@ -283,3 +292,30 @@ MIT
 Copyright (c) 2026 Kosolapov Stanislav aka proDOOMman <prodoomman@gmail.com>, Marvin (AI Assistant), 42Clouds, and contributors.
 
 Licensed under the MIT License.
+
+## Публикация пакета
+
+Рекомендуемый канал установки для пользователей — PyPI:
+
+```bash
+pipx install 'answer42[screenshot,linux-window-control]'
+# Windows:
+# pipx install "answer42[screenshot,windows-window-control]"
+```
+
+Для MCP Registry в репозитории есть `server.json`; PyPI-пакет содержит проверочную строку `mcp-name` в README, как требует официальный registry для `registryType=pypi`. Публикация автоматизирована в `.gitlab-ci.yml`:
+
+1. tag `vX.Y.Z` запускает unit/ruff/package checks;
+2. `publish_pypi` публикует wheel/sdist в PyPI через `PYPI_API_TOKEN`;
+3. `publish_mcp_registry` обновляет версию в `server.json` и публикует запись через `mcp-publisher` + `MCP_GITHUB_TOKEN`;
+4. альтернативный manual job `publish_mcp_registry_dns` поддерживает DNS-auth через `MCP_DNS_DOMAIN` + `MCP_PRIVATE_KEY`.
+
+Секреты GitLab CI:
+
+- `PYPI_API_TOKEN` — PyPI token для проекта `answer42`.
+- `MCP_GITHUB_TOKEN` — GitHub PAT для `mcp-publisher login github`.
+- Опционально: `MCP_DNS_DOMAIN`, `MCP_PRIVATE_KEY` для DNS-auth namespace.
+
+Перед релизом проверьте, что `src/mcp_1c/assets/MCPTestManager.cf` и `src/mcp_1c/assets/MCPTestClient.cf` пересобраны из актуальных XML-исходников. Runtime использует XML+`scripts/build_cf.py` в git checkout, а в установленном PyPI wheel при отсутствии исходников копирует packaged `.cf` из `mcp_1c.assets`.
+
+Дополнительные каталоги MCP, куда имеет смысл публиковаться после PyPI/MCP Registry: Smithery и PulseMCP. По Crawlhub на момент подготовки не удалось найти публичную CLI/API-документацию; если появится URL API или CLI, его можно добавить отдельным GitLab job рядом с `publish_mcp_registry`.

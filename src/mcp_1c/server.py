@@ -15,6 +15,7 @@ import shlex
 import subprocess
 import re
 import hashlib
+import importlib.resources
 import urllib.request
 from urllib.parse import urlsplit, urlunsplit
 from dataclasses import dataclass, field
@@ -563,17 +564,44 @@ def _source_newer_than(target: Path, src_dir: Path) -> bool:
     return False
 
 
+def _packaged_cf_name(src_dir: str) -> str:
+    normalized = Path(src_dir).as_posix().rstrip("/")
+    if normalized.endswith("src/client_cf") or normalized == "src/client_cf":
+        return "MCPTestClient.cf"
+    return "MCPTestManager.cf"
+
+
+def _copy_packaged_cf(target: Path, src_dir: str) -> bool:
+    cf_name = _packaged_cf_name(src_dir)
+    try:
+        resource = importlib.resources.files("mcp_1c.assets").joinpath(cf_name)
+        if not resource.is_file():
+            return False
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with importlib.resources.as_file(resource) as path:
+            shutil.copy2(path, target)
+        logging.info("Copied packaged CF artifact %s to %s", cf_name, target)
+        return True
+    except Exception as exc:
+        logging.debug("Packaged CF artifact %s is not available: %s", cf_name, exc)
+        return False
+
+
 def _ensure_cf_built(out_cf: str, *, src_dir: str, platform_dir: Path) -> str:
-    """Build a .cf artifact when it is missing or older than XML sources."""
+    """Build a .cf artifact when XML sources are available; otherwise copy packaged CF."""
     target = Path(out_cf)
     source = Path(src_dir)
     if not _source_newer_than(target, source):
         return str(target)
     if not source.exists():
-        raise FileNotFoundError(f"CF source directory not found: {source}")
+        if _copy_packaged_cf(target, src_dir):
+            return str(target)
+        raise FileNotFoundError(f"CF source directory not found and no packaged CF is available: {source}")
     script = Path(__file__).resolve().parents[2] / "scripts" / "build_cf.py"
     if not script.exists():
-        raise FileNotFoundError(f"CF build script not found: {script}")
+        if _copy_packaged_cf(target, src_dir):
+            return str(target)
+        raise FileNotFoundError(f"CF build script not found and no packaged CF is available: {script}")
     target.parent.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     env["ONEC_PLATFORM_DIR"] = str(platform_dir)
@@ -2483,6 +2511,7 @@ def maximize_test_client_external_window(
 @mcp.tool()
 async def ui_tree(max_depth: Annotated[int, "Maximum UI tree depth"] = 4,
     include_rag_types: Annotated[bool, "Enrich UI elements with best-effort types from the local RAG index"] = True,
+    include_hidden: Annotated[bool, "Include invisible form elements; visible/available flags are always returned"] = False,
     rag_snapshot: Annotated[str, "Optional RAG snapshot name/id used for type enrichment"] = "",
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
@@ -2491,9 +2520,10 @@ async def ui_tree(max_depth: Annotated[int, "Maximum UI tree depth"] = 4,
 
     When RAG data is available, each matching element gets `rag_type` and `rag`
     fields with metadata-derived type/source information.  Runtime 1C UI data is
-    returned unchanged when the RAG index has no match.
+    returned unchanged when the RAG index has no match. Invisible elements are
+    omitted by default; pass include_hidden=true to inspect the full 1C form tree.
     """
-    tree = await _bridge_call_recorded(session_id, "ui_tree", {"max_depth": max_depth})
+    tree = await _bridge_call_recorded(session_id, "ui_tree", {"max_depth": max_depth, "include_hidden": include_hidden})
     if include_rag_types:
         sess = _session(session_id)
         tree = _enrich_ui_tree_with_rag_types(tree, snapshot=rag_snapshot or sess.rag_snapshot or None)

@@ -2,16 +2,34 @@
 
 ## Python-пакет
 
+Рекомендуемая установка из PyPI:
+
+```bash
+pipx install 'answer42[screenshot,linux-window-control]'
+# или без pipx:
+python3 -m venv .venv
+. .venv/bin/activate
+pip install 'answer42[screenshot,linux-window-control]'
+```
+
+Windows запускать из интерактивной desktop-сессии:
+
+```powershell
+pipx install "answer42[screenshot,windows-window-control]"
+# или:
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install "answer42[screenshot,windows-window-control]"
+```
+
+Установка для разработки из git checkout:
+
 ```bash
 git clone https://gitlab.com/platform42/answer42-mcp.git answer42
 cd answer42
 python3 -m venv .venv
 . .venv/bin/activate
-# Linux/X11
-pip install -e '.[screenshot,linux-window-control]'
-
-# Windows
-# pip install -e ".[screenshot,windows-window-control]"
+pip install -e '.[screenshot,dev,linux-window-control]'
 ```
 
 ## Сборка конфигураций 1С
