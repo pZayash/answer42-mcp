@@ -70,3 +70,34 @@ answer42 install-skills --target-dir /custom/skills/dir
 ```
 
 For agents without a stable public skill directory standard, presets are best-effort; use `--target-dir` for exact local setups.
+
+## One-command release helper
+
+To bump `pyproject.toml`, create a release commit, create an annotated git tag and push both branch + tag:
+
+```bash
+answer42 release 0.2.1
+```
+
+This runs the equivalent of:
+
+```bash
+# edit pyproject.toml: version = "0.2.1"
+git add pyproject.toml
+git commit -m "Release v0.2.1"
+git tag -a v0.2.1 -m "Release v0.2.1"
+git push origin HEAD
+git push origin v0.2.1
+```
+
+The pushed tag triggers GitLab CI. CI publishes the PyPI package and creates a GitLab Release.
+
+Useful options:
+
+```bash
+answer42 release 0.2.1 --dry-run
+answer42 release 0.2.1 --no-push
+answer42 release 0.2.1 --remote origin --branch beta
+```
+
+The helper requires a clean working tree by default. Commit/stash other work first; `--allow-dirty` exists for exceptional cases.

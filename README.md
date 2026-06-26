@@ -305,7 +305,17 @@ pipx install 'answer42[screenshot,linux-window-control]'
 
 1. tag `vX.Y.Z` запускает unit/ruff/package checks;
 2. `package` собирает wheel/sdist и проверяет их через `twine check`;
-3. `publish_pypi` публикует wheel/sdist в PyPI через `PYPI_API_TOKEN`.
+3. `publish_pypi` публикует wheel/sdist в PyPI через `PYPI_API_TOKEN`;
+4. `create_gitlab_release` создаёт GitLab Release для tag.
+
+
+One-command релиз:
+
+```bash
+answer42 release 0.2.1
+```
+
+Команда меняет `pyproject.toml`, создаёт commit `Release v0.2.1`, annotated tag `v0.2.1`, пушит branch и tag. Tag запускает CI: публикацию в PyPI и создание GitLab Release.
 
 Секрет GitLab CI:
 
