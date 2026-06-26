@@ -79,7 +79,7 @@ answer42 install-skills --list-agents
 OpenClaw хранит MCP-серверы в `mcp.servers`. Добавьте `Answer42` как stdio server:
 
 ```bash
-/mcp set Answer42={"command":"/home/openclaw/.openclaw/workspace/answer42/.venv/bin/answer42","args":[],"cwd":"/home/openclaw/.openclaw/workspace/answer42","env":{"ONEC_MCP_CREDENTIALS_FILE":"/secure/path/credentials.json"},"enabled":true,"requestTimeoutMs":120000,"connectionTimeoutMs":30000,"toolFilter":{"exclude":["credentials_list"]}}
+/mcp set Answer42={"command":"answer42","args":[],"env":{"ONEC_MCP_CREDENTIALS_FILE":"/secure/path/credentials.json"},"enabled":true,"requestTimeoutMs":120000,"connectionTimeoutMs":30000,"toolFilter":{"exclude":["credentials_list"]}}
 ```
 
 `ONEC_MCP_CREDENTIALS_FILE` указывает на локальный JSON с логинами и паролями. В штатном режиме агент вызывает `start_session(base_url="...")` без `username`/`password`, а Answer42 сам подставляет креды внутри MCP-процесса. Для сохранения или обновления записи используйте tool `credentials_save(url="...", username="...", password="...")`, для удаления — `credentials_remove(url="...")`, для проверки наличия записи — `credentials_check(base_url="...")`; эти tools не возвращают ни логин, ни пароль, ни маску пароля. `credentials_list` рекомендуется скрывать через `toolFilter.exclude`, чтобы агент не видел список URL-шаблонов. Если в `start_session`/`connect_test_client` передан пароль вида `***`, Answer42 считает это плейсхолдером и выдаёт явную ошибку вместо попытки авторизации.
