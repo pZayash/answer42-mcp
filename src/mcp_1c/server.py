@@ -596,7 +596,7 @@ def _ensure_cf_built(out_cf: str, *, src_dir: str, platform_dir: Path) -> str:
 
 
 def _normalize_base_url(url: str) -> str:
-    return str(url or "").strip().rstrip("/")
+    return _platform.normalize_infobase_url(str(url or "").strip())
 
 
 def _load_rag_bindings() -> dict[str, str]:
@@ -724,6 +724,8 @@ async def _cleanup_failed_start_session(sess: SessionState, reason: str) -> None
         pass
     runtime.stop_xvfb(sess.xvfb_process)
     _cleanup_stale_session_processes(sess, reason)
+    if sess.data_dir.exists():
+        shutil.rmtree(sess.data_dir, ignore_errors=True)
     _SESSIONS.pop(sess.session_id, None)
     _persist_sessions()
 
@@ -1339,6 +1341,7 @@ async def start_session(
     command_parameter: Annotated[str, "Additional test-client /C value; when extra_args already contains /C, this value is appended with ';'"] = "",
 ) -> dict[str, Any]:
     """One-shot session factory: detect version, start infrastructure and connect the 1C test client."""
+    base_url = _platform.normalize_infobase_url(base_url)
     connection_mode = "auto"
     connection_value = ""
     initial_connection_mode = _normalize_connection_mode(connection_mode, base_url, base_url)
@@ -1453,12 +1456,12 @@ async def start_session(
 
     pipeline_info: dict[str, Any] = {"manager_pid": manager_proc.pid, "ws_url": ws_url, "log_dir": str(log_dir)}
 
-    # --- Built-in demo client ibsrv (second autonomous server for /TESTCLIENT) ---
-    # It is only needed for self-contained E2E sessions.  When the caller
-    # passed a target URL/file/server infobase, connect the test client to
-    # that target instead of creating an extra demo infobase.
-    if not (base_url or connection_value):
-        if ibsrv_available:
+    try:
+        # --- Built-in demo client ibsrv (second autonomous server for /TESTCLIENT) ---
+        # It is only needed for self-contained E2E sessions.  When the caller
+        # passed a target URL/file/server infobase, connect the test client to
+        # that target instead of creating an extra demo infobase.
+        if not (base_url or connection_value) and ibsrv_available:
             shared_client_id = os.getenv("ONEC_MCP_SHARED_CLIENT_BASE_ID") or "default"
             shared_client_root = Path(os.getenv("ONEC_MCP_SHARED_CLIENT_BASE_DIR", str(os_support.default_data_dir() / "shared-client-bases")))
             shared_client_db = shared_client_root / shared_client_id / "ib"
@@ -1503,7 +1506,7 @@ async def start_session(
                 "client_shared": True,
                 "client_shared_refcount": len(shared_client.owners),
             })
-        else:
+        elif not (base_url or connection_value):
             logging.info("ibsrv not found; preparing demo test-client in file-direct mode")
             runtime.create_file_infobase(sess.ibcmd, sess.client_db_path)
             client_cf_path = _ensure_cf_built(
@@ -1526,6 +1529,9 @@ async def start_session(
                 "client_base_url": str(sess.client_db_path),
                 "client_shared": False,
             })
+    except Exception:
+        await _cleanup_failed_start_session(sess, "demo test-client preparation failure")
+        raise
 
     connect_result: Any = None
     connect_base_url = base_url
@@ -1809,7 +1815,7 @@ def _is_web_base_url(base_url: str) -> bool:
 
 
 def _users_url_for_base_url(base_url: str) -> str:
-    parts = urlsplit(base_url.rstrip("/"))
+    parts = urlsplit(_platform.normalize_infobase_url(base_url).rstrip("/"))
     path = parts.path.rstrip("/") + "/ru_RU/e1cib/users"
     return urlunsplit((parts.scheme, parts.netloc, path, "", ""))
 
@@ -1971,7 +1977,7 @@ async def _connect_test_client_impl(
 ) -> Any:
     """Launch 1cv8c /TESTCLIENT inside the manager processor and connect."""
     await _wait_for_bridge_connected(sess, timeout=60.0)
-    r_base = base_url or sess.base_url
+    r_base = _platform.normalize_infobase_url(base_url or sess.base_url)
     r_value = connection_value or r_base
     mode = _normalize_connection_mode(connection_mode, r_value, r_base)
     r_user = username or sess.username
