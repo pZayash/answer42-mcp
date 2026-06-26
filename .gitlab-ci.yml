@@ -50,30 +50,12 @@ publish_pypi:
   script:
     - python -m twine upload --non-interactive -u __token__ -p "$PYPI_API_TOKEN" dist/*
 
-publish_mcp_registry:
-  image: alpine:3.20
-  stage: publish
-  needs: ["publish_pypi"]
-  rules:
-    - if: '$CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+.*$/'
-  before_script:
-    - apk add --no-cache curl jq tar
-    - |
-      curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
-  script:
-    - VERSION="${CI_COMMIT_TAG#v}"
-    - jq --arg v "$VERSION" '.version = $v | .packages[0].version = $v' server.json > server.tmp
-    - mv server.tmp server.json
-    - ./mcp-publisher login github --token "$MCP_GITHUB_TOKEN"
-    - ./mcp-publisher publish
-
 publish_mcp_registry_dns:
   image: alpine:3.20
   stage: publish
   needs: ["publish_pypi"]
   rules:
     - if: '$CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+.*$/ && $MCP_DNS_DOMAIN && $MCP_PRIVATE_KEY'
-      when: manual
   before_script:
     - apk add --no-cache curl jq tar
     - |
@@ -84,3 +66,4 @@ publish_mcp_registry_dns:
     - mv server.tmp server.json
     - ./mcp-publisher login dns --domain "$MCP_DNS_DOMAIN" --private-key "$MCP_PRIVATE_KEY"
     - ./mcp-publisher publish
+

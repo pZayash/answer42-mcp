@@ -1,6 +1,6 @@
 # Answer42
 
-<!-- mcp-name: io.github.prodoomman/answer42 -->
+<!-- mcp-name: io.gitlab.platform42/answer42 -->
 
 <p align="center">
   <img src="docs/assets/answer42-logo.png" alt="Answer42 logo" width="220">
@@ -307,14 +307,12 @@ pipx install 'answer42[screenshot,linux-window-control]'
 
 1. tag `vX.Y.Z` запускает unit/ruff/package checks;
 2. `publish_pypi` публикует wheel/sdist в PyPI через `PYPI_API_TOKEN`;
-3. `publish_mcp_registry` обновляет версию в `server.json` и публикует запись через `mcp-publisher` + `MCP_GITHUB_TOKEN`;
-4. альтернативный manual job `publish_mcp_registry_dns` поддерживает DNS-auth через `MCP_DNS_DOMAIN` + `MCP_PRIVATE_KEY`.
+3. `publish_mcp_registry_dns` обновляет версию в `server.json` и публикует запись через `mcp-publisher` + DNS-auth (`MCP_DNS_DOMAIN`, `MCP_PRIVATE_KEY`).
 
 Секреты GitLab CI:
 
 - `PYPI_API_TOKEN` — PyPI token для проекта `answer42`.
-- `MCP_GITHUB_TOKEN` — GitHub PAT для `mcp-publisher login github`.
-- Опционально: `MCP_DNS_DOMAIN`, `MCP_PRIVATE_KEY` для DNS-auth namespace.
+- `MCP_DNS_DOMAIN`, `MCP_PRIVATE_KEY` — DNS-auth namespace для MCP Registry. Имя `io.gitlab.platform42/answer42` соответствует reverse-DNS namespace `platform42.gitlab.io`; если будет выбран другой домен, нужно синхронно поменять `mcp-name` в README и `name` в `server.json`.
 
 Перед релизом проверьте, что `src/mcp_1c/assets/MCPTestManager.cf` и `src/mcp_1c/assets/MCPTestClient.cf` пересобраны из актуальных XML-исходников. Runtime использует XML+`scripts/build_cf.py` в git checkout, а в установленном PyPI wheel при отсутствии исходников копирует packaged `.cf` из `mcp_1c.assets`.
 

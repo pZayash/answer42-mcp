@@ -1,6 +1,6 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.prodoomman/answer42",
+  "name": "io.gitlab.platform42/answer42",
   "title": "Answer42",
   "description": "MCP-powered 1C:Enterprise UI automation through the test-client API.",
   "repository": {
