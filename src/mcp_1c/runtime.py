@@ -6,16 +6,14 @@ This module owns:
   * the autonomous 1C server (`ibsrv`) HTTP-gate lifecycle
   * thin-client (`1cv8c /WS ws://host:port`) launch in /TESTMANAGER mode
   * test-manager (thin client, `/TESTMANAGER`) launch and log wiring
-
-The test client itself is launched from inside the 1C manager processor
-(BSL `КомандаСистемы`/`НачатьЗапускПриложения`) so this module does not
-deal with 1cv8c /TESTCLIENT.
+  * test-client (`/TESTCLIENT`) argv construction and Python-side launch
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import shlex
 import shutil
 import socket
 import subprocess
@@ -122,7 +120,6 @@ def find_free_port(start: int = DEFAULT_WS_PORT, end: int | None = None) -> int:
 
 def start_xvfb(display: str, resolution: str = DEFAULT_DISPLAY_RES) -> subprocess.Popen:
     """Start Xvfb for the given display and return the Popen handle."""
-    num = display.lstrip(":")
     if os_support.IS_WINDOWS:
         raise RuntimeError("Xvfb is not available on Windows")
     xvfb_bin = shutil.which("Xvfb") or "/usr/bin/Xvfb"
@@ -534,3 +531,106 @@ def start_thin_test_manager_file_direct(
     """Start the 1C test-manager directly against a file infobase via /F."""
     argv = build_thin_test_manager_file_argv(onec_path, db_path, websocket_url)
     return _start_thin_test_manager_argv(argv, log_dir=log_dir, display=display)
+
+
+def _split_extra_args(value: str) -> list[str]:
+    value = (value or "").strip()
+    if not value:
+        return []
+    try:
+        parts = shlex.split(value, posix=not os_support.IS_WINDOWS)
+    except ValueError:
+        parts = value.split()
+    return [part[1:-1] if len(part) >= 2 and part[0] == part[-1] == '"' else part for part in parts]
+
+
+def _merge_command_parameter(argv: list[str], command_parameter: str) -> list[str]:
+    command_parameter = (command_parameter or "").strip()
+    if not command_parameter:
+        return argv
+    lowered = [item.lower() for item in argv]
+    if "/c" in lowered:
+        index = lowered.index("/c")
+        if index + 1 < len(argv):
+            argv[index + 1] = f"{argv[index + 1]};{command_parameter}"
+        else:
+            argv.append(command_parameter)
+        return argv
+    return [*argv, "/C", command_parameter]
+
+
+def build_test_client_argv(
+    onec_path: str,
+    *,
+    connection_mode: str,
+    connection_value: str,
+    port: int,
+    username: str = "",
+    password: str = "",
+    extra_args: str = "",
+    execute: str = "",
+    command_parameter: str = "",
+    out_log: Path | str | None = None,
+) -> list[str]:
+    """Compose argv for 1cv8c /TESTCLIENT without going through a shell."""
+    mode = connection_mode.lower()
+    if mode in {"ws", "http", "url"}:
+        connection_arg = "/WS"
+    elif mode == "server":
+        connection_arg = "/S"
+    elif mode in {"file-direct", "direct-file", "file_direct", "direct_file"}:
+        connection_arg = "/F"
+    else:
+        raise ValueError(f"Unsupported test-client connection mode: {connection_mode!r}")
+
+    argv = [
+        onec_path,
+        "ENTERPRISE",
+        connection_arg,
+        connection_value,
+        "/Lru",
+        "/VLru_RU",
+        "/DisableStartupMessages",
+        "/DisableStartupDialogs",
+        "/DisableUnrecoverableErrorMessage",
+    ]
+    if out_log:
+        argv.extend(["/Out", str(out_log)])
+    argv.extend(_split_extra_args(extra_args))
+    if execute:
+        argv.extend(["/Execute", execute])
+    argv = _merge_command_parameter(argv, command_parameter)
+    argv.extend(["/TESTCLIENT", f"-TPort{port}"])
+    if username:
+        argv.extend(["/N", username, "/P", password])
+    return argv
+
+
+def start_test_client(
+    argv: list[str],
+    log_dir: Path,
+    display: str = "",
+    log_name: str = "test_client_stdout.log",
+) -> subprocess.Popen:
+    """Start 1C /TESTCLIENT from Python so argv quoting and PID are controlled."""
+    if not Path(argv[0]).exists():
+        raise FileNotFoundError(f"1cv8c (thin) not found: {argv[0]}")
+    log_dir.mkdir(parents=True, exist_ok=True)
+    stdout_log_path = log_dir / log_name
+    log_handle = open(stdout_log_path, "ab", buffering=0)
+    LOGGER.info("Starting test client: %s", " ".join(argv))
+    env = os.environ.copy()
+    if display:
+        env["DISPLAY"] = display
+    proc = subprocess.Popen(
+        argv,
+        stdout=log_handle,
+        stderr=log_handle,
+        stdin=subprocess.DEVNULL,
+        **os_support.subprocess_creation_kwargs(),
+        env=env,
+    )
+    proc.answer42_stdout_log_path = str(stdout_log_path)  # type: ignore[attr-defined]
+    proc.answer42_argv = argv  # type: ignore[attr-defined]
+    LOGGER.info("Test client launched (pid=%s); stdout=%s", proc.pid, stdout_log_path)
+    return proc
