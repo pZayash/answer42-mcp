@@ -6,9 +6,68 @@
 
 1. Определите ОС и способ запуска агента.
 2. Убедитесь, что доступна Python 3.11+.
-3. Убедитесь, что установлена платформа 1С:Предприятие 8.3.27+.
+3. Убедитесь, что установлена поддерживаемая платформа 1С:Предприятие: **8.3.27+ или 8.5+**.
 4. Для Linux нужен GUI/X11 или Xvfb. Headless-сервер без X11 не подходит для скриншотов и запуска GUI-клиента 1С.
 5. Для Windows запускайте Answer42 только из интерактивной desktop-сессии пользователя. Не используйте Windows service, заблокированный RDP-сеанс или неинтерактивный background-runner для UI automation.
+
+### Где искать установленную платформу 1С
+
+Агент перед установкой/запуском должен проверить каталоги платформы и наличие бинарников.
+
+Обязательные компоненты для штатной работы Answer42:
+
+- `1cv8c` / `1cv8c.exe` — тонкий клиент для `/TESTMANAGER` и `/TESTCLIENT`;
+- `ibcmd` / `ibcmd.exe` — создание файловой базы менеджера и сборка `.cf` из XML.
+
+Желательные компоненты:
+
+- `ibsrv` / `ibsrv.exe` — локальный автономный сервер. Если его нет, Answer42 использует fallback `/F`, но web/ws сценарии и диагностика стабильнее с `ibsrv`.
+- `1cv8` / `1cv8.exe` — нужен только как fallback для сборки CF через DESIGNER, если `ibcmd` недоступен.
+
+Проверяйте каталоги:
+
+Linux:
+
+```bash
+/opt/1cv8/x86_64/<version>/
+/opt/1cv8/i386/<version>/
+```
+
+Windows:
+
+```text
+C:\Program Files\1cv8\<version>\bin\
+C:\Program Files (x86)\1cv8\<version>\bin\
+```
+
+macOS, если платформа установлена вручную:
+
+```text
+/Applications/1cv8/<version>/
+/opt/1cv8/<version>/
+```
+
+Если автоопределение не подходит, задайте полный путь к `bin`/каталогу платформы:
+
+```bash
+export ONEC_PLATFORM_DIR=/opt/1cv8/x86_64/8.5.1.1150
+```
+
+```powershell
+$env:ONEC_PLATFORM_DIR="C:\Program Files\1cv8\8.5.1.1150\bin"
+```
+
+Минимальная проверка версии/компонентов:
+
+```bash
+find /opt/1cv8 -maxdepth 4 -type f \( -name 1cv8c -o -name ibcmd -o -name ibsrv \) 2>/dev/null
+/opt/1cv8/x86_64/8.5.1.1150/1cv8c -Version
+```
+
+```powershell
+Get-ChildItem 'C:\Program Files\1cv8','C:\Program Files (x86)\1cv8' -Recurse -Filter 1cv8c.exe -ErrorAction SilentlyContinue
+& 'C:\Program Files\1cv8\8.5.1.1150\bin\1cv8c.exe' -Version
+```
 
 ## 2. Установите пакет
 
