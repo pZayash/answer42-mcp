@@ -87,6 +87,23 @@ def test_platform_version_from_windows_bin_dir():
     assert onec_platform.platform_version_from_dir(Path("/opt/1cv8/x86_64/8.5.1.1150")) == "8.5.1.1150"
 
 
+def test_normalize_infobase_url_removes_language_and_adds_trailing_slash():
+    assert onec_platform.normalize_infobase_url("https://example.invalid/ib/123") == "https://example.invalid/ib/123/"
+    assert onec_platform.normalize_infobase_url("https://example.invalid/ib/123/") == "https://example.invalid/ib/123/"
+    assert onec_platform.normalize_infobase_url("https://example.invalid/ib/123/ru_RU/") == "https://example.invalid/ib/123/"
+
+
+def test_platform_candidate_requires_ibcmd(tmp_path):
+    platform = tmp_path / "8.5.1.1236" / "bin"
+    platform.mkdir(parents=True)
+    (platform / onec_platform.os_support.executable_name("1cv8c")).write_text("", encoding="utf-8")
+
+    assert not onec_platform._is_platform_candidate(platform)
+
+    (platform / onec_platform.os_support.executable_name("ibcmd")).write_text("", encoding="utf-8")
+    assert onec_platform._is_platform_candidate(platform)
+
+
 def test_placeholder_password_detection():
     assert _is_placeholder_password("***")
     assert _is_placeholder_password("********")
