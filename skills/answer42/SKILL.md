@@ -31,10 +31,10 @@ description: "Работа с MCP Answer42 для 1С UI automation"
 1. Проверь, что MCP-сервер `Answer42` установлен и доступен.
 2. Посмотри активные/восстановимые сессии через `sessions_list`; не плодить сессии с тем же стендом без причины.
 3. Запусти сессию через `start_session` (one-shot). Low-level `launch_manager` использовать только для диагностики/разработки bridge.
-4. Для подключения укажи корректный target:
-   - web/ws база: `base_url="https://..."` или `connection_mode="ws"`;
-   - серверная база: `connection_value="server/infobase"` или legacy `base_url="server/infobase"` (auto определит `/S`);
-   - файловая база: каталог с `1Cv8.1CD`, auto определит file; если `ibsrv` недоступен — использовать `file-direct` (`/F`).
+4. Для подключения укажи только target в `base_url`; режим запуска клиента тестирования автоопределяется:
+   - `https://...` / `http://...` → web/ws;
+   - `server/infobase` → серверная база `/S`;
+   - каталог с `1Cv8.1CD` → файловая база через `ibsrv`, а если `ibsrv` недоступен — внутренний `file-direct` (`/F`).
 5. Передавай логин/пароль из защищённого источника, а не из репозитория. Предпочтительно один раз сохранить их через `credentials_save(url, username, password)`, затем вызывать `start_session` без `username`/`password`; окно тест-клиента максимизируется автоматически внутри tool-call.
 6. Работай только через tools Answer42; не кликай X11/WinAPI руками.
 7. Скриншоты допускаются системно через `screenshot`/`recording_*`.
@@ -54,7 +54,7 @@ description: "Работа с MCP Answer42 для 1С UI automation"
 - Не закрывай автоматически сложные диалоги с несколькими кнопками (`OK`, `Restart`, `Finish`, `Yes/No/Cancel`). Допустимо автозакрытие только простых предупреждений/ошибок с одной кнопкой закрытия.
 - Для динамических списков предпочитай `table_move_row`, `table_current_row`, `table_selected_rows`, `table_cell_text`; `table_rows` использует навигационный fallback, но на больших списках может быть дорогим.
 - Не заявляй выполнение UI-задачи без реального состояния/скриншота/PDF evidence.
-- `base_url` — только web URL, если начинается с `http://` или `https://`. Строки вида `server/infobase` — серверные базы (`/S`), файловые базы — каталог на диске с `1Cv8.1CD` (`/F` или через `ibsrv`).
+- `base_url` — единый target подключения. `http(s)` трактуется как web/ws URL, строки вида `server/infobase` — как серверные базы (`/S`), каталоги с `1Cv8.1CD` — как файловые базы (`/F` или через `ibsrv`). Не передавай явные параметры режима запуска клиента тестирования.
 - Если ошибка авторизации возникла при пароле из одних звёздочек (`***`, `********`), явно сообщи пользователю, что был передан плейсхолдер вместо реального пароля; попроси указать настоящий пароль или сохранить корректные креды через `credentials_save()`.
 - Если кластер 1С возвращает короткое имя рабочего сервера (`server_addr=...`), оно должно резолвиться и быть доступным по TCP с хоста Answer42; это не проблема ws/http.
 
@@ -77,8 +77,7 @@ active_window()
 
 ```text
 start_session(
-  connection_mode="server",
-  connection_value="server/infobase",
+  base_url="server/infobase",
   username="<USERNAME>",
   password="<PASSWORD>",
   version="8.5.1.1150"
@@ -89,15 +88,14 @@ start_session(
 
 ```text
 start_session(
-  connection_mode="file-direct",
-  connection_value="/path/to/file-infobase",
+  base_url="/path/to/file-infobase",
   username="<USERNAME>",
   password="<PASSWORD>",
   version="8.5.1.1150"
 )
 ```
 
-`connection_mode="auto"` выбирает: `http(s)` → `ws`, каталог/`1Cv8.1CD` → `file`, прочее непустое `server/infobase` → `server`.
+Режим клиента тестирования выбирается автоматически по `base_url`: `http(s)` → `ws`, каталог/`1Cv8.1CD` → `file`, прочее непустое `server/infobase` → `server`.
 
 ## Навигация
 
