@@ -73,44 +73,37 @@ class CredentialsStore:
         return None
 
     def list_entries(self) -> list[dict[str, str]]:
-        """Return entries with passwords redacted (safe for logging)."""
-        return [
-            {"url": e["url"], "username": e["username"], "password": "***"}
-            for e in self._entries
-        ]
+        """Return credential URL patterns without usernames or passwords."""
+        return [{"url": e["url"]} for e in self._entries]
 
-    def upsert(self, url: str, username: str, password: str) -> dict[str, str]:
+    def upsert(self, url: str, username: str, password: str) -> bool:
         """Add or update a credential entry for *url*.
 
-        Returns the previous entry (with password redacted) if it existed,
-        or ``{"url": url, "username": "", "password": "***"}`` for a new entry.
+        Returns True when an existing entry was updated, False when a new entry
+        was created.  Usernames and passwords are intentionally not returned.
         """
         url = url.rstrip("/")
-        previous: dict[str, str] | None = None
+        updated = False
         for entry in self._entries:
             if entry["url"].rstrip("/") == url:
-                previous = {"url": entry["url"], "username": entry["username"], "password": "***"}
                 entry["username"] = username
                 entry["password"] = password
+                updated = True
                 break
         else:
             self._entries.append({"url": url, "username": username, "password": password})
         self._save()
-        return previous or {"url": url, "username": "", "password": "***"}
+        return updated
 
-    def remove(self, url: str) -> dict[str, str] | None:
-        """Remove the credential entry for *url* (exact match).
-
-        Returns the removed entry (with password redacted) or None.
-        """
+    def remove(self, url: str) -> bool:
+        """Remove the credential entry for *url* (exact match)."""
         url = url.rstrip("/")
         for i, entry in enumerate(self._entries):
             if entry["url"].rstrip("/") == url:
-                removed = {"url": entry["url"], "username": entry["username"], "password": "***"}
                 del self._entries[i]
                 self._save()
-                return removed
-        return None
+                return True
+        return False
 
     def reload(self) -> None:
         """Re-read the credentials file (useful after external edits)."""
