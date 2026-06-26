@@ -79,6 +79,39 @@ class CredentialsStore:
             for e in self._entries
         ]
 
+    def upsert(self, url: str, username: str, password: str) -> dict[str, str]:
+        """Add or update a credential entry for *url*.
+
+        Returns the previous entry (with password redacted) if it existed,
+        or ``{"url": url, "username": "", "password": "***"}`` for a new entry.
+        """
+        url = url.rstrip("/")
+        previous: dict[str, str] | None = None
+        for entry in self._entries:
+            if entry["url"].rstrip("/") == url:
+                previous = {"url": entry["url"], "username": entry["username"], "password": "***"}
+                entry["username"] = username
+                entry["password"] = password
+                break
+        else:
+            self._entries.append({"url": url, "username": username, "password": password})
+        self._save()
+        return previous or {"url": url, "username": "", "password": "***"}
+
+    def remove(self, url: str) -> dict[str, str] | None:
+        """Remove the credential entry for *url* (exact match).
+
+        Returns the removed entry (with password redacted) or None.
+        """
+        url = url.rstrip("/")
+        for i, entry in enumerate(self._entries):
+            if entry["url"].rstrip("/") == url:
+                removed = {"url": entry["url"], "username": entry["username"], "password": "***"}
+                del self._entries[i]
+                self._save()
+                return removed
+        return None
+
     def reload(self) -> None:
         """Re-read the credentials file (useful after external edits)."""
         self._load()
@@ -86,6 +119,15 @@ class CredentialsStore:
     # ------------------------------------------------------------------
     # internal
     # ------------------------------------------------------------------
+
+    def _save(self) -> None:
+        """Persist entries to the JSON file atomically."""
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self._path.with_suffix(self._path.suffix + ".tmp")
+        tmp.write_text(json.dumps({"entries": self._entries}, indent=2, ensure_ascii=False),
+                       encoding="utf-8")
+        tmp.replace(self._path)
+        LOGGER.info("Saved %d credential entries to %s", len(self._entries), self._path)
 
     def _load(self) -> None:
         if not self._path.exists():

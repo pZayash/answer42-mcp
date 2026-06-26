@@ -2,7 +2,7 @@ import asyncio
 from pathlib import Path, PureWindowsPath
 
 from mcp_1c import platform as onec_platform
-from mcp_1c.server import _normalize_connection_mode, mcp
+from mcp_1c.server import _is_placeholder_password, _normalize_connection_mode, mcp
 
 
 EXPECTED_NEW_TOOLS = {
@@ -69,11 +69,21 @@ def test_selected_new_tool_schemas():
     assert tools["decoration_click_link"].inputSchema["properties"]["presentation"]["default"] == ""
     assert tools["start_session"].inputSchema["properties"]["connection_mode"]["default"] == "auto"
     assert tools["start_session"].inputSchema["properties"]["connection_value"]["default"] == ""
+    assert tools["credentials_save"].inputSchema["required"] == ["url", "username", "password"]
+    assert tools["credentials_remove"].inputSchema["required"] == ["url"]
 
 
 def test_platform_version_from_windows_bin_dir():
     assert onec_platform.platform_version_from_dir(PureWindowsPath(r"C:\\Program Files\\1cv8\\8.5.1.1150\\bin")) == "8.5.1.1150"
     assert onec_platform.platform_version_from_dir(Path("/opt/1cv8/x86_64/8.5.1.1150")) == "8.5.1.1150"
+
+
+def test_placeholder_password_detection():
+    assert _is_placeholder_password("***")
+    assert _is_placeholder_password("********")
+    assert not _is_placeholder_password("")
+    assert not _is_placeholder_password("real***pass")
+    assert not _is_placeholder_password("password")
 
 
 def test_connection_mode_normalization(tmp_path):
