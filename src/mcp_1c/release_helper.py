@@ -20,17 +20,19 @@ def _git_output(args: list[str]) -> str:
     return subprocess.check_output(["git", *args], text=True).strip()
 
 
-def _replace_version(pyproject: Path, version: str) -> None:
+def _replace_version(pyproject: Path, version: str) -> bool:
     text = pyproject.read_text(encoding="utf-8")
-    new_text, count = re.subn(
-        r'(?m)^version\s*=\s*"[^"]+"\s*$',
-        f'version = "{version}"',
-        text,
-        count=1,
-    )
+    pattern = r'(?m)^version\s*=\s*"([^"]+)"\s*$'
+    match = re.search(pattern, text)
+    if not match:
+        raise RuntimeError(f"Could not find project.version in {pyproject}")
+    if match.group(1) == version:
+        return False
+    new_text, count = re.subn(pattern, f'version = "{version}"', text, count=1)
     if count != 1:
-        raise RuntimeError(f"Could not find exactly one project.version in {pyproject}")
+        raise RuntimeError(f"Could not replace project.version in {pyproject}")
     pyproject.write_text(new_text, encoding="utf-8")
+    return True
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -62,13 +64,17 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(f"Tag already exists: {tag}")
 
     print(f"Bumping {pyproject} to {version}")
+    changed = True
     if not args.dry_run:
-        _replace_version(pyproject, version)
+        changed = _replace_version(pyproject, version)
     else:
         print(f"+ update {pyproject}: version = {version!r}")
 
-    _run(["git", "add", str(pyproject.relative_to(repo_root))], dry_run=args.dry_run)
-    _run(["git", "commit", "-m", f"Release {tag}"], dry_run=args.dry_run)
+    if changed:
+        _run(["git", "add", str(pyproject.relative_to(repo_root))], dry_run=args.dry_run)
+        _run(["git", "commit", "-m", f"Release {tag}"], dry_run=args.dry_run)
+    else:
+        print(f"Version is already {version}; tagging current HEAD without a version commit.")
     _run(["git", "tag", "-a", tag, "-m", f"Release {tag}"], dry_run=args.dry_run)
     if not args.no_push:
         _run(["git", "push", args.remote, args.branch], dry_run=args.dry_run)
