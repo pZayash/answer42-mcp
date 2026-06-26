@@ -17,7 +17,6 @@ PAGES = [
     ("installation.html", DOCS / "installation.md", "Установка"),
     ("agent-installation.html", DOCS / "agent-installation.md", "Инструкция для AI-агентов"),
     ("architecture.html", DOCS / "architecture.md", "Архитектура"),
-    ("publishing.html", DOCS / "publishing.md", "Публикация"),
 ]
 
 NAV = [
@@ -25,7 +24,6 @@ NAV = [
     ("installation.html", "Установка"),
     ("agent-installation.html", "AI-агентам"),
     ("architecture.html", "Архитектура"),
-    ("publishing.html", "Публикация"),
 ]
 
 CSS = """
@@ -75,8 +73,17 @@ def convert_inline(text: str) -> str:
     text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", lambda m: stash(f'<a href="{html.escape(m.group(2), quote=True)}">{m.group(1)}</a>'), text)
     text = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", text)
     text = re.sub(r"(?<!\*)\*([^*]+)\*(?!\*)", r"<em>\1</em>", text)
-    for i, value in enumerate(placeholders):
-        text = text.replace(f"\u0000{i}\u0000", value)
+    # Some placeholders can be nested, for example Markdown links with code-formatted text:
+    # [`file.md`](file.md). Resolve repeatedly until no marker remains.
+    for _ in range(3):
+        changed = False
+        for i, value in enumerate(placeholders):
+            marker = f"\u0000{i}\u0000"
+            if marker in text:
+                text = text.replace(marker, value)
+                changed = True
+        if not changed:
+            break
     return text
 
 
@@ -252,6 +259,12 @@ def main() -> None:
         if not src.exists():
             continue
         markdown = src.read_text(encoding="utf-8")
+        markdown = re.sub(
+            r'<p\s+align="center">\s*<img\s+src="([^"]+)"\s+alt="([^"]*)"\s+width="([^"]+)"\s*>\s*</p>',
+            r'![\2](\1)',
+            markdown,
+            flags=re.S,
+        )
         body = markdown_to_html(markdown)
         (PUBLIC / out_name).write_text(page_html(title, body), encoding="utf-8")
     print(f"Built {len(list(PUBLIC.glob('*.html')))} pages into {PUBLIC}")
