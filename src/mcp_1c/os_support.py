@@ -6,6 +6,7 @@ higher-level MCP tools do not import POSIX-only modules on Windows.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import subprocess
@@ -147,6 +148,75 @@ def kill_process_tree(proc: subprocess.Popen | None, label: str, logger: logging
         return
     except subprocess.TimeoutExpired:
         log.error("Failed to stop %s (pid=%s)", label, proc.pid)
+
+
+def kill_processes_by_command_substrings(
+    substrings: list[str],
+    label: str,
+    logger: logging.Logger | None = None,
+) -> None:
+    """Best-effort cleanup of stale child processes matching command-line substrings."""
+    patterns = [s for s in substrings if s]
+    if not patterns:
+        return
+    log = logger or logging.getLogger(__name__)
+    if IS_WINDOWS:
+        patterns_json = json.dumps(patterns, ensure_ascii=False)
+        script = r"""
+$patterns = ConvertFrom-Json @'
+%s
+'@
+$own = %d
+Get-CimInstance Win32_Process | Where-Object {
+  if ($_.ProcessId -eq $own -or -not $_.CommandLine) { return $false }
+  $cmd = $_.CommandLine
+  foreach ($p in $patterns) {
+    if ($p -and $cmd -like ('*' + $p + '*')) { return $true }
+  }
+  return $false
+} | ForEach-Object {
+  try { Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop } catch {}
+}
+""" % (patterns_json, os.getpid())
+        try:
+            subprocess.run(
+                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=15,
+            )
+            log.info("Requested cleanup of stale %s processes by command substrings", label)
+        except Exception as exc:
+            log.debug("Failed to cleanup stale %s processes: %s", label, exc)
+        return
+
+    try:
+        completed = subprocess.run(
+            ["pgrep", "-f", "|".join(patterns)],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except Exception as exc:
+        log.debug("pgrep failed for stale %s cleanup: %s", label, exc)
+        return
+    own = {os.getpid(), os.getppid()}
+    for raw_pid in completed.stdout.split():
+        try:
+            pid = int(raw_pid)
+        except ValueError:
+            continue
+        if pid in own:
+            continue
+        try:
+            os.kill(pid, 9)
+            log.info("Killed stale %s process pid=%s", label, pid)
+        except ProcessLookupError:
+            pass
+        except Exception as exc:
+            log.debug("Failed to kill stale %s process pid=%s: %s", label, pid, exc)
 
 
 def executable_name(base: str) -> str:

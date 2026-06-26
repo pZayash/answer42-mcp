@@ -682,6 +682,52 @@ def _load_persisted_sessions() -> dict[str, SessionState]:
     return result
 
 
+def _session_process_substrings(sess: SessionState) -> list[str]:
+    return [
+        str(sess.data_dir),
+        str(sess.server_data_dir),
+        str(sess.client_server_data_dir),
+        str(sess.file_client_server_data_dir),
+        sess.bridge.url,
+        f"-TPort{sess.testclient_port}",
+        f"-TPort {sess.testclient_port}",
+        f"TPort{sess.testclient_port}",
+    ]
+
+
+def _cleanup_stale_session_processes(sess: SessionState, reason: str) -> None:
+    logging.info("Cleaning stale 1C processes for session %s: %s", sess.session_id, reason)
+    os_support.kill_processes_by_command_substrings(
+        _session_process_substrings(sess),
+        f"Answer42 session {sess.session_id}",
+        logging.getLogger(__name__),
+    )
+
+
+async def _cleanup_failed_start_session(sess: SessionState, reason: str) -> None:
+    logging.info("Cleaning failed start_session %s: %s", sess.session_id, reason)
+    try:
+        await sess.bridge.call("disconnect_test_client", {})
+    except Exception:
+        pass
+    for rt, manager_label, server_label in (
+        (sess.runtime, "test-manager", "ibsrv"),
+        (sess.client_runtime, "test-manager-client", "ibsrv-client"),
+        (sess.file_client_runtime, "test-manager-file-client", "ibsrv-file-client"),
+    ):
+        if rt is not None:
+            runtime.kill_process(rt.manager_process, manager_label)
+            runtime.kill_process(rt.server_process, server_label)
+    try:
+        await sess.bridge.stop()
+    except Exception:
+        pass
+    runtime.stop_xvfb(sess.xvfb_process)
+    _cleanup_stale_session_processes(sess, reason)
+    _SESSIONS.pop(sess.session_id, None)
+    _persist_sessions()
+
+
 async def _ensure_restored_session(session_id: str = DEFAULT_SESSION) -> SessionState:
     if session_id in _SESSIONS:
         return _SESSIONS[session_id]
@@ -1332,6 +1378,7 @@ async def start_session(
             data_dir=data_dir, base_url=base_url, username=username, password=password
         )
         sess.idle_timeout_seconds = max(0, int(idle_timeout_minutes)) * 60
+        _cleanup_stale_session_processes(sess, "before start_session")
         if base_url:
             bound_snapshot = _snapshot_for_base_url(base_url)
             if bound_snapshot:
@@ -1355,14 +1402,18 @@ async def start_session(
     )
     runtime_state.log_dir = log_dir
 
-    with _port_allocation_lock():
-        runtime.create_file_infobase(sess.ibcmd, sess.db_path)
-        cf_path = _ensure_cf_built(
-            runtime.DEFAULT_CF_BUILT,
-            src_dir="src/cf",
-            platform_dir=platform_dir,
-        )
-        runtime.load_configuration(sess.ibcmd, sess.db_path, cf_path)
+    try:
+        with _port_allocation_lock():
+            runtime.create_file_infobase(sess.ibcmd, sess.db_path)
+            cf_path = _ensure_cf_built(
+                runtime.DEFAULT_CF_BUILT,
+                src_dir="src/cf",
+                platform_dir=platform_dir,
+            )
+            runtime.load_configuration(sess.ibcmd, sess.db_path, cf_path)
+    except Exception:
+        await _cleanup_failed_start_session(sess, "infobase preparation failure")
+        raise
 
     ibsrv_available = Path(sess.ibsrv).exists()
     sess.runtime = runtime_state
@@ -1395,7 +1446,9 @@ async def start_session(
         runtime_state.manager_process = manager_proc
         await _wait_for_bridge_connected(sess, timeout=60.0)
     except Exception as exc:
-        raise _manager_failure_diagnostics(sess, exc) from exc
+        diagnostic_error = _manager_failure_diagnostics(sess, exc)
+        await _cleanup_failed_start_session(sess, "manager startup failure")
+        raise diagnostic_error from exc
     _persist_sessions()
 
     pipeline_info: dict[str, Any] = {"manager_pid": manager_proc.pid, "ws_url": ws_url, "log_dir": str(log_dir)}
@@ -1496,7 +1549,9 @@ async def start_session(
             target_mode = _normalize_connection_mode(
                 connect_connection_mode, connect_connection_value or connect_base_url, connect_base_url,
             )
-            raise _client_failure_diagnostics(sess, enriched, target_mode) from exc
+            diagnostic_error = _client_failure_diagnostics(sess, enriched, target_mode)
+            await _cleanup_failed_start_session(sess, "test-client startup failure")
+            raise diagnostic_error from exc
         _auto_maximize_test_client_result(connect_result, sess.display)
 
     if sess.idle_timeout_seconds > 0:
@@ -1551,6 +1606,8 @@ async def _stop_session_impl(session_id: str = DEFAULT_SESSION, clean_data: bool
         logging.warning("stop_session: bridge.stop failed: %s", exc)
     runtime.stop_xvfb(sess.xvfb_process)
     stopped.append("xvfb")
+    _cleanup_stale_session_processes(sess, "stop_session")
+    stopped.append("stale-processes")
     if clean_data and sess.data_dir.exists():
         shutil.rmtree(sess.data_dir, ignore_errors=True)
         stopped.append("data_dir")

@@ -118,6 +118,10 @@ def test_extract_error_lines_prefers_errors():
     assert _extract_error_lines(text) == "Ошибка запуска\nERROR detail"
 
 
+def test_cp866_process_output_decoding():
+    assert runtime._decode_process_output("Ошибка исключительной блокировки".encode("cp866")) == "Ошибка исключительной блокировки"
+
+
 def test_thin_client_ws_url_is_unquoted():
     assert runtime.build_thin_client_ws_url("127.0.0.1", 8314) == "http://127.0.0.1:8314"
 
