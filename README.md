@@ -1,7 +1,7 @@
 # Answer42
 
 <p align="center">
-  <img src="docs/assets/answer42-logo.png" alt="Answer42 logo" width="220">
+  <img src="https://gitlab.com/platform42/answer42-mcp/-/raw/beta/docs/assets/answer42-logo.png" alt="Answer42 logo" width="220">
 </p>
 
 **Answer42** — MCP-инструмент для интерактивного управления UI **1С:Предприятия** через клиент тестирования. Он позволяет AI-агенту открывать формы 1С, нажимать кнопки, заполнять поля, выбирать ссылки из форм выбора, работать с таблицами, динамическими списками и табличными документами.
@@ -51,6 +51,48 @@ start_session(
 `start_session` определяет версию 1С по `base_url`, поднимает инфраструктуру Answer42 (на Linux — Xvfb, если нужен headless; на Windows — интерактивная desktop-сессия), свободные порты, WebSocket bridge, файловую базу менеджера и test-manager. Если доступны серверные компоненты 1С (`ibsrv`), менеджер и встроенная тестовая база публикуются через автономный сервер; если доступен только тонкий клиент и `ibcmd`, Answer42 автоматически использует fallback `file-direct` (`/F`) для файловых баз менеджера и клиента. После `idle_timeout_minutes` минут неактивности сессия автоматически завершается; значение по умолчанию — 60 минут. Для запуска клиента можно передать `extra_args`, `execute` (параметр командной строки `/Execute`) и `command_parameter` (параметр `/C`); если `/C` уже указан в `extra_args`, значения склеиваются через `;`.
 
 Логин/пароль рекомендуется **не передавать явно**: `start_session` умеет брать их из локального credentials-файла по `base_url`. Параметры `username`/`password` остаются в API для разовых сценариев и обратной совместимости, но при передаче в MCP-вызове они видны вызывающему агенту в аргументах tool-call.
+
+## Установка skills
+
+PyPI-пакет не записывает agent skills в пользовательские каталоги автоматически. После установки Answer42 поставьте bundled skills отдельной командой:
+
+```bash
+answer42 install-skills
+```
+
+По умолчанию команда устанавливает `answer42` и `answer42-rag` в OpenClaw:
+
+```text
+~/.openclaw/workspace/skills
+```
+
+Другие агенты и варианты установки:
+
+```bash
+answer42 install-skills --agent claude
+answer42 install-skills --agent codex
+answer42 install-skills --agent opencode
+answer42 install-skills --agent pi
+answer42 install-skills --agent hermes
+answer42 install-skills --agent all
+answer42 install-skills --target-dir /path/to/skills
+answer42 install-skills --list-agents
+answer42 install-skills --dry-run --agent all
+```
+
+Для агентов без стабильного стандарта skill-директорий (`codex`, `opencode`, `pi`, `hermes`) presets best-effort. Если конкретная установка использует другой путь, укажите `--target-dir` явно.
+
+## Инструкция для AI-агентов
+
+Если вы AI-агент и пользователь просит установить Answer42 и skills, используйте отдельную инструкцию: [`docs/agent-installation.md`](docs/agent-installation.md).
+
+Коротко:
+
+1. установите пакет через `pipx` или virtualenv;
+2. выполните `answer42 install-skills`;
+3. подготовьте `ONEC_MCP_CREDENTIALS_FILE` вне репозитория;
+4. зарегистрируйте MCP-сервер в агентском клиенте;
+5. проверьте установку через `credentials_check`, затем smoke-сессию `start_session` → `active_window` → `stop_session`.
 
 ## Безопасное хранение логинов и паролей
 
@@ -195,88 +237,6 @@ E2E_PARALLEL=1 E2E_SESSION_ID=e2e-split python3 scripts/e2e_stable.py
 
 `start_session` также переиспользует общий автономный сервер для одинаковой файловой базы. Последний `stop_session` освобождает refcount и завершает shared `ibsrv`.
 
-## MCP-инструменты
-
-### Жизненный цикл
-
-- `start_session(...)` — единый запуск: определение версии по `base_url`, Xvfb на Linux при необходимости, свободные порты, bridge, файловая база менеджера, `ibsrv` или fallback `file-direct`, test-manager и подключение клиента тестирования. Если `username`/`password` не переданы, берёт их из credentials-файла по `base_url`. Поддерживает `extra_args`, `execute` → `/Execute`, `command_parameter` → `/C`; несколько частей `/C` объединяются через `;`.
-- `session_status(session_id)` — состояние bridge, runtime, клиента тестирования и RAG snapshot.
-- `stop_session(session_id, clean_data)` — отключение клиента тестирования и остановка всех процессов, Xvfb и bridge.
-
-### Автоматизация UI
-
-- `active_window()` — активное окно тестируемого приложения через `ТестируемоеПриложение.ПолучитьАктивноеОкно()`.
-- `windows_list(max_depth)` — список окон тестируемого приложения; если открыто два окна клиента, возвращает оба, потому что читает подчинённые объекты `ТестируемоеПриложение`, а не окна менеджера тестирования.
-- `activate_window(index, title, name)` — переключить активное окно по индексу, заголовку или имени.
-- `goto_start_page()`, `goto_previous_window()`, `goto_next_window()` — навигация основного окна: `ПерейтиКНачальнойСтранице`, `ПерейтиКПредыдущемуОкну`, `ПерейтиКСледующемуОкну`.
-- `ui_tree(max_depth, include_rag_types, include_hidden, rag_snapshot)` — дерево UI с `visible`, `available`, `enabled`, `read_only`; скрытые элементы и неактивные страницы page-group по умолчанию опускаются, `include_hidden=true` возвращает полное дерево. RAG-типы добавляются, когда доступен индекс метаданных.
-- `command_bar()` — диагностическая информация по командной панели, когда она доступна API тест-клиента.
-- `current_element()` — диагностическая информация по текущему элементу, когда она доступна API тест-клиента.
-- `find_object(name, title, type)` — найти объект в дереве UI.
-- `activate_object(name, title, type)` — активировать объект.
-- `open_navigation_link(navigation_link)` — открыть навигационную ссылку `e1cib/...`.
-- `click_button(name, search_by_title)` — нажать кнопку.
-- `set_field_value(field_name, value, search_by_title)` — установить значение поля.
-- `create_new_item()` — создать новый элемент.
-- `save_form()` — сохранить форму.
-- `close_form()` — закрыть форму.
-- `screenshot(path)` — скриншот экрана.
-
-### Таблицы и табличные части
-
-- `table_rows(...)` — строки таблицы.
-- `table_find_row(...)` — найти строку по подстроке.
-- `table_goto_row(...)` — перейти к строке.
-- `table_current_row(...)` — текущая строка.
-- `table_selected_rows(...)` — выделенные строки.
-- `table_set_field(...)` — установить значение в ячейке.
-- `table_choose_field_from_list(...)` — открыть форму выбора для ссылочного поля в строке табличной части.
-- `table_edit_info(...)` — информация о редактировании таблицы.
-- `table_move_row(...)` — перейти к первой/следующей/предыдущей/последней строке.
-
-### Динамические списки
-
-- `dynamic_list_available_fields(object, rag_snapshot)` — поля, доступные для отбора/сортировки по RAG-индексу.
-- `dynamic_list_apply_settings(filters, orders, clear_first)` — применить сортировки через API тест-клиента и best-effort отборы через стандартную форму **Настроить список**.
-- `dynamic_list_set_order(column_title, name="Список")` — сортировка по видимому заголовку колонки.
-- `dynamic_list_output()` — команда **Вывести список** с возвратом текста табличного документа, когда он доступен.
-- `dynamic_list_open_settings()` — открыть **Настроить список**.
-- `dynamic_list_clear_settings()` — сбросить настройки динамического списка.
-- `dynamic_list_open_form_settings()` — открыть **Изменить форму**.
-
-### Табличные документы
-
-- `tabular_documents(include_text)` — список табличных документов в активном окне.
-- `tabular_document_text(...)` — текст табличного документа.
-- `tabular_document_save(path, format)` — сохранить табличный документ в выбранном формате.
-
-
-### Доказательная запись
-
-- `recording_start(output_dir, display, window)` — включить доказательную запись.
-- `recording_capture(action, note)` — вручную добавить доказательный слайд.
-- `recording_stop()` — собрать `manifest.json`, `recording.pdf` (если доступен backend PDF).
-
-### RAG / индекс метаданных
-
-- `rag_source_add(name, path, kind, format="auto")` — зарегистрировать источник; формат определяется автоматически при `format="auto"`.
-- `rag_sources_list()` — список источников.
-- `rag_snapshot_create(name, base, extensions, sources)` — создать effective snapshot.
-- `rag_snapshots_list()` — список snapshot-ов.
-- `rag_index_build(snapshot, source)` — построить индекс.
-- `rag_lookup_object(object, snapshot)` — найти объект метаданных.
-- `rag_query(query, snapshot, limit)` — полнотекстовый поиск.
-
-CLI-пример:
-
-```bash
-python3 scripts/rag_cli.py add-source Configuration /path/to/configuration/src --kind base
-python3 scripts/rag_cli.py add-source Extension1 /path/to/extension/src --kind extension
-python3 scripts/rag_cli.py snapshot Configuration+Extension1 --base Configuration --extension Extension1
-python3 scripts/rag_cli.py build --snapshot Configuration+Extension1
-python3 scripts/rag_cli.py lookup РегистрСведений.Регистр1 --snapshot Configuration+Extension1
-```
-
 ## Ограничения
 
 - Форма пользовательской настройки **«Изменить форму»** частично недоступна для надёжной автоматизации через API клиента тестирования. В частности, команда **«Добавить поля»** в верхней панели формы настройки может быть видна на скриншоте и в диагностическом тексте, но не нажиматься как обычная `ТестируемаяКнопкаФормы`: `click_button` может не находить её, а `activate_object` может вернуть `activated=true` без открытия диалога добавления полей.
@@ -290,65 +250,3 @@ MIT
 Copyright (c) 2026 Kosolapov Stanislav aka proDOOMman <prodoomman@gmail.com>, Marvin (AI Assistant), 42Clouds, and contributors.
 
 Licensed under the MIT License.
-
-## Публикация пакета
-
-Рекомендуемый канал установки для пользователей — PyPI:
-
-```bash
-pipx install 'answer42[screenshot,linux-window-control]'
-# Windows:
-# pipx install "answer42[screenshot,windows-window-control]"
-```
-
-Публикация автоматизирована в `.gitlab-ci.yml` и оставлена только для PyPI:
-
-1. tag `vX.Y.Z` запускает unit/ruff/package checks;
-2. `package` собирает wheel/sdist и проверяет их через `twine check`;
-3. `publish_pypi` публикует wheel/sdist в PyPI через `PYPI_API_TOKEN`;
-4. `create_gitlab_release` создаёт GitLab Release для tag.
-
-
-One-command релиз:
-
-```bash
-answer42 release 0.2.1
-```
-
-Команда меняет `pyproject.toml`, создаёт commit `Release v0.2.1`, annotated tag `v0.2.1`, пушит branch и tag. Tag запускает CI: публикацию в PyPI и создание GitLab Release.
-
-Секрет GitLab CI:
-
-- `PYPI_API_TOKEN` — PyPI token для проекта `answer42`.
-
-Перед релизом проверьте, что `src/mcp_1c/assets/MCPTestManager.cf` и `src/mcp_1c/assets/MCPTestClient.cf` пересобраны из актуальных XML-исходников. Runtime использует XML+`scripts/build_cf.py` в git checkout, а в установленном PyPI wheel при отсутствии исходников копирует packaged `.cf` из `mcp_1c.assets`.
-
-### Установка packaged skills
-
-PyPI сам по себе не устанавливает agent skills в пользовательские каталоги, поэтому в CLI добавлена команда:
-
-```bash
-answer42 install-skills
-```
-
-По умолчанию она устанавливает `answer42` и `answer42-rag` в OpenClaw:
-
-```text
-~/.openclaw/workspace/skills
-```
-
-Другие агенты/варианты:
-
-```bash
-answer42 install-skills --agent claude
-answer42 install-skills --agent codex
-answer42 install-skills --agent opencode
-answer42 install-skills --agent pi
-answer42 install-skills --agent hermes
-answer42 install-skills --agent all
-answer42 install-skills --target-dir /path/to/skills
-answer42 install-skills --list-agents
-answer42 install-skills --dry-run --agent all
-```
-
-Для агентов без стабильного стандарта skill-директорий (`codex`, `opencode`, `pi`, `hermes`) presets best-effort; если у конкретной установки другой путь, используйте `--target-dir`.

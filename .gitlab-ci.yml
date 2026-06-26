@@ -1,6 +1,7 @@
 stages:
   - test
   - package
+  - deploy
   - publish
 
 variables:
@@ -40,6 +41,17 @@ package:
     expire_in: 7 days
     paths:
       - dist/
+
+pages:
+  image: python:3.13-slim
+  stage: deploy
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+  script:
+    - python scripts/build_pages.py
+  artifacts:
+    paths:
+      - public
 
 publish_pypi:
   image: python:3.13-slim

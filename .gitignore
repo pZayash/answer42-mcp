@@ -22,4 +22,4 @@ dist/
 
 # BSL Language Server report (created at repo root)
 bsl-json.json
-
+public/
