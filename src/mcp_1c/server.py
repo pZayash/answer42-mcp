@@ -1670,8 +1670,6 @@ def credentials_check(base_url: str) -> dict[str, object]:
     return {
         "base_url": base_url,
         "found": True,
-        "username": credentials.get("username", ""),
-        "password": "***",
     }
 
 
@@ -1687,12 +1685,11 @@ def credentials_save(
     login/password pairs so that ``start_session`` can pick them up automatically
     without exposing secrets in MCP tool-call arguments.
     """
-    previous = _credentials_store().upsert(url, username, password)
+    updated = _credentials_store().upsert(url, username, password)
     return {
         "url": url,
-        "username": username,
-        "password": "***",
-        "previous": previous,
+        "saved": True,
+        "updated": updated,
     }
 
 
@@ -1702,14 +1699,12 @@ def credentials_remove(
 ) -> dict[str, object]:
     """Remove a credential entry from the local store by exact URL match."""
     removed = _credentials_store().remove(url)
-    if removed is None:
-        return {"url": url, "removed": False}
-    return {"url": url, "removed": True, "entry": removed}
+    return {"url": url, "removed": removed}
 
 
 @mcp.tool()
 def credentials_list() -> list[dict[str, str]]:
-    """List configured credential URL patterns with passwords redacted."""
+    """List configured credential URL patterns (no usernames or passwords)."""
     return _credentials_store().list_entries()
 
 
