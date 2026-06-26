@@ -64,7 +64,7 @@ class SessionState:
 `start_session()` выполняет полный запуск автоматически:
 
 1. Определяет версию платформы по `base_url` или использует переданную.
-2. Проверяет требование: **1С:Предприятие 8.3.27+**.
+2. Проверяет требование: **1С:Предприятие 8.3.27+ или 8.5+**.
 3. Подбирает свободный X11 display (Linux) или пропускает (Windows).
 4. Подбирает свободные TCP-порты для bridge, ibsrv и test-client.
 5. Запускает Xvfb (Linux) и WebSocket bridge.
@@ -99,7 +99,7 @@ class SessionState:
 
 ### `mcp_1c.platform`
 
-Поиск установленной платформы 1С: Linux (`/opt/1cv8/x86_64/...`), Windows (`Program Files\1cv8\...\bin`), переопределение через `ONEC_PLATFORM_DIR`. Проверка версии и поддержки WebSocket.
+Поиск установленной платформы 1С: Linux (`/opt/1cv8/x86_64/<version>/`, `/opt/1cv8/i386/<version>/`), Windows (`C:\Program Files\1cv8\<version>\bin`, `C:\Program Files (x86)\1cv8\<version>\bin`), macOS/manual installs (`/Applications/1cv8/<version>/`, `/opt/1cv8/<version>/`), переопределение через `ONEC_PLATFORM_DIR`. Кандидат платформы должен содержать минимум `1cv8c` и `ibcmd`; при одинаковой версии предпочтение отдаётся установке с `ibsrv`. Проверка версии и поддержки WebSocket: **8.3.27+ или 8.5+**.
 
 ### `mcp_1c.window_control`
 

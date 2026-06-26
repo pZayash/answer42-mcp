@@ -28,7 +28,7 @@ description: "Работа с MCP Answer42 для 1С UI automation"
 
 ## Базовый порядок
 
-1. Проверь, что MCP-сервер `Answer42` установлен и доступен.
+1. Проверь, что MCP-сервер `Answer42` установлен и доступен. Перед запуском проверь платформу 1С: поддерживаются **8.3.27+ или 8.5+**; нужны `1cv8c` и `ibcmd`, `ibsrv` желателен. Стандартные каталоги: Linux `/opt/1cv8/x86_64/<version>/`, `/opt/1cv8/i386/<version>/`; Windows `C:\Program Files\1cv8\<version>\bin\`, `C:\Program Files (x86)\1cv8\<version>\bin\`; macOS/manual `/Applications/1cv8/<version>/`, `/opt/1cv8/<version>/`. Если автоопределение ошиблось, попроси задать `ONEC_PLATFORM_DIR`.
 2. Посмотри активные/восстановимые сессии через `sessions_list`; не плодить сессии с тем же стендом без причины.
 3. Запусти сессию через `start_session` (one-shot). Low-level `launch_manager` использовать только для диагностики/разработки bridge.
 4. Для подключения укажи только target в `base_url`; режим запуска клиента тестирования автоопределяется:
