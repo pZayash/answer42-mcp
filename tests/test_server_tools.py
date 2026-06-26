@@ -67,8 +67,8 @@ def test_selected_new_tool_schemas():
     assert tools["set_file_dialog_result"].inputSchema["required"] == ["paths"]
     assert tools["field_info"].inputSchema["required"] == ["field_name"]
     assert tools["decoration_click_link"].inputSchema["properties"]["presentation"]["default"] == ""
-    assert tools["start_session"].inputSchema["properties"]["connection_mode"]["default"] == "auto"
-    assert tools["start_session"].inputSchema["properties"]["connection_value"]["default"] == ""
+    assert "connection_mode" not in tools["start_session"].inputSchema["properties"]
+    assert "connection_value" not in tools["start_session"].inputSchema["properties"]
     assert tools["credentials_save"].inputSchema["required"] == ["url", "username", "password"]
     assert tools["credentials_remove"].inputSchema["required"] == ["url"]
 

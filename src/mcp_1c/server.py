@@ -1289,16 +1289,14 @@ async def start_session(
     extra_args: Annotated[str, "Extra raw 1C command-line arguments for the test client"] = "",
     execute: Annotated[str, "External data processor/report path for the test-client /Execute command-line parameter"] = "",
     command_parameter: Annotated[str, "Additional test-client /C value; when extra_args already contains /C, this value is appended with ';'"] = "",
-    connection_mode: Annotated[str, "Test-client connection mode: auto, ws (HTTP/WS URL), file (file infobase via ibsrv), file-direct (direct /F), or server (server/infobase)"] = "auto",
-    connection_value: Annotated[str, "Connection target: URL for ws, directory path for file, server/infobase for server"] = "",
 ) -> dict[str, Any]:
     """One-shot session factory: detect version, start infrastructure and connect the 1C test client."""
-    initial_connection_mode = _normalize_connection_mode(connection_mode, connection_value or base_url, base_url)
-    if base_url and not connection_value and initial_connection_mode != "ws":
-        # Backward-compatible parameter handling: base_url historically carried
-        # the target connection string. Treat http(s) as web/ws URL only; plain
-        # server/infobase strings and file infobase directories belong to
-        # connection_value so they are passed to the test client as /S or /F.
+    connection_mode = "auto"
+    connection_value = ""
+    initial_connection_mode = _normalize_connection_mode(connection_mode, base_url, base_url)
+    if base_url and initial_connection_mode != "ws":
+        # Non-http(s) base_url is treated as an auto-detected test-client target:
+        # a file infobase path (/F or ibsrv) or a server/infobase string (/S).
         connection_value = base_url
         base_url = ""
     resolved_version = version or None
