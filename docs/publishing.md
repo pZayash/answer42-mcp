@@ -7,19 +7,82 @@
 3. **Smithery / PulseMCP** — дополнительные каталоги MCP, можно добавить после стабилизации PyPI-релизов.
 4. **Crawlhub** — публичную CLI/API-документацию найти не удалось; добавлять CI job стоит после появления официального способа публикации.
 
+## MCP Registry namespace и GitLab Pages
+
+Текущее имя сервера:
+
+```text
+io.gitlab.platform42/answer42
+```
+
+Это domain-based namespace для домена:
+
+```text
+platform42.gitlab.io
+```
+
+Для HTTP Authentication registry будет читать proof file строго здесь:
+
+```text
+https://platform42.gitlab.io/.well-known/mcp-registry-auth
+```
+
+Важно: URL с project path не подходит. Например это **не** пройдёт проверку для `io.gitlab.platform42/answer42`:
+
+```text
+https://platform42.gitlab.io/answer42-mcp/.well-known/mcp-registry-auth
+```
+
+Если доступен только project Pages URL с подпутём, нужно либо:
+
+- опубликовать `.well-known/mcp-registry-auth` из root Pages project `platform42/platform42.gitlab.io`;
+- либо выбрать другой Pages domain/unique domain и синхронно поменять `README` marker и `server.json.name` на reverse-DNS этого домена.
+
+## Генерация HTTP auth proof
+
+Ed25519 вариант:
+
+```bash
+openssl genpkey -algorithm Ed25519 -out key.pem
+PUBLIC_KEY="$(openssl pkey -in key.pem -pubout -outform DER | tail -c 32 | base64)"
+echo "v=MCPv1; k=ed25519; p=${PUBLIC_KEY}" > mcp-registry-auth
+PRIVATE_KEY="$(openssl pkey -in key.pem -noout -text | grep -A3 "priv:" | tail -n +2 | tr -d ' :\n')"
+```
+
+GitLab CI variables:
+
+- `MCP_REGISTRY_AUTH` — содержимое файла `mcp-registry-auth`, например `v=MCPv1; k=ed25519; p=...`.
+- `MCP_HTTP_DOMAIN` — домен без схемы, например `platform42.gitlab.io`.
+- `MCP_PRIVATE_KEY` — hex private key из команды выше.
+
+Pipeline job `pages` публикует `MCP_REGISTRY_AUTH` в:
+
+```text
+public/.well-known/mcp-registry-auth
+```
+
+После деплоя Pages проверьте:
+
+```bash
+curl https://platform42.gitlab.io/.well-known/mcp-registry-auth
+```
+
 ## GitLab CI
 
 `.gitlab-ci.yml` содержит pipeline:
 
 - `unit_tests` — `py_compile`, targeted `pytest`, `ruff`.
 - `package` — проверяет наличие packaged CF artifacts, собирает wheel/sdist и запускает `twine check`.
+- `pages` — публикует HTTP-auth proof file для MCP Registry из `MCP_REGISTRY_AUTH`.
 - `publish_pypi` — на tag `vX.Y.Z` публикует `dist/*` в PyPI через `PYPI_API_TOKEN`.
-- `publish_mcp_registry_dns` — после PyPI обновляет версию в `server.json`, логинится `mcp-publisher login dns --domain "$MCP_DNS_DOMAIN" --private-key "$MCP_PRIVATE_KEY"` и публикует server metadata.
+- `publish_mcp_registry_http` — после PyPI обновляет версию в `server.json`, логинится `mcp-publisher login http --domain "$MCP_HTTP_DOMAIN" --private-key "$MCP_PRIVATE_KEY"` и публикует server metadata.
 
 ## Required CI variables
 
 - `PYPI_API_TOKEN` — project-scoped PyPI token.
-- `MCP_DNS_DOMAIN`, `MCP_PRIVATE_KEY` for DNS auth. The current server name is `io.gitlab.platform42/answer42`, which corresponds to the reverse-DNS namespace `platform42.gitlab.io`; change README `mcp-name` and `server.json` together if another domain is used.
+- `MCP_REGISTRY_AUTH` — public proof file content для GitLab Pages.
+- `MCP_HTTP_DOMAIN` — Pages/domain без `https://`.
+- `MCP_PRIVATE_KEY` — private key для HTTP-auth подписи.
 
 ## Release checklist
 
