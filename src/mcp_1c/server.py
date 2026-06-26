@@ -15,6 +15,8 @@ import shlex
 import subprocess
 import re
 import hashlib
+import urllib.request
+from urllib.parse import urlsplit, urlunsplit
 from dataclasses import dataclass, field
 from contextlib import contextmanager
 from pathlib import Path
@@ -1363,34 +1365,37 @@ async def start_session(
         runtime.load_configuration(sess.ibcmd, sess.db_path, cf_path)
 
     ibsrv_available = Path(sess.ibsrv).exists()
-    if ibsrv_available:
-        server_proc = runtime.start_standalone_server(
-            ibsrv=sess.ibsrv, address=ibsrv_address, port=ibsrv_port,
-            name=ibsrv_name, data_dir=sess.server_data_dir,
-            log_dir=log_dir, db_path=sess.db_path,
-            direct_regport=ibsrv_direct_regport,
-            direct_range=_direct_range_from_regport(ibsrv_direct_regport),
-        )
-        runtime_state.server_process = server_proc
-        ws_url = runtime.build_thin_client_ws_url(ibsrv_address, ibsrv_port)
-        manager_proc = runtime.start_thin_test_manager(
-            onec_path=sess.onec_thin, ws_url=ws_url,
-            websocket_url=sess.bridge.url, log_dir=log_dir, display=display,
-        )
-    else:
-        logging.info("ibsrv not found; starting test-manager in file-direct mode")
-        sess.ibsrv_port = 0
-        ws_url = ""
-        manager_proc = runtime.start_thin_test_manager_file_direct(
-            onec_path=sess.onec_thin,
-            db_path=sess.db_path,
-            websocket_url=sess.bridge.url,
-            log_dir=log_dir,
-            display=display,
-        )
-    runtime_state.manager_process = manager_proc
     sess.runtime = runtime_state
-    await _wait_for_bridge_connected(sess, timeout=60.0)
+    try:
+        if ibsrv_available:
+            server_proc = runtime.start_standalone_server(
+                ibsrv=sess.ibsrv, address=ibsrv_address, port=ibsrv_port,
+                name=ibsrv_name, data_dir=sess.server_data_dir,
+                log_dir=log_dir, db_path=sess.db_path,
+                direct_regport=ibsrv_direct_regport,
+                direct_range=_direct_range_from_regport(ibsrv_direct_regport),
+            )
+            runtime_state.server_process = server_proc
+            ws_url = runtime.build_thin_client_ws_url(ibsrv_address, ibsrv_port)
+            manager_proc = runtime.start_thin_test_manager(
+                onec_path=sess.onec_thin, ws_url=ws_url,
+                websocket_url=sess.bridge.url, log_dir=log_dir, display=display,
+            )
+        else:
+            logging.info("ibsrv not found; starting test-manager in file-direct mode")
+            sess.ibsrv_port = 0
+            ws_url = ""
+            manager_proc = runtime.start_thin_test_manager_file_direct(
+                onec_path=sess.onec_thin,
+                db_path=sess.db_path,
+                websocket_url=sess.bridge.url,
+                log_dir=log_dir,
+                display=display,
+            )
+        runtime_state.manager_process = manager_proc
+        await _wait_for_bridge_connected(sess, timeout=60.0)
+    except Exception as exc:
+        raise _manager_failure_diagnostics(sess, exc) from exc
     _persist_sessions()
 
     pipeline_info: dict[str, Any] = {"manager_pid": manager_proc.pid, "ws_url": ws_url, "log_dir": str(log_dir)}
@@ -1479,12 +1484,19 @@ async def start_session(
         connect_connection_value = str(pipeline_info["client_connection_value"])
         connect_connection_mode = str(pipeline_info.get("client_connection_mode") or "file-direct")
     if connect_base_url or connect_connection_value:
-        connect_result = await _connect_test_client_impl(
-            sess, base_url=connect_base_url, username=username, password=password,
-            port=testclient_port, onec_path=sess.onec_thin, host="localhost",
-            extra_args=extra_args, execute=execute, command_parameter=command_parameter,
-            connection_mode=connect_connection_mode, connection_value=connect_connection_value,
-        )
+        try:
+            connect_result = await _connect_test_client_impl(
+                sess, base_url=connect_base_url, username=username, password=password,
+                port=testclient_port, onec_path=sess.onec_thin, host="localhost",
+                extra_args=extra_args, execute=execute, command_parameter=command_parameter,
+                connection_mode=connect_connection_mode, connection_value=connect_connection_value,
+            )
+        except Exception as exc:
+            enriched = await _enrich_auth_failure_for_web_base(exc, connect_base_url)
+            target_mode = _normalize_connection_mode(
+                connect_connection_mode, connect_connection_value or connect_base_url, connect_base_url,
+            )
+            raise _client_failure_diagnostics(sess, enriched, target_mode) from exc
         _auto_maximize_test_client_result(connect_result, sess.display)
 
     if sess.idle_timeout_seconds > 0:
@@ -1707,11 +1719,182 @@ def credentials_list() -> list[dict[str, str]]:
 
 
 _PLACEHOLDER_PASSWORD_RE = re.compile(r"^\*{3,}$")
+_AUTH_FAILURE_MARKERS = (
+    "пользователь иб не идентифицирован",
+    "пользователь не идентифицирован",
+    "ошибка аутентификации",
+    "ошибка авторизации",
+    "неверный пароль",
+    "неправильный пароль",
+    "authentication failed",
+    "authorization failed",
+    "invalid user",
+    "invalid password",
+)
+_EVENTLOG_ERROR_MARKERS = (
+    "ошиб",
+    "error",
+    "exception",
+    "исключен",
+    "failed",
+    "fail",
+)
 
 
 def _is_placeholder_password(password: str) -> bool:
     """Return True when *password* looks like a redacted placeholder (e.g. ``***``)."""
     return bool(password) and bool(_PLACEHOLDER_PASSWORD_RE.match(password))
+
+
+def _is_web_base_url(base_url: str) -> bool:
+    scheme = urlsplit(base_url).scheme.lower()
+    return scheme in {"http", "https"}
+
+
+def _users_url_for_base_url(base_url: str) -> str:
+    parts = urlsplit(base_url.rstrip("/"))
+    path = parts.path.rstrip("/") + "/ru_RU/e1cib/users"
+    return urlunsplit((parts.scheme, parts.netloc, path, "", ""))
+
+
+def _parse_users_plain_text(text: str) -> list[str]:
+    users: list[str] = []
+    seen: set[str] = set()
+    for raw_line in text.splitlines():
+        user = raw_line.strip().lstrip("\ufeff")
+        if not user or user in seen:
+            continue
+        seen.add(user)
+        users.append(user)
+    return users
+
+
+def _fetch_available_users_sync(base_url: str, timeout: float = 10.0) -> dict[str, Any]:
+    users_url = _users_url_for_base_url(base_url)
+    request = urllib.request.Request(users_url, headers={"User-Agent": "Answer42/1.0"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            charset = response.headers.get_content_charset() or "utf-8"
+            text = response.read().decode(charset, errors="replace")
+        users = _parse_users_plain_text(text)
+        return {"url": users_url, "users": users, "count": len(users)}
+    except Exception as exc:
+        return {"url": users_url, "users": [], "count": 0, "error": str(exc)}
+
+
+async def _fetch_available_users(base_url: str) -> dict[str, Any]:
+    return await asyncio.to_thread(_fetch_available_users_sync, base_url)
+
+
+def _looks_like_auth_failure(error_text: str) -> bool:
+    normalized = error_text.lower()
+    return any(marker in normalized for marker in _AUTH_FAILURE_MARKERS)
+
+
+def _append_available_users_to_auth_error(error_text: str, users_info: dict[str, Any]) -> str:
+    users = users_info.get("users") or []
+    if users:
+        users_text = "\n".join(f"- {user}" for user in users)
+        return (
+            f"{error_text}\n\n"
+            f"Доступные пользователи из {users_info.get('url')}:\n{users_text}"
+        )
+    if users_info.get("error"):
+        return (
+            f"{error_text}\n\n"
+            f"Не удалось получить список доступных пользователей из {users_info.get('url')}: {users_info.get('error')}"
+        )
+    return f"{error_text}\n\nСписок доступных пользователей из {users_info.get('url')} пуст."
+
+
+async def _enrich_auth_failure_for_web_base(error: Exception, base_url: str) -> Exception:
+    error_text = str(error)
+    if not base_url or not _is_web_base_url(base_url) or not _looks_like_auth_failure(error_text):
+        return error
+    users_info = await _fetch_available_users(base_url)
+    enriched_text = _append_available_users_to_auth_error(error_text, users_info)
+    return type(error)(enriched_text)
+
+
+def _tail_text_file(path: Path | str, *, max_lines: int = 80, max_chars: int = 20000) -> str:
+    file_path = Path(path)
+    if not file_path.exists():
+        return ""
+    try:
+        lines = file_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except Exception as exc:
+        return f"<не удалось прочитать {file_path}: {exc}>"
+    text = "\n".join(lines[-max_lines:])
+    if len(text) > max_chars:
+        text = text[-max_chars:]
+    return text
+
+
+def _append_file_tail(message: str, title: str, path: Path | str, *, max_lines: int = 80) -> str:
+    tail = _tail_text_file(path, max_lines=max_lines)
+    if not tail:
+        return f"{message}\n\n{title}: {path}\n<лог пуст или не найден>"
+    return f"{message}\n\n{title}: {path}\n{tail}"
+
+
+def _extract_error_lines(text: str, *, max_lines: int = 80) -> str:
+    lines = text.splitlines()
+    error_lines = [line for line in lines if any(marker in line.lower() for marker in _EVENTLOG_ERROR_MARKERS)]
+    selected = error_lines[-max_lines:] if error_lines else lines[-max_lines:]
+    return "\n".join(selected)
+
+
+def _eventlog_errors_for_runtime(
+    sess: SessionState,
+    rt: runtime.ManagerRuntime | None,
+    label: str,
+    *,
+    max_lines: int = 80,
+) -> dict[str, str]:
+    if rt is None or rt.server_process is None:
+        return {}
+    eventlog_dir = rt.server.data_dir / "log-data"
+    out_path = rt.log_dir / f"eventlog_{label}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    try:
+        exported = runtime.export_eventlog(sess.ibcmd, eventlog_dir, out_path, None, None, "json")
+        text = _tail_text_file(exported, max_lines=500, max_chars=120000)
+        return {"path": str(exported), "tail": _extract_error_lines(text, max_lines=max_lines)}
+    except Exception as exc:
+        return {"path": str(out_path), "error": str(exc)}
+
+
+def _append_eventlog_diagnostics(message: str, diagnostics: dict[str, str], title: str) -> str:
+    if not diagnostics:
+        return message
+    if diagnostics.get("tail"):
+        return f"{message}\n\n{title}: {diagnostics.get('path')}\n{diagnostics.get('tail')}"
+    return f"{message}\n\n{title}: {diagnostics.get('path')}\n<не удалось выгрузить/прочитать ЖР: {diagnostics.get('error', 'нет данных')}>"
+
+
+def _manager_failure_diagnostics(sess: SessionState, error: Exception) -> RuntimeError:
+    message = str(error)
+    message = _append_file_tail(message, "Лог stdout/stderr менеджера тестирования", sess.log_dir / "test_manager.log")
+    message = _append_file_tail(message, "Лог 1С /Out менеджера тестирования", sess.log_dir / "test_manager_1c_out.log")
+    diagnostics = _eventlog_errors_for_runtime(sess, sess.runtime, "manager")
+    message = _append_eventlog_diagnostics(message, diagnostics, "Последние ошибки ЖР автономного сервера менеджера")
+    return RuntimeError(message)
+
+
+def _client_runtime_for_eventlog(sess: SessionState, target_connection_mode: str) -> runtime.ManagerRuntime | None:
+    if target_connection_mode == "file":
+        return sess.file_client_runtime
+    if target_connection_mode == "ws" and sess.client_runtime is not None:
+        # Built-in demo client is served through a local autonomous server.
+        return sess.client_runtime
+    return None
+
+
+def _client_failure_diagnostics(sess: SessionState, error: Exception, target_connection_mode: str) -> RuntimeError:
+    message = str(error)
+    rt = _client_runtime_for_eventlog(sess, target_connection_mode)
+    diagnostics = _eventlog_errors_for_runtime(sess, rt, "client")
+    message = _append_eventlog_diagnostics(message, diagnostics, "Последние ошибки ЖР автономного сервера клиента тестирования")
+    return RuntimeError(message)
 
 
 async def _connect_test_client_impl(
