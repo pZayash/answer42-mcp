@@ -14,14 +14,12 @@
 - `unit_tests` — `py_compile`, targeted `pytest`, `ruff`.
 - `package` — проверяет наличие packaged CF artifacts, собирает wheel/sdist и запускает `twine check`.
 - `publish_pypi` — на tag `vX.Y.Z` публикует `dist/*` в PyPI через `PYPI_API_TOKEN`.
-- `publish_mcp_registry` — после PyPI обновляет версию в `server.json`, логинится `mcp-publisher login github --token "$MCP_GITHUB_TOKEN"` и публикует server metadata.
-- `publish_mcp_registry_dns` — manual fallback для DNS namespace через `MCP_DNS_DOMAIN` и `MCP_PRIVATE_KEY`.
+- `publish_mcp_registry_dns` — после PyPI обновляет версию в `server.json`, логинится `mcp-publisher login dns --domain "$MCP_DNS_DOMAIN" --private-key "$MCP_PRIVATE_KEY"` и публикует server metadata.
 
 ## Required CI variables
 
 - `PYPI_API_TOKEN` — project-scoped PyPI token.
-- `MCP_GITHUB_TOKEN` — GitHub PAT for `mcp-publisher login github`.
-- Optional: `MCP_DNS_DOMAIN`, `MCP_PRIVATE_KEY` for DNS auth.
+- `MCP_DNS_DOMAIN`, `MCP_PRIVATE_KEY` for DNS auth. The current server name is `io.gitlab.platform42/answer42`, which corresponds to the reverse-DNS namespace `platform42.gitlab.io`; change README `mcp-name` and `server.json` together if another domain is used.
 
 ## Release checklist
 
@@ -49,7 +47,7 @@ git push origin beta v0.2.0
 For PyPI packages the official MCP Registry verifies ownership by reading this marker from the PyPI README:
 
 ```markdown
-<!-- mcp-name: io.github.prodoomman/answer42 -->
+<!-- mcp-name: io.gitlab.platform42/answer42 -->
 ```
 
 The server metadata lives in `server.json` with `registryType=pypi`, `identifier=answer42`, `transport.type=stdio`.
