@@ -100,7 +100,7 @@ start_session(
 ## Навигация
 
 - Открывай формы/списки через `execute_window_command` с `e1cib/list/...` или `e1cib/app/...`, когда доступно.
-- Для поиска объектов используй `find_object`, `activate_object`, `ui_tree`.
+- Для поиска объектов используй `find_object`, `activate_object`, `ui_tree`. `ui_tree` по умолчанию показывает только видимые/активные для пользователя элементы и всегда добавляет `visible/available/enabled/read_only`; для полной диагностики скрытых страниц/элементов передавай `include_hidden=true`.
 - Для команд формы используй специализированные MCP tools (`table_move_row`, `dynamic_list_*`, `click_button`, `activate_object` и т.п.). `command_bar` можно использовать для диагностики доступных команд, но не прокидывай имена команд в `execute_window_command`.
 - `dynamic_list_output`, `dynamic_list_open_settings`, `dynamic_list_clear_settings`, `dynamic_list_open_form_settings` нажимают кнопки формы через test-client API (`НайтиКнопку` + `Нажать()`), а не выполняют имена команд через `ВыполнитьКоманду()`. Если авто-кандидат не подходит, передавай `button` — техническое имя или заголовок кнопки.
 
@@ -167,4 +167,4 @@ export_eventlog(...)
 - CF собирать кроссплатформенно: `python scripts/build_cf.py src/cf build/MCPTestManager.cf` и аналогично для `src/client_cf`. Приоритетный способ — `ibcmd config import` (не требует Конфигуратора); если `ibcmd` отсутствует, скрипт автоматически переключается на Конфигуратор/DESIGNER через `1cv8`. Скрипт сам добавляет `src` в `sys.path`; Bash-синтаксис `PYTHONPATH=src python ...` в PowerShell не работает.
 - Не использовать удалённые `.sh`-скрипты (`build_cf.sh`, `export_eventlog.sh`).
 - Для E2E использовать `scripts/e2e_stable.py`; долгий `dynamic` сценарий разделён на `dynamic-tables`, `dynamic-lists`, `dynamic-reports`.
-- `start_session` автоматически пересобирает `build/MCPTestManager.cf`, если он отсутствует или XML-исходники новее; demo-клиент аналогично пересобирает `build/MCPTestClient.cf`. Но после изменения Python/BSL всё равно прогонять минимум `py_compile`, unit tests и сборку CF; для UI-изменений — smoke E2E с PDF evidence.
+- `start_session` автоматически пересобирает `build/MCPTestManager.cf`, если он отсутствует или XML-исходники новее; demo-клиент аналогично пересобирает `build/MCPTestClient.cf`. В PyPI wheel при отсутствии XML/скрипта используются packaged `mcp_1c.assets/*.cf`, поэтому перед релизом обязательно пересобрать и обновить `src/mcp_1c/assets/MCPTestManager.cf` и `src/mcp_1c/assets/MCPTestClient.cf`. После изменения Python/BSL прогонять минимум `py_compile`, unit tests и сборку CF; для UI-изменений — smoke E2E с PDF evidence.
