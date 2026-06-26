@@ -386,13 +386,14 @@ def export_eventlog(
 
 
 def build_thin_client_ws_url(address: str, port: int) -> str:
-    """Build the `/WS` argument value for `1cv8c` against the ibsrv HTTP-gate.
+    """Build the `/WS` URL value for `1cv8c` against the ibsrv HTTP-gate.
 
-    The format is `/WS"http://host:port"` (no trailing slash). The
-    infobase name is selected by `--name=<mcp>` on the ibsrv side; the
-    thin client does not need to specify it here.
+    Return the raw URL without embedded quotes.  Callers pass it as a separate
+    argv element after `/WS`; this avoids Windows `subprocess.list2cmdline`
+    escaping embedded quotes as `/WS\"http://...\"`, which 1C can parse as
+    invalid connection parameters.
     """
-    return f'"http://{address}:{port}"'
+    return f"http://{address}:{port}"
 
 
 def build_thin_test_manager_argv(
@@ -417,7 +418,8 @@ def build_thin_test_manager_argv(
         "ENTERPRISE",
         "/DisableStartupMessages",
         "/DisableStartupDialogs",
-        f"/WS{ws_url}",
+        "/WS",
+        ws_url,
         "/Lru",
         "/VLru_RU",
         "/TESTMANAGER",
@@ -447,6 +449,16 @@ def build_thin_test_manager_file_argv(
     ]
 
 
+def add_1c_out_args_before_testmanager(argv: list[str], onec_out_path: Path | str) -> list[str]:
+    """Add `/Out <path>` before `/TESTMANAGER` so it is never consumed by `/C`."""
+    startup_args = ["/DisableUnrecoverableErrorMessage", "/Out", str(onec_out_path)]
+    try:
+        testmanager_index = argv.index("/TESTMANAGER")
+    except ValueError:
+        return [*argv, *startup_args]
+    return [*argv[:testmanager_index], *startup_args, *argv[testmanager_index:]]
+
+
 def _start_thin_test_manager_argv(
     argv: list[str],
     log_dir: Path,
@@ -458,7 +470,7 @@ def _start_thin_test_manager_argv(
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / log_name
     onec_out_path = log_dir / f"{Path(log_name).stem}_1c_out.log"
-    argv = [*argv, "/DisableUnrecoverableErrorMessage", "/Out", str(onec_out_path)]
+    argv = add_1c_out_args_before_testmanager(argv, onec_out_path)
     log_handle = open(log_path, "ab", buffering=0)
     LOGGER.info("Starting thin test manager: %s", " ".join(argv))
     env = os.environ.copy()

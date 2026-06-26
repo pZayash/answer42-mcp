@@ -118,11 +118,26 @@ def test_extract_error_lines_prefers_errors():
     assert _extract_error_lines(text) == "Ошибка запуска\nERROR detail"
 
 
-def test_test_manager_argv_contains_startup_suppression():
-    argv = runtime.build_thin_test_manager_argv("1cv8c", '"http://127.0.0.1:8314"', "ws://bridge")
+def test_thin_client_ws_url_is_unquoted():
+    assert runtime.build_thin_client_ws_url("127.0.0.1", 8314) == "http://127.0.0.1:8314"
+
+
+def test_test_manager_argv_contains_startup_suppression_and_separate_ws_args():
+    argv = runtime.build_thin_test_manager_argv("1cv8c", "http://127.0.0.1:8314", "ws://bridge")
 
     assert "/DisableStartupMessages" in argv
     assert "/DisableStartupDialogs" in argv
+    assert argv[argv.index("/WS") + 1] == "http://127.0.0.1:8314"
+    assert not any(part.startswith('/WS"') for part in argv)
+
+
+def test_1c_out_args_are_before_testmanager():
+    argv = ["1cv8c", "ENTERPRISE", "/WS", "http://127.0.0.1:8314", "/TESTMANAGER", "/C", "ws://bridge"]
+
+    result = runtime.add_1c_out_args_before_testmanager(argv, "manager.log")
+
+    assert result.index("/Out") < result.index("/TESTMANAGER")
+    assert result[result.index("/Out") + 1] == "manager.log"
 
 
 def test_connection_mode_normalization(tmp_path):
