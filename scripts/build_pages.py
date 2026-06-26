@@ -255,7 +255,7 @@ def page_html(title: str, body: str) -> str:
         <p class="kicker">The Answer to Life, Universe, and 1C — UI Driver</p>
         <h1>Answer42</h1>
       </div>
-      <a class="brand" href="https://platform42.ru/" aria-label="Platform42">
+      <a class="brand" href="https://42clouds.com/" aria-label="Platform42">
         <span>by</span>
         <img src="assets/platform42-logo.svg" alt="Platform42">
       </a>
