@@ -1676,9 +1676,49 @@ def credentials_check(base_url: str) -> dict[str, object]:
 
 
 @mcp.tool()
+def credentials_save(
+    url: Annotated[str, "Base URL pattern (exact or wildcard like https://*.example.com/*)"],
+    username: Annotated[str, "1C username"],
+    password: Annotated[str, "1C password"],
+) -> dict[str, object]:
+    """Save or update credentials for a URL pattern in the local credentials store.
+
+    The credentials file is never committed to git.  Use this tool to persist
+    login/password pairs so that ``start_session`` can pick them up automatically
+    without exposing secrets in MCP tool-call arguments.
+    """
+    previous = _credentials_store().upsert(url, username, password)
+    return {
+        "url": url,
+        "username": username,
+        "password": "***",
+        "previous": previous,
+    }
+
+
+@mcp.tool()
+def credentials_remove(
+    url: Annotated[str, "Exact URL pattern to remove from the credentials store"],
+) -> dict[str, object]:
+    """Remove a credential entry from the local store by exact URL match."""
+    removed = _credentials_store().remove(url)
+    if removed is None:
+        return {"url": url, "removed": False}
+    return {"url": url, "removed": True, "entry": removed}
+
+
+@mcp.tool()
 def credentials_list() -> list[dict[str, str]]:
     """List configured credential URL patterns with passwords redacted."""
     return _credentials_store().list_entries()
+
+
+_PLACEHOLDER_PASSWORD_RE = re.compile(r"^\*{3,}$")
+
+
+def _is_placeholder_password(password: str) -> bool:
+    """Return True when *password* looks like a redacted placeholder (e.g. ``***``)."""
+    return bool(password) and bool(_PLACEHOLDER_PASSWORD_RE.match(password))
 
 
 async def _connect_test_client_impl(
@@ -1785,6 +1825,12 @@ async def _connect_test_client_impl(
         if credentials:
             r_user = credentials["username"]
             r_pass = credentials["password"]
+
+    if _is_placeholder_password(r_pass):
+        raise ValueError(
+            "Передан пароль-заглушка из звёздочек вместо реального пароля. "
+            "Укажите настоящий пароль или сохраните корректные креды через credentials_save()."
+        )
 
     sess.base_url = r_base
     sess.username = r_user
