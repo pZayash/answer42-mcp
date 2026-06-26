@@ -104,6 +104,24 @@ def test_platform_candidate_requires_ibcmd(tmp_path):
     assert onec_platform._is_platform_candidate(platform)
 
 
+def test_build_test_client_argv_keeps_program_files_path_as_single_arg():
+    argv = runtime.build_test_client_argv(
+        r"C:\\Program Files\\1cv8\\8.5.1.1150\\bin\\1cv8c.exe",
+        connection_mode="ws",
+        connection_value="https://example.invalid/ib/",
+        port=3318,
+        username="testuser",
+        password="secret",
+        out_log=Path(r"C:\\Temp\\test client.log"),
+    )
+
+    assert argv[0] == r"C:\\Program Files\\1cv8\\8.5.1.1150\\bin\\1cv8c.exe"
+    assert argv[1:4] == ["ENTERPRISE", "/WS", "https://example.invalid/ib/"]
+    assert "/TESTCLIENT" in argv
+    assert "-TPort3318" in argv
+    assert argv[-4:] == ["/N", "testuser", "/P", "secret"]
+
+
 def test_placeholder_password_detection():
     assert _is_placeholder_password("***")
     assert _is_placeholder_password("********")

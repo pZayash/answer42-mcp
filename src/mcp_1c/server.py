@@ -371,6 +371,7 @@ class SessionState:
         self.shared_file_key: str = ""  # shared ibsrv key for connection_mode=file
         self.xvfb_process: subprocess.Popen | None = None
         self.runtime: runtime.ManagerRuntime | None = None
+        self.test_client_process: subprocess.Popen | None = None
         self.bridge = OneCBridgeServer(
             host="127.0.0.1",
             port=ws_port,
@@ -710,6 +711,8 @@ async def _cleanup_failed_start_session(sess: SessionState, reason: str) -> None
         await sess.bridge.call("disconnect_test_client", {})
     except Exception:
         pass
+    runtime.kill_process(sess.test_client_process, "test-client")
+    sess.test_client_process = None
     for rt, manager_label, server_label in (
         (sess.runtime, "test-manager", "ibsrv"),
         (sess.client_runtime, "test-manager-client", "ibsrv-client"),
@@ -1077,9 +1080,9 @@ def _rag_fields_for_object(object_full_name: str, snapshot: str | int | None = N
                 "order_supported": True,
             })
     dedup: dict[tuple[str, str], dict[str, Any]] = {}
-    for field in fields:
-        key = (_norm_key(field.get("name")), _norm_key(field.get("title")))
-        dedup.setdefault(key, field)
+    for item in fields:
+        key = (_norm_key(item.get("name")), _norm_key(item.get("title")))
+        dedup.setdefault(key, item)
     return list(dedup.values())
 
 
@@ -1587,6 +1590,9 @@ async def _stop_session_impl(session_id: str = DEFAULT_SESSION, clean_data: bool
         stopped.append("test-client")
     except Exception:
         pass
+    if sess.test_client_process is not None:
+        runtime.kill_process(sess.test_client_process, "test-client")
+        stopped.append("test-client-process")
     if sess.runtime is not None:
         runtime.kill_process(sess.runtime.manager_process, "test-manager")
         runtime.kill_process(sess.runtime.server_process, "ibsrv")
@@ -1954,6 +1960,8 @@ def _client_runtime_for_eventlog(sess: SessionState, target_connection_mode: str
 
 def _client_failure_diagnostics(sess: SessionState, error: Exception, target_connection_mode: str) -> RuntimeError:
     message = str(error)
+    message = _append_file_tail(message, "Лог stdout/stderr клиента тестирования", sess.client_log_dir / "test_client_stdout.log")
+    message = _append_file_tail(message, "Лог 1С /Out клиента тестирования", sess.client_log_dir / "test_client_1c_out.log")
     rt = _client_runtime_for_eventlog(sess, target_connection_mode)
     diagnostics = _eventlog_errors_for_runtime(sess, rt, "client")
     message = _append_eventlog_diagnostics(message, diagnostics, "Последние ошибки ЖР автономного сервера клиента тестирования")
@@ -1975,7 +1983,7 @@ async def _connect_test_client_impl(
     connection_mode: str = "auto",
     connection_value: str = "",
 ) -> Any:
-    """Launch 1cv8c /TESTCLIENT inside the manager processor and connect."""
+    """Launch 1cv8c /TESTCLIENT from Python and attach the test manager to it."""
     await _wait_for_bridge_connected(sess, timeout=60.0)
     r_base = _platform.normalize_infobase_url(base_url or sess.base_url)
     r_value = connection_value or r_base
@@ -2080,14 +2088,40 @@ async def _connect_test_client_impl(
         bound_snapshot = _snapshot_for_base_url(r_base) if r_base else ""
         if bound_snapshot:
             sess.rag_snapshot = bound_snapshot
+    runtime.kill_process(sess.test_client_process, "test-client")
+    sess.client_log_dir.mkdir(parents=True, exist_ok=True)
+    client_out_log = sess.client_log_dir / "test_client_1c_out.log"
+    client_stdout_log = "test_client_stdout.log"
+    argv = runtime.build_test_client_argv(
+        r_onec,
+        connection_mode=mode,
+        connection_value=r_value,
+        port=r_port,
+        username=r_user,
+        password=r_pass,
+        extra_args=extra_args,
+        execute=execute,
+        command_parameter=command_parameter,
+        out_log=client_out_log,
+    )
+    sess.test_client_process = runtime.start_test_client(
+        argv,
+        log_dir=sess.client_log_dir,
+        display=sess.display,
+        log_name=client_stdout_log,
+    )
     params = {"base_url": r_base, "username": r_user, "password": r_pass,
-              "port": r_port, "onec_path": r_onec, "host": host,
-              "extra_args": extra_args, "execute": execute,
-              "command_parameter": command_parameter,
+              "port": r_port, "host": host, "client_pid": sess.test_client_process.pid,
+              "client_log": str(client_out_log), "client_stdout_log": str(sess.client_log_dir / client_stdout_log),
               "connection_mode": mode, "connection_value": r_value,
               "target_connection_mode": target_connection_mode}
     _touch_session(sess)
-    result = await sess.bridge.call("connect_test_client", params)
+    try:
+        result = await sess.bridge.call("attach_test_client", params)
+    except Exception:
+        runtime.kill_process(sess.test_client_process, "test-client")
+        sess.test_client_process = None
+        raise
     return _record_tool(sess.session_id, "connect_test_client", params, result)
 
 
