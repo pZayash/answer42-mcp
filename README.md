@@ -1,6 +1,6 @@
 # Answer42
 
-![Answer42 logo](https://gitlab.com/platform42/answer42-mcp/-/raw/v0.2.3/docs/assets/answer42-logo.png)
+![Answer42 logo](https://gitlab.com/platform42/answer42-mcp/-/raw/v0.2.4/docs/assets/answer42-logo.png)
 
 **Answer42** — MCP-инструмент для интерактивного управления UI **1С:Предприятия** через клиент тестирования. Он позволяет AI-агенту открывать формы 1С, нажимать кнопки, заполнять поля, выбирать ссылки из форм выбора, работать с таблицами, динамическими списками и табличными документами.
 
