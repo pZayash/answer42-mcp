@@ -2490,6 +2490,23 @@ async def command_interface_commands(
 
 
 @mcp.tool()
+async def command_interface_search(
+    query: Annotated[str, "Search text to match against command title, path and navigation URL"],
+    section: Annotated[str, "Optional top-level section title substring to activate before searching"] = "",
+    max_results: Annotated[int, "Maximum number of matches to return; 0 means no limit"] = 20,
+    window_title: Annotated[str, "Optional window title substring to activate before reading command interface"] = "",
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Search live command-interface commands by title, path or navigation URL."""
+    return await _bridge_call_recorded(
+        session_id,
+        "command_interface_search",
+        {"query": query, "section": section, "max_results": max_results, "window_title": window_title},
+    )
+
+
+@mcp.tool()
 async def group_expand(name: Annotated[str, "Group technical name"] = "", title: Annotated[str, "Group title substring"] = "", *, session_id: Annotated[str, "Session id"] = DEFAULT_SESSION) -> Any:
     """Expand a collapsible form group."""
     return await _bridge_call_recorded(session_id, "group_expand", {"name": name, "title": title})
