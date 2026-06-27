@@ -39,6 +39,7 @@ from .recorder import RecordingSession
 
 mcp = FastMCP("Answer42")
 _RAG = RagService()
+_RAG_ENABLED = os.getenv("ONEC_MCP_DISABLE_RAG", "").strip().lower() not in {"1", "true", "yes", "on"}
 DEFAULT_SESSION = "default"
 STATE_FILE = os_support.runtime_path("ONEC_MCP_SESSION_STATE", "sessions.json")
 AUTORELOAD_PID_FILE = os_support.runtime_path("ONEC_MCP_AUTORELOAD_PID_FILE", "answer42-autoreload.pid")
@@ -382,6 +383,7 @@ class SessionState:
         )
         self.recorder = RecordingSession()
         self.rag_snapshot: str = ""
+        self.rag_enabled: bool = True
         self.idle_timeout_seconds: int = 60 * 60
         self.last_activity_monotonic: float = time.monotonic()
 
@@ -402,6 +404,7 @@ class SessionState:
             "file_client_ibsrv_port": self.file_client_ibsrv_port,
             "shared_file_key": self.shared_file_key,
             "rag_snapshot": self.rag_snapshot,
+            "rag_enabled": self.rag_enabled,
             "idle_timeout_seconds": self.idle_timeout_seconds,
         }
 
@@ -424,6 +427,7 @@ class SessionState:
         sess.file_client_ibsrv_port = int(data.get("file_client_ibsrv_port") or 0)
         sess.shared_file_key = str(data.get("shared_file_key") or "")
         sess.rag_snapshot = str(data.get("rag_snapshot", ""))
+        sess.rag_enabled = bool(data.get("rag_enabled", True))
         sess.idle_timeout_seconds = int(data.get("idle_timeout_seconds") or 60 * 60)
         return sess
 
@@ -820,6 +824,75 @@ def _record_tool(
     return result
 
 
+def _rag_disabled_result(session_rag_enabled: bool = True) -> dict[str, Any]:
+    reason = "rag_disabled_for_session" if _RAG_ENABLED and not session_rag_enabled else "rag_disabled"
+    message = (
+        "Built-in Answer42 RAG is disabled for this session. Start session with rag_enabled=true to use RAG tools."
+        if reason == "rag_disabled_for_session"
+        else "Built-in Answer42 RAG is disabled for this MCP server. Start without --disable-rag / ONEC_MCP_DISABLE_RAG to use RAG tools."
+    )
+    return {
+        "available": False,
+        "rag_enabled": False,
+        "server_rag_enabled": _RAG_ENABLED,
+        "session_rag_enabled": session_rag_enabled,
+        "reason": reason,
+        "message": message,
+    }
+
+
+def _rag_diagnostic(session_id: str, snapshot: str | None) -> dict[str, Any]:
+    sess = _SESSIONS.get(session_id) or _load_persisted_sessions().get(session_id)
+    session_snapshot = sess.rag_snapshot if sess is not None else ""
+    session_rag_enabled = sess.rag_enabled if sess is not None else True
+    configured_snapshot = bool(snapshot or session_snapshot)
+    effective_snapshot = snapshot or session_snapshot or None
+    diagnostics: list[dict[str, Any]] = []
+    if not _RAG_ENABLED or not session_rag_enabled:
+        diagnostics.append(_rag_disabled_result(session_rag_enabled))
+    elif not configured_snapshot:
+        diagnostics.append(
+            {
+                "code": "snapshot_not_specified",
+                "message": "RAG snapshot is not specified for this session. Pass snapshot/rag_snapshot or create/bind one with rag_snapshot_create.",
+            }
+        )
+    elif not _RAG.snapshot_has_index(effective_snapshot):
+        diagnostics.append(
+            {
+                "code": "snapshot_has_no_indexed_data",
+                "snapshot": effective_snapshot,
+                "message": "RAG has no indexed metadata for this snapshot. Register sources with rag_source_add/rag_sources_add_from_directory and run rag_index_build.",
+            }
+        )
+    return {
+        "rag_enabled": _RAG_ENABLED,
+        "snapshot": effective_snapshot,
+        "session_snapshot": session_snapshot,
+        "diagnostics": diagnostics,
+    }
+
+
+def _rag_require_enabled(session_id: str, action: str, params: dict[str, Any]) -> dict[str, Any] | None:
+    sess = _session(session_id)
+    if _RAG_ENABLED and sess.rag_enabled:
+        return None
+    return _record_tool(session_id, action, params, _rag_disabled_result(sess.rag_enabled))
+
+
+def _register_startup_rag_source_dirs(paths: list[str], prefix: str, recursive: bool, max_depth: int) -> None:
+    env_paths = os.getenv("ONEC_MCP_RAG_SOURCE_DIRS", "")
+    all_paths = list(paths)
+    if env_paths:
+        all_paths.extend(part.strip() for part in re.split(r"[:;]", env_paths) if part.strip())
+    for path in all_paths:
+        try:
+            result = _RAG.add_sources_from_directory(path, prefix=prefix, recursive=recursive, max_depth=max_depth, watch=True)
+            logging.info("RAG source dir registered: %s (%s sources)", path, result.get("registered_count"))
+        except Exception as exc:
+            logging.warning("Could not register RAG source dir %s: %s", path, exc)
+
+
 def _norm_key(value: Any) -> str:
     return str(value or "").strip().casefold()
 
@@ -1161,7 +1234,7 @@ def _resolve_runtime(
 
 # ---------------------------------------------------------------------------
 # 1C configuration RAG / metadata index tools
-# ---------------------------------------------------------------------------# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # 1C configuration RAG / metadata index tools
 # ---------------------------------------------------------------------------
 
@@ -1176,6 +1249,9 @@ def rag_source_add(
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> dict[str, Any]:
     """Register/update a 1C source tree; format is detected automatically when format=auto."""
+    disabled = _rag_require_enabled(session_id, "rag_source_add", {"name": name, "path": path, "kind": kind, "format": format})
+    if disabled is not None:
+        return disabled
     detected = _RAG.detect_source(path) if format == "auto" else {"format": format}
     effective_format = str(detected.get("format") or format)
     result = _RAG.add_source(name=name, path=path, kind=kind, format=effective_format)
@@ -1185,11 +1261,71 @@ def rag_source_add(
 
 
 @mcp.tool()
-def rag_sources_list(*,
+def rag_sources_add_from_directory(
+    path: Annotated[str, "Directory where Answer42 should discover 1C configurations/extensions"],
+    prefix: Annotated[str, "Optional prefix for generated source names"] = "",
+    recursive: Annotated[bool, "Search child directories"] = True,
+    max_depth: Annotated[int, "Maximum recursive discovery depth"] = 4,
+    watch: Annotated[bool, "Remember this directory and auto-discover new sources on future RAG listings"] = True,
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> dict[str, Any]:
+    """Discover/register 1C configuration and extension source directories under a root directory."""
+    params = {"path": path, "prefix": prefix, "recursive": recursive, "max_depth": max_depth, "watch": watch}
+    disabled = _rag_require_enabled(session_id, "rag_sources_add_from_directory", params)
+    if disabled is not None:
+        return disabled
+    return _record_tool(session_id, "rag_sources_add_from_directory", params, _RAG.add_sources_from_directory(path, prefix=prefix, recursive=recursive, max_depth=max_depth, watch=watch))
+
+
+@mcp.tool()
+def rag_source_roots_list(*,
+    sync: Annotated[bool, "Discover new sources in watched roots before listing"] = True,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> dict[str, Any]:
+    """List RAG source discovery roots and optionally sync newly added configurations/extensions."""
+    params = {"sync": sync}
+    disabled = _rag_require_enabled(session_id, "rag_source_roots_list", params)
+    if disabled is not None:
+        return disabled
+    result = {"watch_roots": _RAG.list_watch_roots()}
+    if sync:
+        result["sync"] = _RAG.sync_watch_roots()
+        result["watch_roots"] = _RAG.list_watch_roots()
+    return _record_tool(session_id, "rag_source_roots_list", params, result)
+
+
+@mcp.tool()
+def rag_available_configurations(
+    sync: Annotated[bool, "Discover new sources in watched roots before listing"] = True,
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> dict[str, Any]:
+    """List RAG-available configurations, extensions, snapshots and discovery roots."""
+    params = {"sync": sync}
+    disabled = _rag_require_enabled(session_id, "rag_available_configurations", params)
+    if disabled is not None:
+        return disabled
+    result = _RAG.available_configurations(sync=sync)
+    sess = _session(session_id)
+    result["session_snapshot"] = sess.rag_snapshot
+    result["diagnostics"] = _rag_diagnostic(session_id, sess.rag_snapshot).get("diagnostics", [])
+    return _record_tool(session_id, "rag_available_configurations", params, result)
+
+
+@mcp.tool()
+def rag_sources_list(
+    sync: Annotated[bool, "Discover new sources in watched roots before listing"] = True,
+    *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> list[dict[str, Any]]:
     """List registered 1C source trees."""
-    return _record_tool(session_id, "rag_sources_list", {}, _RAG.list_sources())
+    disabled = _rag_require_enabled(session_id, "rag_sources_list", {"sync": sync})
+    if disabled is not None:
+        return disabled
+    if sync:
+        _RAG.sync_watch_roots()
+    return _record_tool(session_id, "rag_sources_list", {"sync": sync}, _RAG.list_sources())
 
 
 @mcp.tool()
@@ -1202,6 +1338,10 @@ def rag_snapshot_create(
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> dict[str, Any]:
     """Create/update an effective configuration snapshot from base + extensions."""
+    params = {"name": name, "base": base, "extensions": extensions, "sources": sources}
+    disabled = _rag_require_enabled(session_id, "rag_snapshot_create", params)
+    if disabled is not None:
+        return disabled
     result = _RAG.create_snapshot(name=name, base=base, extensions=extensions, sources=sources)
     sess = _session(session_id)
     sess.rag_snapshot = str(result.get("name") or name)
@@ -1216,6 +1356,9 @@ def rag_snapshots_list(*,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> list[dict[str, Any]]:
     """List effective RAG snapshots and their layers."""
+    disabled = _rag_require_enabled(session_id, "rag_snapshots_list", {})
+    if disabled is not None:
+        return disabled
     return _record_tool(session_id, "rag_snapshots_list", {}, _RAG.list_snapshots())
 
 
@@ -1227,6 +1370,9 @@ def rag_index_build(
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> dict[str, Any]:
     """Build/rebuild the SQLite/FTS RAG index for a source or snapshot."""
+    disabled = _rag_require_enabled(session_id, "rag_index_build", {"snapshot": snapshot, "source": source})
+    if disabled is not None:
+        return disabled
     sess = _session(session_id)
     effective_snapshot = snapshot or sess.rag_snapshot or None
     if effective_snapshot:
@@ -1245,9 +1391,14 @@ def rag_lookup_object(
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> dict[str, Any]:
     """Look up an indexed 1C metadata object, including navigation, fields and forms."""
+    disabled = _rag_require_enabled(session_id, "rag_lookup_object", {"object": object, "snapshot": snapshot})
+    if disabled is not None:
+        return disabled
     sess = _session(session_id)
     effective_snapshot = snapshot or sess.rag_snapshot or None
-    return _record_tool(session_id, "rag_lookup_object", {"object": object, "snapshot": effective_snapshot}, _RAG.lookup_object(object=object, snapshot=effective_snapshot))
+    result = _RAG.lookup_object(object=object, snapshot=effective_snapshot)
+    result["rag_diagnostic"] = _rag_diagnostic(session_id, snapshot)
+    return _record_tool(session_id, "rag_lookup_object", {"object": object, "snapshot": effective_snapshot}, result)
 
 
 @mcp.tool()
@@ -1259,9 +1410,15 @@ def rag_query(
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> dict[str, Any]:
     """Search business terms and full-text RAG chunks in the local SQLite index."""
+    disabled = _rag_require_enabled(session_id, "rag_query", {"query": query, "snapshot": snapshot, "limit": limit})
+    if disabled is not None:
+        return disabled
     sess = _session(session_id)
     effective_snapshot = snapshot or sess.rag_snapshot or None
-    return _record_tool(session_id, "rag_query", {"query": query, "snapshot": effective_snapshot, "limit": limit}, _RAG.query(text=query, snapshot=effective_snapshot, limit=limit))
+    result = _RAG.query(text=query, snapshot=effective_snapshot, limit=limit)
+    result["snapshot"] = effective_snapshot
+    result["rag_diagnostic"] = _rag_diagnostic(session_id, snapshot)
+    return _record_tool(session_id, "rag_query", {"query": query, "snapshot": effective_snapshot, "limit": limit}, result)
 
 
 @mcp.tool()
@@ -1300,6 +1457,7 @@ def sessions_list() -> dict[str, Any]:
                 or (not file_client_rt.server_process and runtime.is_port_listening(file_client_rt.server.address, file_client_rt.server.port))
             )),
             "rag_snapshot": sess.rag_snapshot,
+            "rag_enabled": _RAG_ENABLED and sess.rag_enabled,
             "idle_timeout_seconds": sess.idle_timeout_seconds,
         })
     return {"count": len(items), "sessions": items}
@@ -1357,6 +1515,9 @@ def session_status(*,
             "shared_file_key": sess.shared_file_key,
         },
         "rag_snapshot": sess.rag_snapshot,
+        "rag_enabled": _RAG_ENABLED and sess.rag_enabled,
+        "server_rag_enabled": _RAG_ENABLED,
+        "rag_diagnostic": _rag_diagnostic(session_id, sess.rag_snapshot),
         "idle_timeout_seconds": sess.idle_timeout_seconds,
     }
 
@@ -1372,6 +1533,7 @@ async def start_session(
     extra_args: Annotated[str, "Extra raw 1C command-line arguments for the test client"] = "",
     execute: Annotated[str, "External data processor/report path for the test-client /Execute command-line parameter"] = "",
     command_parameter: Annotated[str, "Additional test-client /C value; when extra_args already contains /C, this value is appended with ';'"] = "",
+    rag_enabled: Annotated[bool, "Enable built-in RAG for this session"] = True,
 ) -> dict[str, Any]:
     """One-shot session factory: detect version, start infrastructure and connect the 1C test client."""
     base_url = _platform.normalize_infobase_url(base_url)
@@ -1413,9 +1575,10 @@ async def start_session(
             ws_port=ws_port, ibsrv_port=ibsrv_port, testclient_port=testclient_port,
             data_dir=data_dir, base_url=base_url, username=username, password=password
         )
+        sess.rag_enabled = bool(rag_enabled)
         sess.idle_timeout_seconds = max(0, int(idle_timeout_minutes)) * 60
         _cleanup_stale_session_processes(sess, "before start_session")
-        if base_url:
+        if base_url and _RAG_ENABLED and sess.rag_enabled:
             bound_snapshot = _snapshot_for_base_url(base_url)
             if bound_snapshot:
                 sess.rag_snapshot = bound_snapshot
@@ -1603,6 +1766,8 @@ async def start_session(
         "ws_port": ws_port, "ibsrv_port": ibsrv_port,
         "testclient_port": testclient_port, "data_dir": str(data_dir),
         "bridge_url": sess.bridge.url, "rag_snapshot": sess.rag_snapshot,
+        "rag_enabled": _RAG_ENABLED and sess.rag_enabled,
+        "server_rag_enabled": _RAG_ENABLED,
         "idle_timeout_seconds": sess.idle_timeout_seconds,
         "test_client": connect_result, **pipeline_info,
     }
@@ -2600,7 +2765,12 @@ async def ui_tree(max_depth: Annotated[int, "Maximum UI tree depth"] = 4,
     tree = await _bridge_call_recorded(session_id, "ui_tree", {"max_depth": max_depth, "include_hidden": include_hidden})
     if include_rag_types:
         sess = _session(session_id)
-        tree = _enrich_ui_tree_with_rag_types(tree, snapshot=rag_snapshot or sess.rag_snapshot or None)
+        if _RAG_ENABLED and sess.rag_enabled:
+            tree = _enrich_ui_tree_with_rag_types(tree, snapshot=rag_snapshot or sess.rag_snapshot or None)
+            if isinstance(tree, dict):
+                tree["rag_diagnostic"] = _rag_diagnostic(session_id, rag_snapshot)
+        elif isinstance(tree, dict):
+            tree["rag_diagnostic"] = _rag_diagnostic(session_id, rag_snapshot)
     return tree
 
 
@@ -3028,6 +3198,9 @@ async def dynamic_list_available_fields(
 ) -> Any:
     """Return RAG-known fields available for dynamic-list filtering and ordering."""
     sess = _session(session_id)
+    disabled = _rag_require_enabled(session_id, "dynamic_list_available_fields", {"object": object, "rag_snapshot": rag_snapshot})
+    if disabled is not None:
+        return disabled
     if not object:
         try:
             win = await _bridge_call_recorded(session_id, "active_window", {})
@@ -3036,7 +3209,7 @@ async def dynamic_list_available_fields(
             object = ""
     effective_snapshot = rag_snapshot or sess.rag_snapshot or None
     fields = _rag_fields_for_object(object, snapshot=effective_snapshot)
-    return {"object": object, "rag_object": _metadata_name_to_rag_name(object), "snapshot": effective_snapshot, "count": len(fields), "fields": fields}
+    return {"object": object, "rag_object": _metadata_name_to_rag_name(object), "snapshot": effective_snapshot, "count": len(fields), "fields": fields, "rag_diagnostic": _rag_diagnostic(session_id, rag_snapshot)}
 
 
 @mcp.tool()
@@ -3327,6 +3500,8 @@ async def _run() -> None:
 
 
 def main() -> None:
+    global _RAG_ENABLED
+
     if len(sys.argv) > 1 and sys.argv[1] in {"install-skills", "skills-install"}:
         raise SystemExit(skill_installer.main(sys.argv[2:]))
     if len(sys.argv) > 1 and sys.argv[1] in {"release", "release-pypi"}:
@@ -3334,6 +3509,35 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description="MCP server for 1C:Enterprise test manager")
     parser.add_argument("--log-level", default=os.getenv("ONEC_MCP_LOG_LEVEL", "INFO"))
+    parser.add_argument(
+        "--disable-rag",
+        action="store_true",
+        default=os.getenv("ONEC_MCP_DISABLE_RAG", "").strip().lower() in {"1", "true", "yes", "on"},
+        help="disable built-in Answer42 RAG tools and RAG enrichment",
+    )
+    parser.add_argument(
+        "--rag-source-dir",
+        action="append",
+        default=None,
+        help="directory to scan/watch for 1C configuration or extension sources; can be passed multiple times",
+    )
+    parser.add_argument(
+        "--rag-source-prefix",
+        default=os.getenv("ONEC_MCP_RAG_SOURCE_PREFIX", ""),
+        help="prefix for source names discovered from --rag-source-dir / ONEC_MCP_RAG_SOURCE_DIRS",
+    )
+    parser.add_argument(
+        "--rag-source-max-depth",
+        type=int,
+        default=int(os.getenv("ONEC_MCP_RAG_SOURCE_MAX_DEPTH", "4")),
+        help="maximum recursive depth for RAG source directory discovery",
+    )
+    parser.add_argument(
+        "--rag-source-no-recursive",
+        action="store_true",
+        default=os.getenv("ONEC_MCP_RAG_SOURCE_RECURSIVE", "1").strip().lower() in {"0", "false", "no", "off"},
+        help="do not recurse while discovering RAG source directories",
+    )
     parser.add_argument(
         "--dev",
         default=os.getenv("ONEC_MCP_DEV", ""),
@@ -3348,7 +3552,12 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    _RAG_ENABLED = not args.disable_rag
     logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO))
+    if _RAG_ENABLED:
+        _register_startup_rag_source_dirs(args.rag_source_dir or [], args.rag_source_prefix, not args.rag_source_no_recursive, args.rag_source_max_depth)
+    else:
+        logging.info("Built-in Answer42 RAG is disabled")
     _start_autoreload_watcher(args.dev, args.dev_restart_timeout)
     asyncio.run(_run())
 

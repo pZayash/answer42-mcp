@@ -23,11 +23,19 @@ description: "RAG-индекс 1С metadata через Answer42"
 rag_source_detect(path)
 rag_source_add(name="MS", path="/path/to/MS/src", kind="base", format="auto")
 rag_source_add(name="Platform42", path="/path/to/Platform42/src", kind="extension", format="auto")
+rag_sources_add_from_directory(path="/path/to/repos", prefix="", recursive=true, watch=true)
+rag_available_configurations(sync=true)
 rag_snapshot_create(name="MS+Platform42", base="MS", extensions=["Platform42"])
 rag_index_build(snapshot="MS+Platform42")
 rag_lookup_object(object="РегистрСведений.РезервныеКопииОбластейДанных", snapshot="MS+Platform42")
 rag_query(query="резервные копии длительность", snapshot="MS+Platform42", limit=10)
 ```
+
+Если `rag_lookup_object`, `rag_query`, `ui_tree(include_rag_types=true)` или
+`dynamic_list_available_fields` возвращают `rag_diagnostic.diagnostics[]`, сначала
+обработай его: snapshot может быть не указан для сессии или индекс выбранного
+snapshot может быть пустым. Не делай вид, что RAG подтвердил отсутствие объекта,
+если диагностика говорит, что данных нет.
 
 ## CLI-эквивалент
 

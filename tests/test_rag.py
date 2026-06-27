@@ -246,3 +246,61 @@ def test_designer_xml_catalog_children_from_configurator_dump(tmp_path: Path):
     match = result["matches"][0]
     assert {a["name"] for a in match["attributes"]} >= {"Реквизит1", "ВладелецСсылка"}
     assert {tp["name"] for tp in match["table_parts"]} >= {"ДополнительныеСтроки"}
+
+
+def _write_minimal_edt_source(root: Path, object_name: str, root_tag: str = "Configuration") -> None:
+    (root / "Configuration").mkdir(parents=True)
+    (root / "Configuration" / "Configuration.mdo").write_text(
+        f"<MetaDataObject><{root_tag}><name>{root.name}</name></{root_tag}></MetaDataObject>",
+        encoding="utf-8",
+    )
+    obj_dir = root / "Catalogs" / object_name
+    obj_dir.mkdir(parents=True)
+    (obj_dir / f"{object_name}.mdo").write_text(
+        f"<MetaDataObject><Catalog><name>{object_name}</name><synonym><key>ru</key><value>{object_name}</value></synonym></Catalog></MetaDataObject>",
+        encoding="utf-8",
+    )
+
+
+def test_discover_register_and_sync_source_roots(tmp_path: Path):
+    root = tmp_path / "sources"
+    base = root / "BaseCfg"
+    ext = root / "extensions" / "Ext1"
+    _write_minimal_edt_source(base, "Партнеры")
+    _write_minimal_edt_source(ext, "Дополнение", root_tag="Extension")
+
+    svc = RagService(tmp_path / "rag.sqlite")
+    discovered = svc.discover_sources(str(root), recursive=True, max_depth=4)
+    assert {Path(item["path"]).name for item in discovered} == {"BaseCfg", "Ext1"}
+    assert {item["kind"] for item in discovered} >= {"configuration", "extension"}
+
+    result = svc.add_sources_from_directory(str(root), prefix="T_", watch=True)
+    assert result["registered_count"] == 2
+    assert svc.list_watch_roots()[0]["path"] == str(root.resolve())
+    sources = {src["name"]: src for src in svc.list_sources()}
+    assert sources["T_BaseCfg"]["kind"] == "configuration"
+    assert sources["T_Ext1"]["kind"] == "extension"
+
+    new_cfg = root / "NewCfg"
+    _write_minimal_edt_source(new_cfg, "Новый")
+    sync = svc.sync_watch_roots()
+    assert sync["roots_count"] == 1
+    assert "T_NewCfg" in {src["name"] for src in svc.list_sources()}
+
+
+def test_query_respects_snapshot_filter_and_reports_index_state(tmp_path: Path):
+    src1 = tmp_path / "src1"
+    src2 = tmp_path / "src2"
+    _write_minimal_edt_source(src1, "Партнеры")
+    _write_minimal_edt_source(src2, "Клиенты")
+
+    svc = RagService(tmp_path / "rag.sqlite")
+    svc.add_source("SRC1", str(src1), kind="configuration")
+    svc.add_source("SRC2", str(src2), kind="configuration")
+    svc.create_snapshot("S1", sources=["SRC1"])
+    svc.create_snapshot("S2", sources=["SRC2"])
+    assert not svc.snapshot_has_index("S1")
+    svc.build_index(snapshot="S1")
+    assert svc.snapshot_has_index("S1")
+    assert svc.query("Партнеры", snapshot="S1")["fts"]
+    assert not svc.query("Партнеры", snapshot="S2")["fts"]

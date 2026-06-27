@@ -5,7 +5,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class RagStore:
@@ -25,7 +25,7 @@ class RagStore:
                 """
                 CREATE TABLE IF NOT EXISTS schema_info(version INTEGER NOT NULL);
                 DELETE FROM schema_info;
-                INSERT INTO schema_info(version) VALUES (2);
+                INSERT INTO schema_info(version) VALUES (3);
 
                 CREATE TABLE IF NOT EXISTS sources(
                   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -42,6 +42,16 @@ class RagStore:
                   id INTEGER PRIMARY KEY AUTOINCREMENT,
                   name TEXT NOT NULL UNIQUE,
                   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE TABLE IF NOT EXISTS source_roots(
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  path TEXT NOT NULL UNIQUE,
+                  recursive INTEGER NOT NULL DEFAULT 1,
+                  max_depth INTEGER NOT NULL DEFAULT 4,
+                  prefix TEXT NOT NULL DEFAULT '',
+                  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
 
                 CREATE TABLE IF NOT EXISTS snapshot_layers(

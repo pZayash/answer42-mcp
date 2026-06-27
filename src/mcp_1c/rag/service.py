@@ -5,7 +5,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from .detect import detect_source_format
+from .detect import detect_source_format, discover_source_roots
 from .model import SourceInfo
 from .parsers import navigation_for_object, normalize_query, parse_source
 from .store import RagStore, json_dumps, row_to_dict
@@ -24,6 +24,9 @@ class RagService:
 
     def detect_source(self, path: str) -> dict[str, Any]:
         return {"path": path, "format": detect_source_format(path), "exists": Path(path).exists()}
+
+    def discover_sources(self, root: str, recursive: bool = True, max_depth: int = 4) -> list[dict[str, Any]]:
+        return discover_source_roots(root, recursive=recursive, max_depth=max_depth)
 
     def add_source(self, name: str, path: str, kind: str = "standalone", format: str = "auto") -> dict[str, Any]:
         p = Path(path).resolve()
@@ -46,6 +49,110 @@ class RagService:
     def list_sources(self) -> list[dict[str, Any]]:
         with self.store.connect() as con:
             return [dict(r) for r in con.execute("SELECT * FROM sources ORDER BY id")]
+
+    def add_sources_from_directory(self, root: str, prefix: str = "", recursive: bool = True, max_depth: int = 4, watch: bool = False) -> dict[str, Any]:
+        discovered = self.discover_sources(root, recursive=recursive, max_depth=max_depth)
+        registered: list[dict[str, Any]] = []
+        for item in discovered:
+            source_path = Path(item["path"])
+            name = prefix + _safe_source_name(source_path.name)
+            if not name:
+                name = prefix + ("Source" + str(len(registered) + 1))
+            original_name = name
+            index = 2
+            while any(src["name"] == name for src in self.list_sources()):
+                existing = next((src for src in self.list_sources() if src["name"] == name), None)
+                if existing and Path(existing["path"]).resolve() == source_path.resolve():
+                    break
+                name = f"{original_name}_{index}"
+                index += 1
+            registered.append(self.add_source(name=name, path=str(source_path), kind=item.get("kind") or "configuration", format=item.get("format") or "auto"))
+        if watch:
+            self.add_watch_root(root, recursive=recursive, max_depth=max_depth, prefix=prefix)
+        return {"root": str(Path(root).expanduser().resolve()), "watch": watch, "discovered_count": len(discovered), "registered_count": len(registered), "discovered": discovered, "registered": registered}
+
+    def add_watch_root(self, path: str, recursive: bool = True, max_depth: int = 4, prefix: str = "") -> dict[str, Any]:
+        p = Path(path).expanduser().resolve()
+        with self.store.connect() as con:
+            con.execute(
+                """
+                INSERT INTO source_roots(path,recursive,max_depth,prefix)
+                VALUES(?,?,?,?)
+                ON CONFLICT(path) DO UPDATE SET recursive=excluded.recursive,
+                  max_depth=excluded.max_depth, prefix=excluded.prefix, updated_at=CURRENT_TIMESTAMP
+                """,
+                (str(p), int(bool(recursive)), int(max_depth), prefix),
+            )
+            row = con.execute("SELECT * FROM source_roots WHERE path=?", (str(p),)).fetchone()
+        return row_to_dict(row)
+
+    def list_watch_roots(self) -> list[dict[str, Any]]:
+        with self.store.connect() as con:
+            return [dict(r) for r in con.execute("SELECT * FROM source_roots ORDER BY id")]
+
+    def sync_watch_roots(self) -> dict[str, Any]:
+        roots = self.list_watch_roots()
+        results = []
+        for root in roots:
+            results.append(self.add_sources_from_directory(root["path"], prefix=root.get("prefix") or "", recursive=bool(root.get("recursive")), max_depth=int(root.get("max_depth") or 4), watch=False))
+        return {"roots_count": len(roots), "roots": roots, "results": results}
+
+    def available_configurations(self, sync: bool = True) -> dict[str, Any]:
+        sync_result = self.sync_watch_roots() if sync else None
+        sources = self.list_sources()
+        snapshots = self.list_snapshots()
+        indexed = self.indexed_source_stats()
+        indexed_by_source_id = {item["source_id"]: item for item in indexed}
+        configs = []
+        extensions = []
+        other = []
+        for src in sources:
+            item = dict(src)
+            item["indexed"] = indexed_by_source_id.get(src["id"], {"objects": 0, "chunks": 0})
+            kind = str(src.get("kind") or "")
+            if kind in {"base", "configuration"}:
+                configs.append(item)
+            elif kind == "extension":
+                extensions.append(item)
+            else:
+                other.append(item)
+        return {"rag_enabled": True, "db_path": self.db_path, "watch_roots": self.list_watch_roots(), "sync": sync_result, "configurations": configs, "extensions": extensions, "other_sources": other, "snapshots": snapshots}
+
+    def indexed_source_stats(self) -> list[dict[str, Any]]:
+        with self.store.connect() as con:
+            return [
+                dict(r)
+                for r in con.execute(
+                    """
+                    SELECT s.id AS source_id, s.name AS source_name,
+                           COUNT(DISTINCT mo.id) AS objects,
+                           COUNT(DISTINCT rc.id) AS chunks
+                    FROM sources s
+                    LEFT JOIN metadata_objects mo ON mo.source_id=s.id
+                    LEFT JOIN rag_chunks rc ON rc.object_id=mo.id
+                    GROUP BY s.id, s.name ORDER BY s.id
+                    """
+                )
+            ]
+
+    def snapshot_has_index(self, snapshot: str | int | None) -> bool:
+        with self.store.connect() as con:
+            if snapshot is None:
+                row = con.execute("SELECT 1 FROM metadata_objects LIMIT 1").fetchone()
+                return row is not None
+            snap = _snapshot_row(con, snapshot)
+            if snap is None:
+                return False
+            row = con.execute(
+                """
+                SELECT 1
+                FROM metadata_objects mo
+                WHERE mo.source_id IN (SELECT source_id FROM snapshot_layers WHERE snapshot_id=?)
+                LIMIT 1
+                """,
+                (snap["id"],),
+            ).fetchone()
+            return row is not None
 
     def create_snapshot(self, name: str, base: str | None = None, extensions: list[str] | None = None, sources: list[str] | None = None) -> dict[str, Any]:
         layers: list[tuple[str, str]] = []
@@ -314,28 +421,65 @@ class RagService:
     def query(self, text: str, snapshot: str | int | None = None, limit: int = 10) -> dict[str, Any]:
         q = normalize_query(text)
         with self.store.connect() as con:
+            snapshot_id = None
+            if snapshot is not None:
+                snap = _snapshot_row(con, snapshot)
+                if snap is None:
+                    raise ValueError(f"snapshot not found: {snapshot}")
+                snapshot_id = snap["id"]
+            term_filter = "AND bt.snapshot_id=?" if snapshot_id is not None else ""
+            term_params: list[Any] = [f"%{q}%"]
+            if snapshot_id is not None:
+                term_params.append(snapshot_id)
+            term_params.append(limit)
             term_rows = [
                 dict(r)
                 for r in con.execute(
-                    """
+                    f"""
                     SELECT bt.*, mo.full_name, mo.kind, s.name AS source_name
                     FROM business_terms bt
                     LEFT JOIN metadata_objects mo ON mo.id=bt.object_id
                     LEFT JOIN sources s ON s.id=mo.source_id
-                    WHERE bt.normalized_term LIKE ?
+                    WHERE bt.normalized_term LIKE ? {term_filter}
                     ORDER BY bt.confidence DESC LIMIT ?
                     """,
-                    (f"%{q}%", limit),
+                    term_params,
                 )
             ]
             fts_query = " ".join(q.split()) or q
             try:
-                fts_rows = [dict(r) for r in con.execute("SELECT text, object_full_name, kind, source_path, bm25(search_fts) AS score FROM search_fts WHERE search_fts MATCH ? ORDER BY score LIMIT ?", (fts_query, limit))]
+                if snapshot_id is None:
+                    fts_rows = [dict(r) for r in con.execute("SELECT text, object_full_name, kind, source_path, bm25(search_fts) AS score FROM search_fts WHERE search_fts MATCH ? ORDER BY score LIMIT ?", (fts_query, limit))]
+                else:
+                    fts_rows = [
+                        dict(r)
+                        for r in con.execute(
+                            """
+                            SELECT search_fts.text, search_fts.object_full_name, search_fts.kind,
+                                   search_fts.source_path, bm25(search_fts) AS score
+                            FROM search_fts JOIN rag_chunks rc ON rc.id=search_fts.chunk_id
+                            WHERE search_fts MATCH ? AND rc.snapshot_id=?
+                            ORDER BY score LIMIT ?
+                            """,
+                            (fts_query, snapshot_id, limit),
+                        )
+                    ]
             except Exception:
                 fts_rows = []
             if len(fts_rows) < limit:
                 seen = {(r.get("object_full_name"), r.get("source_path")) for r in fts_rows}
-                for row in con.execute("SELECT text, object_full_name, kind, source_path FROM search_fts WHERE lower(text) LIKE ? LIMIT ?", (f"%{q}%", limit)):
+                if snapshot_id is None:
+                    like_rows = con.execute("SELECT text, object_full_name, kind, source_path FROM search_fts WHERE lower(text) LIKE ? LIMIT ?", (f"%{q}%", limit))
+                else:
+                    like_rows = con.execute(
+                        """
+                        SELECT search_fts.text, search_fts.object_full_name, search_fts.kind, search_fts.source_path
+                        FROM search_fts JOIN rag_chunks rc ON rc.id=search_fts.chunk_id
+                        WHERE lower(search_fts.text) LIKE ? AND rc.snapshot_id=? LIMIT ?
+                        """,
+                        (f"%{q}%", snapshot_id, limit),
+                    )
+                for row in like_rows:
                     item = dict(row)
                     key = (item.get("object_full_name"), item.get("source_path"))
                     if key not in seen:
@@ -343,7 +487,7 @@ class RagService:
                         seen.add(key)
                     if len(fts_rows) >= limit:
                         break
-        return {"query": text, "terms": term_rows, "fts": fts_rows}
+        return {"query": text, "snapshot": snapshot, "terms": term_rows, "fts": fts_rows}
 
 
 def _git_commit(path: Path) -> str | None:
@@ -358,6 +502,11 @@ def _git_branch(path: Path) -> str | None:
         return subprocess.check_output(["git", "-C", str(path), "rev-parse", "--abbrev-ref", "HEAD"], text=True, stderr=subprocess.DEVNULL).strip()
     except Exception:
         return None
+
+
+def _safe_source_name(value: str) -> str:
+    cleaned = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in value.strip())
+    return cleaned.strip("_")
 
 
 def _snapshot_row(con, snapshot: str | int):

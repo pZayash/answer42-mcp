@@ -4,11 +4,14 @@ from pathlib import Path, PureWindowsPath
 from mcp_1c import platform as onec_platform
 from mcp_1c import runtime
 from mcp_1c.server import (
+    SessionState,
+    _SESSIONS,
     _append_available_users_to_auth_error,
     _extract_error_lines,
     _is_placeholder_password,
     _normalize_connection_mode,
     _parse_users_plain_text,
+    _rag_diagnostic,
     _users_url_for_base_url,
     mcp,
 )
@@ -52,6 +55,9 @@ EXPECTED_NEW_TOOLS = {
     "table_begin_edit",
     "table_end_edit",
     "table_editing_state",
+    "rag_sources_add_from_directory",
+    "rag_source_roots_list",
+    "rag_available_configurations",
 }
 
 
@@ -84,10 +90,25 @@ def test_selected_new_tool_schemas():
     assert tools["command_interface_search"].inputSchema["required"] == ["query"]
     assert tools["command_interface_search"].inputSchema["properties"]["max_results"]["default"] == 20
     assert tools["window_command_interface"].inputSchema["properties"]["window_title"]["default"] == ""
+    assert tools["start_session"].inputSchema["properties"]["rag_enabled"]["default"] is True
+    assert tools["rag_sources_add_from_directory"].inputSchema["required"] == ["path"]
+    assert tools["rag_sources_add_from_directory"].inputSchema["properties"]["watch"]["default"] is True
+    assert tools["rag_available_configurations"].inputSchema["properties"]["sync"]["default"] is True
     assert "connection_mode" not in tools["start_session"].inputSchema["properties"]
     assert "connection_value" not in tools["start_session"].inputSchema["properties"]
     assert tools["credentials_save"].inputSchema["required"] == ["url", "username", "password"]
     assert tools["credentials_remove"].inputSchema["required"] == ["url"]
+
+
+def test_rag_diagnostic_reports_missing_session_snapshot():
+    _SESSIONS["rag_diag_test"] = SessionState("rag_diag_test", "", Path("."), 10001, 10002, 10003, Path("/tmp/rag_diag_test"))
+    try:
+        diagnostic = _rag_diagnostic("rag_diag_test", None)
+    finally:
+        _SESSIONS.pop("rag_diag_test", None)
+
+    assert diagnostic["diagnostics"]
+    assert diagnostic["diagnostics"][0]["code"] == "snapshot_not_specified"
 
 
 def test_platform_version_from_windows_bin_dir():

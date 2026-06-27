@@ -87,7 +87,7 @@ class SessionState:
 - динамические списки: `dynamic_list_available_fields`, `dynamic_list_apply_settings`, `dynamic_list_set_order`, `dynamic_list_output`, `dynamic_list_open_settings`, `dynamic_list_clear_settings`, `dynamic_list_open_form_settings`;
 - табличные документы: `tabular_documents`, `tabular_document_text`, `tabular_document_save`;
 - доказательная запись: `recording_start`, `recording_capture`, `recording_stop`;
-- RAG: `rag_source_add`, `rag_sources_list`, `rag_snapshot_create`, `rag_snapshots_list`, `rag_index_build`, `rag_lookup_object`, `rag_query`.
+- RAG: `rag_source_add`, `rag_sources_add_from_directory`, `rag_source_roots_list`, `rag_sources_list`, `rag_available_configurations`, `rag_snapshot_create`, `rag_snapshots_list`, `rag_index_build`, `rag_lookup_object`, `rag_query`.
 
 ### `mcp_1c.bridge`
 
@@ -171,6 +171,24 @@ python3 scripts/rag_cli.py build --snapshot Configuration+Extension1
 python3 scripts/rag_cli.py lookup РегистрСведений.Регистр1 --snapshot Configuration+Extension1
 ```
 
+### Discovery roots
+
+MCP tool `rag_sources_add_from_directory(path, watch=true)` scans a directory for
+EDT/Designer XML configuration and extension roots, registers discovered sources,
+and stores the directory in `source_roots`. Later calls to `rag_sources_list`,
+`rag_source_roots_list` or `rag_available_configurations` can sync those roots and
+pick up newly added source trees automatically. Discovery is bounded by
+`max_depth` and skips noisy directories such as `.git`, `.venv`, `build`, `dist`
+and `node_modules`.
+
+`rag_available_configurations` returns grouped base/configuration sources,
+extensions, other sources, snapshots, discovery roots and per-source indexed
+object/chunk counts.
+
+If a RAG lookup/query runs without a session snapshot, or the selected snapshot
+has no indexed data, the result includes `rag_diagnostic.diagnostics[]` with a
+machine-readable code and remediation message for the agent.
+
 ## Доказательная запись
 
 `recording_start()` включает запись. Каждый записываемый bridge-вызов сохраняет слайд с:
@@ -191,4 +209,8 @@ python3 scripts/rag_cli.py lookup РегистрСведений.Регистр1
 | `ONEC_MCP_REQUEST_TIMEOUT` | Таймаут запроса, сек | `60` |
 | `ONEC_MCP_DATA_DIR` | Рабочая директория | `/tmp/onec-mcp` |
 | `MCP_1C_RAG_DB` | Путь к RAG SQLite | `build/rag/onec-rag.sqlite` |
+| `ONEC_MCP_DISABLE_RAG` | Отключить встроенный RAG (`1/true/yes/on`) | пусто |
+| `ONEC_MCP_RAG_SOURCE_DIRS` | `:`/`;`-separated directories for startup RAG discovery/watch | пусто |
+| `ONEC_MCP_RAG_SOURCE_PREFIX` | Prefix for auto-discovered source names | пусто |
+| `ONEC_MCP_RAG_SOURCE_MAX_DEPTH` | Discovery depth for RAG source dirs | `4` |
 | `DISPLAY` | X11 display | `:99` |
