@@ -23,6 +23,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -109,9 +110,10 @@ async def call_ok(session: ClientSession, name: str, args: dict | None = None):
     return value
 
 
-async def call_ui_ok(session: ClientSession, name: str, args: dict | None = None):
+async def call_ui_ok(session: ClientSession, name: str, args: dict | None = None, timeout: float | None = None):
     args = args or {}
-    result = await session.call_tool(name, args)
+    read_timeout = timedelta(seconds=timeout) if timeout else None
+    result = await session.call_tool(name, args, read_timeout_seconds=read_timeout)
     if result.isError:
         value = "\n".join(getattr(item, "text", "") for item in result.content)
         await _record_manual_step(session, args.get("session_id", "e2e-mcp"), name, args, {"error": value})
@@ -409,7 +411,7 @@ async def run_dynamic_lists(session: ClientSession, sid: str, suffix: str, scree
         "clear_first": True,
         "name": "Список",
         "session_id": sid,
-    })
+    }, timeout=180)
     await capture_screenshot(session, sid, str(screenshot_dir / "12-final-list.png"))
 
 
@@ -506,10 +508,20 @@ async def run_one_scenario(scenario: str) -> None:
     if os.environ.get("E2E_SKIP_KILL_ALL_1C") != "1":
         _kill_all_1c()
 
+    server_env = {
+        **os.environ,
+        "PYTHONPATH": "src",
+        # Some 1C UI commands (notably dynamic-list settings reset under
+        # parallel load) can legitimately take longer than the default bridge
+        # request timeout.  Keep the MCP client read timeout and the internal
+        # bridge timeout aligned so a late successful 1C response is not turned
+        # into an "unknown request id" after the bridge-side 60s timeout.
+        "ONEC_MCP_REQUEST_TIMEOUT": os.environ.get("ONEC_MCP_REQUEST_TIMEOUT", "180"),
+    }
     server_params = StdioServerParameters(
         command=sys.executable,
         args=["-m", "mcp_1c.server"],
-        env={**os.environ, "PYTHONPATH": "src"},
+        env=server_env,
     )
 
     async with stdio_client(server_params) as (read, write):
