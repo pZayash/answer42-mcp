@@ -2455,11 +2455,38 @@ async def object_context_menu(
 @mcp.tool()
 async def window_command_interface(
     max_depth: Annotated[int, "Serialization depth for returned command interface"] = 2,
+    window_title: Annotated[str, "Optional window title substring to activate before reading command interface"] = "",
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
     """Return active window command interface, when supported."""
-    return await _bridge_call_recorded(session_id, "window_command_interface", {"max_depth": max_depth})
+    return await _bridge_call_recorded(session_id, "window_command_interface", {"max_depth": max_depth, "window_title": window_title})
+
+
+@mcp.tool()
+async def command_interface_sections(
+    window_title: Annotated[str, "Optional window title substring to activate before reading command interface"] = "",
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Return top-level sections of the active window command interface."""
+    return await _bridge_call_recorded(session_id, "command_interface_sections", {"window_title": window_title})
+
+
+@mcp.tool()
+async def command_interface_commands(
+    section: Annotated[str, "Optional top-level section title substring, e.g. 'Главное' or 'Администрирование'"] = "",
+    max_depth: Annotated[int, "Serialization depth for returned command tree"] = 4,
+    window_title: Annotated[str, "Optional window title substring to activate before reading command interface"] = "",
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Return command-interface command tree and flattened command list, optionally filtered by section."""
+    return await _bridge_call_recorded(
+        session_id,
+        "command_interface_commands",
+        {"section": section, "max_depth": max_depth, "window_title": window_title},
+    )
 
 
 @mcp.tool()
