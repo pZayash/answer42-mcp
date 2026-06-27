@@ -36,6 +36,7 @@ EXPECTED_NEW_TOOLS = {
     "window_command_interface",
     "command_interface_sections",
     "command_interface_commands",
+    "command_interface_search",
     "group_expand",
     "group_collapse",
     "group_current_page",
@@ -80,6 +81,8 @@ def test_selected_new_tool_schemas():
     assert tools["decoration_click_link"].inputSchema["properties"]["presentation"]["default"] == ""
     assert tools["command_interface_commands"].inputSchema["properties"]["section"]["default"] == ""
     assert tools["command_interface_commands"].inputSchema["properties"]["max_depth"]["default"] == 4
+    assert tools["command_interface_search"].inputSchema["required"] == ["query"]
+    assert tools["command_interface_search"].inputSchema["properties"]["max_results"]["default"] == 20
     assert tools["window_command_interface"].inputSchema["properties"]["window_title"]["default"] == ""
     assert "connection_mode" not in tools["start_session"].inputSchema["properties"]
     assert "connection_value" not in tools["start_session"].inputSchema["properties"]
