@@ -4048,7 +4048,11 @@ def screenshot(
                 else:
                     os.environ["DISPLAY"] = previous_display
     except ImportError as exc:
-        raise RuntimeError("Install screenshot extra: pip install '.[screenshot]' or mss") from exc
+        raise RuntimeError(
+            "Screenshot support requires the optional dependency 'mss'. "
+            "Install it with: pip install 'answer42[screenshot]' "
+            "or, for pipx installs: pipx inject answer42 mss."
+        ) from exc
 
     data = output_path.read_bytes()
     result = {"path": str(output_path), "bytes": len(data), "base64": base64.b64encode(data).decode("ascii")}
