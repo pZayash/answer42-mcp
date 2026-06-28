@@ -9,6 +9,7 @@ from mcp_1c.server import (
     _append_available_users_to_auth_error,
     _extract_error_lines,
     _test_client_startup_error_from_logs,
+    _wait_for_test_client_ready,
     _is_placeholder_password,
     _normalize_connection_mode,
     _parse_users_plain_text,
@@ -201,7 +202,7 @@ def test_extract_error_lines_prefers_errors():
     assert _extract_error_lines(text) == "Ошибка запуска\nERROR detail"
 
 
-def test_test_client_startup_error_from_logs_prefers_auth_error(tmp_path):
+def _session_with_client_log_dir(tmp_path: Path) -> SessionState:
     sess = SessionState(
         session_id="auth",
         display="",
@@ -212,12 +213,36 @@ def test_test_client_startup_error_from_logs_prefers_auth_error(tmp_path):
         data_dir=tmp_path,
     )
     sess.client_log_dir.mkdir(parents=True, exist_ok=True)
+    return sess
+
+
+def test_test_client_startup_error_from_logs_prefers_auth_error(tmp_path):
+    sess = _session_with_client_log_dir(tmp_path)
     (sess.client_log_dir / "test_client_1c_out.log").write_text(
         "ordinary startup line\nПользователь ИБ не идентифицирован\nmore details\n",
         encoding="utf-8",
     )
 
     assert _test_client_startup_error_from_logs(sess) == "Пользователь ИБ не идентифицирован"
+
+
+def test_wait_for_test_client_ready_reports_invalid_credentials_from_1c_out_log(tmp_path):
+    sess = _session_with_client_log_dir(tmp_path)
+    (sess.client_log_dir / "test_client_1c_out.log").write_text(
+        "\ufeffПользователь ИБ не идентифицирован\n",
+        encoding="utf-8",
+    )
+
+    try:
+        asyncio.run(_wait_for_test_client_ready(sess, "localhost", 65530, timeout=1))
+    except RuntimeError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("_wait_for_test_client_ready must fail on invalid 1C credentials")
+
+    assert "Пользователь ИБ не идентифицирован" in message
+    assert "test_client_1c_out.log" in message
+    assert "did not open test port" not in message
 
 
 def test_cp866_process_output_decoding():
