@@ -1,4 +1,5 @@
 import asyncio
+import builtins
 import pytest
 from pathlib import Path, PureWindowsPath
 
@@ -21,6 +22,7 @@ from mcp_1c.server import (
     _users_url_for_base_url,
     main as mcp_main,
     mcp,
+    screenshot,
 )
 
 
@@ -275,6 +277,29 @@ def test_wait_for_test_client_ready_reports_invalid_credentials_from_1c_out_log(
     assert "Пользователь ИБ не идентифицирован" in message
     assert "test_client_1c_out.log" in message
     assert "did not open test port" not in message
+
+
+def test_screenshot_missing_mss_hint_uses_pypi_package_name(tmp_path, monkeypatch):
+    sess = _session_with_client_log_dir(tmp_path)
+    _SESSIONS[sess.session_id] = sess
+    original_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "mss" or name.startswith("mss."):
+            raise ImportError("No module named mss")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    try:
+        with pytest.raises(RuntimeError) as exc_info:
+            screenshot(path=str(tmp_path / "shot.png"), session_id=sess.session_id)
+    finally:
+        _SESSIONS.pop(sess.session_id, None)
+
+    message = str(exc_info.value)
+    assert "answer42[screenshot]" in message
+    assert "pipx inject answer42 mss" in message
+    assert ".[screenshot]" not in message
 
 
 def test_cp866_process_output_decoding():
