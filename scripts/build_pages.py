@@ -27,8 +27,7 @@ NAV = [
 ]
 
 CSS = """
-:root { color-scheme: light dark; --bg:#0b1020; --panel:#111936; --text:#eef3ff; --muted:#aebbe2; --link:#67e8f9; --line:#2b365f; --code:#080d1c; }
-@media (prefers-color-scheme: light) { :root { --bg:#f7f9ff; --panel:#ffffff; --text:#111827; --muted:#526078; --link:#0369a1; --line:#dbe3f5; --code:#f1f5f9; } }
+:root { color-scheme: dark; --bg:#0b1020; --panel:#111936; --text:#eef3ff; --muted:#aebbe2; --link:#67e8f9; --line:#2b365f; --code:#080d1c; }
 * { box-sizing: border-box; }
 body { margin:0; font:16px/1.62 Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color:var(--text); background:radial-gradient(circle at 20% 0%, rgba(103,232,249,.18), transparent 28rem), var(--bg); }
 .wrapper { max-width: 1120px; margin: 0 auto; padding: 28px 20px 56px; }

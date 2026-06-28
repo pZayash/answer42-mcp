@@ -2251,10 +2251,37 @@ def _client_failure_diagnostics(sess: SessionState, error: Exception, target_con
     return RuntimeError(message)
 
 
+def _test_client_startup_error_from_logs(sess: SessionState) -> str:
+    """Return a meaningful early startup error from test-client logs, if any."""
+    fragments: list[str] = []
+    for path in (sess.client_log_dir / "test_client_1c_out.log", sess.client_log_dir / "test_client_stdout.log"):
+        tail = _tail_text_file(path, max_lines=120, max_chars=30000)
+        if tail:
+            fragments.append(tail)
+    if not fragments:
+        return ""
+
+    text = "\n".join(fragments)
+    auth_lines = [line for line in text.splitlines() if _looks_like_auth_failure(line)]
+    if auth_lines:
+        return "\n".join(auth_lines[-20:])
+
+    meaningful = _extract_error_lines(text, max_lines=20)
+    if meaningful and any(marker in meaningful.lower() for marker in _EVENTLOG_ERROR_MARKERS):
+        return meaningful
+    return ""
+
+
 async def _wait_for_test_client_ready(sess: SessionState, host: str, port: int, timeout: float) -> None:
     deadline = time.time() + timeout
     proc = sess.test_client_process
     while time.time() < deadline:
+        startup_error = _test_client_startup_error_from_logs(sess)
+        if startup_error:
+            message = f"Test client startup error before opening test port {host}:{port}:\n{startup_error}"
+            message = _append_file_tail(message, "Лог stdout/stderr клиента тестирования", sess.client_log_dir / "test_client_stdout.log")
+            message = _append_file_tail(message, "Лог 1С /Out клиента тестирования", sess.client_log_dir / "test_client_1c_out.log")
+            raise RuntimeError(message)
         if proc is not None and proc.poll() is not None:
             message = f"Test client process exited before opening test port {host}:{port}; exit_code={proc.returncode}"
             message = _append_file_tail(message, "Лог stdout/stderr клиента тестирования", sess.client_log_dir / "test_client_stdout.log")

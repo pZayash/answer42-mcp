@@ -8,6 +8,7 @@ from mcp_1c.server import (
     _SESSIONS,
     _append_available_users_to_auth_error,
     _extract_error_lines,
+    _test_client_startup_error_from_logs,
     _is_placeholder_password,
     _normalize_connection_mode,
     _parse_users_plain_text,
@@ -198,6 +199,25 @@ def test_extract_error_lines_prefers_errors():
     text = "info line\nОшибка запуска\nplain tail\nERROR detail"
 
     assert _extract_error_lines(text) == "Ошибка запуска\nERROR detail"
+
+
+def test_test_client_startup_error_from_logs_prefers_auth_error(tmp_path):
+    sess = SessionState(
+        session_id="auth",
+        display="",
+        platform_dir=tmp_path,
+        ws_port=1,
+        ibsrv_port=2,
+        testclient_port=3,
+        data_dir=tmp_path,
+    )
+    sess.client_log_dir.mkdir(parents=True, exist_ok=True)
+    (sess.client_log_dir / "test_client_1c_out.log").write_text(
+        "ordinary startup line\nПользователь ИБ не идентифицирован\nmore details\n",
+        encoding="utf-8",
+    )
+
+    assert _test_client_startup_error_from_logs(sess) == "Пользователь ИБ не идентифицирован"
 
 
 def test_cp866_process_output_decoding():
