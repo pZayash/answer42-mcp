@@ -41,6 +41,7 @@ from .recorder import RecordingSession
 mcp = FastMCP("Answer42")
 _RAG = RagService()
 _RAG_ENABLED = os.getenv("ONEC_MCP_DISABLE_RAG", "").strip().lower() not in {"1", "true", "yes", "on"}
+_CREDENTIAL_STORE_ENABLED = os.getenv("ONEC_MCP_DISABLE_CREDENTIAL_STORE", "").strip().lower() not in {"1", "true", "yes", "on"}
 DEFAULT_SESSION = "default"
 STATE_FILE = os_support.runtime_path("ONEC_MCP_SESSION_STATE", "sessions.json")
 AUTORELOAD_PID_FILE = os_support.runtime_path("ONEC_MCP_AUTORELOAD_PID_FILE", "answer42-autoreload.pid")
@@ -2024,9 +2025,21 @@ def export_eventlog(
     return {"path": str(exported), "format": fmt, "eventlog_dir": str(eventlog_path)}
 
 
+def _credential_store_disabled_error() -> RuntimeError:
+    return RuntimeError("Credential store is disabled by --disable-credential-store or ONEC_MCP_DISABLE_CREDENTIAL_STORE.")
+
+
+def _lookup_credentials(base_url: str) -> dict[str, str] | None:
+    if not _CREDENTIAL_STORE_ENABLED:
+        return None
+    return _credentials_store().lookup(base_url)
+
+
 @mcp.tool()
 def credentials_check(base_url: str) -> dict[str, object]:
     """Check whether credentials exist for a base URL without returning secrets."""
+    if not _CREDENTIAL_STORE_ENABLED:
+        return {"base_url": base_url, "found": False, "disabled": True}
     credentials = _credentials_store().lookup(base_url)
     if credentials is None:
         return {"base_url": base_url, "found": False}
@@ -2048,6 +2061,8 @@ def credentials_save(
     login/password pairs so that ``start_session`` can pick them up automatically
     without exposing secrets in MCP tool-call arguments.
     """
+    if not _CREDENTIAL_STORE_ENABLED:
+        raise _credential_store_disabled_error()
     updated = _credentials_store().upsert(url, username, password)
     return {
         "url": url,
@@ -2061,6 +2076,8 @@ def credentials_remove(
     url: Annotated[str, "Exact URL pattern to remove from the credentials store"],
 ) -> dict[str, object]:
     """Remove a credential entry from the local store by exact URL match."""
+    if not _CREDENTIAL_STORE_ENABLED:
+        raise _credential_store_disabled_error()
     removed = _credentials_store().remove(url)
     return {"url": url, "removed": removed}
 
@@ -2068,6 +2085,8 @@ def credentials_remove(
 @mcp.tool()
 def credentials_list() -> list[dict[str, str]]:
     """List configured credential URL patterns (no usernames or passwords)."""
+    if not _CREDENTIAL_STORE_ENABLED:
+        return []
     return _credentials_store().list_entries()
 
 
@@ -2333,7 +2352,7 @@ async def _connect_test_client_impl(
             raise ValueError("base_url or connection_value is required")
         r_base = r_value
         if not r_user and not r_pass:
-            credentials = _credentials_store().lookup(r_base)
+            credentials = _lookup_credentials(r_base)
             if credentials:
                 r_user = credentials["username"]
                 r_pass = credentials["password"]
@@ -2399,7 +2418,7 @@ async def _connect_test_client_impl(
         target_connection_mode = mode
 
     if not r_user and not r_pass and r_base:
-        credentials = _credentials_store().lookup(r_base)
+        credentials = _lookup_credentials(r_base)
         if credentials:
             r_user = credentials["username"]
             r_pass = credentials["password"]
@@ -4065,7 +4084,7 @@ async def _run() -> None:
 
 
 def main(argv: list[str] | None = None) -> None:
-    global _RAG_ENABLED
+    global _RAG_ENABLED, _CREDENTIAL_STORE_ENABLED
 
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] in {"install-skills", "skills-install"}:
@@ -4081,6 +4100,12 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         default=os.getenv("ONEC_MCP_DISABLE_RAG", "").strip().lower() in {"1", "true", "yes", "on"},
         help="disable built-in Answer42 RAG tools and RAG enrichment",
+    )
+    parser.add_argument(
+        "--disable-credential-store",
+        action="store_true",
+        default=os.getenv("ONEC_MCP_DISABLE_CREDENTIAL_STORE", "").strip().lower() in {"1", "true", "yes", "on"},
+        help="disable loading, saving and automatic lookup of credentials from the local credential store",
     )
     parser.add_argument(
         "--rag-source-dir",
@@ -4120,6 +4145,7 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     _RAG_ENABLED = not args.disable_rag
+    _CREDENTIAL_STORE_ENABLED = not args.disable_credential_store
     logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO))
     if _RAG_ENABLED:
         _register_startup_rag_source_dirs(args.rag_source_dir or [], args.rag_source_prefix, not args.rag_source_no_recursive, args.rag_source_max_depth)
