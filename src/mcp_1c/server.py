@@ -25,6 +25,7 @@ from typing import Annotated, Any
 
 from mcp.server.fastmcp import FastMCP
 
+from . import __version__
 from . import os_support
 from . import platform as _platform
 from . import runtime
@@ -4063,15 +4064,17 @@ async def _run() -> None:
         _SESSIONS.clear()
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     global _RAG_ENABLED
 
-    if len(sys.argv) > 1 and sys.argv[1] in {"install-skills", "skills-install"}:
-        raise SystemExit(skill_installer.main(sys.argv[2:]))
-    if len(sys.argv) > 1 and sys.argv[1] in {"release", "release-pypi"}:
-        raise SystemExit(release_helper.main(sys.argv[2:]))
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] in {"install-skills", "skills-install"}:
+        raise SystemExit(skill_installer.main(argv[1:]))
+    if argv and argv[0] in {"release", "release-pypi"}:
+        raise SystemExit(release_helper.main(argv[1:]))
 
     parser = argparse.ArgumentParser(description="MCP server for 1C:Enterprise test manager")
+    parser.add_argument("--version", action="version", version=f"answer42 {__version__}")
     parser.add_argument("--log-level", default=os.getenv("ONEC_MCP_LOG_LEVEL", "INFO"))
     parser.add_argument(
         "--disable-rag",
@@ -4114,7 +4117,7 @@ def main() -> None:
         default=float(os.getenv("ONEC_MCP_DEV_RESTART_TIMEOUT", "30")),
         help="seconds of no file changes before the OpenClaw MCP autoreload watchdog triggers reload",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     _RAG_ENABLED = not args.disable_rag
     logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO))

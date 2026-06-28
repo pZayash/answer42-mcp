@@ -1,6 +1,8 @@
 import asyncio
+import pytest
 from pathlib import Path, PureWindowsPath
 
+from mcp_1c import __version__
 from mcp_1c import platform as onec_platform
 from mcp_1c import runtime
 from mcp_1c.server import (
@@ -15,6 +17,7 @@ from mcp_1c.server import (
     _parse_users_plain_text,
     _rag_diagnostic,
     _users_url_for_base_url,
+    main as mcp_main,
     mcp,
 )
 
@@ -71,6 +74,14 @@ EXPECTED_NEW_TOOLS = {
 
 def _tools_by_name():
     return {tool.name: tool for tool in asyncio.run(mcp.list_tools())}
+
+
+def test_cli_version_prints_package_version(capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        mcp_main(["--version"])
+
+    assert exc_info.value.code == 0
+    assert capsys.readouterr().out.strip() == f"answer42 {__version__}"
 
 
 def test_new_mcp_tools_are_registered():
