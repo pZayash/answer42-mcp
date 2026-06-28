@@ -3356,7 +3356,6 @@ def _metadata_full_name_from_presentation(presentation: str) -> str:
     match = re.match(r"^(.+?)\s*\(([^()]+)\)$", text)
     if match:
         synonym = match.group(1).strip()
-        metadata_type = match.group(2).strip()
         if "." in synonym:
             return synonym
         return ""
