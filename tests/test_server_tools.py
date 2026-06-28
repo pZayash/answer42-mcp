@@ -12,6 +12,8 @@ from mcp_1c.server import (
     _extract_error_lines,
     _test_client_startup_error_from_logs,
     _wait_for_test_client_ready,
+    credentials_check,
+    credentials_list,
     _is_placeholder_password,
     _normalize_connection_mode,
     _parse_users_plain_text,
@@ -82,6 +84,25 @@ def test_cli_version_prints_package_version(capsys):
 
     assert exc_info.value.code == 0
     assert capsys.readouterr().out.strip() == f"answer42 {__version__}"
+
+
+def test_cli_disable_credential_store_flag_is_registered(capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        mcp_main(["--help"])
+
+    assert exc_info.value.code == 0
+    assert "--disable-credential-store" in capsys.readouterr().out
+
+
+def test_credentials_tools_report_disabled_when_credential_store_is_off(monkeypatch):
+    monkeypatch.setattr("mcp_1c.server._CREDENTIAL_STORE_ENABLED", False)
+
+    assert credentials_check("https://example.invalid/ib") == {
+        "base_url": "https://example.invalid/ib",
+        "found": False,
+        "disabled": True,
+    }
+    assert credentials_list() == []
 
 
 def test_new_mcp_tools_are_registered():
