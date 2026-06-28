@@ -42,6 +42,7 @@ mcp = FastMCP("Answer42")
 _RAG = RagService()
 _RAG_ENABLED = os.getenv("ONEC_MCP_DISABLE_RAG", "").strip().lower() not in {"1", "true", "yes", "on"}
 _CREDENTIAL_STORE_ENABLED = os.getenv("ONEC_MCP_DISABLE_CREDENTIAL_STORE", "").strip().lower() not in {"1", "true", "yes", "on"}
+_DEV_TOOLS_ENABLED = os.getenv("ONEC_MCP_DEV_TOOLS", "").strip().lower() in {"1", "true", "yes", "on"}
 DEFAULT_SESSION = "default"
 STATE_FILE = os_support.runtime_path("ONEC_MCP_SESSION_STATE", "sessions.json")
 AUTORELOAD_PID_FILE = os_support.runtime_path("ONEC_MCP_AUTORELOAD_PID_FILE", "answer42-autoreload.pid")
@@ -4071,6 +4072,15 @@ def recording_stop(*,
     return _session(session_id).recorder.stop()
 
 
+async def _dev_eval(
+    code: Annotated[str, "BSL expression or 'Возврат <expression>' to evaluate in the Answer42 test manager form"],
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Development-only: execute a BSL expression in MCPTestManager and return JSON-serialized result."""
+    return await _bridge_call_recorded(session_id, "dev_eval", {"code": code})
+
+
 @mcp.tool()
 def screenshot(
     path: Annotated[str, "Output image path"] = "build/screenshots/screenshot.png",
@@ -4153,8 +4163,21 @@ async def _run() -> None:
         _SESSIONS.clear()
 
 
+def _register_dev_tools(enabled: bool) -> None:
+    try:
+        mcp.remove_tool("dev_eval")
+    except Exception:
+        pass
+    if enabled:
+        mcp.add_tool(
+            _dev_eval,
+            name="dev_eval",
+            description="Development-only: execute a BSL expression in MCPTestManager. Enable with --dev-tools or ONEC_MCP_DEV_TOOLS=1.",
+        )
+
+
 def main(argv: list[str] | None = None) -> None:
-    global _RAG_ENABLED, _CREDENTIAL_STORE_ENABLED
+    global _RAG_ENABLED, _CREDENTIAL_STORE_ENABLED, _DEV_TOOLS_ENABLED
 
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] in {"install-skills", "skills-install"}:
@@ -4201,6 +4224,12 @@ def main(argv: list[str] | None = None) -> None:
         help="do not recurse while discovering RAG source directories",
     )
     parser.add_argument(
+        "--dev-tools",
+        action="store_true",
+        default=os.getenv("ONEC_MCP_DEV_TOOLS", "").strip().lower() in {"1", "true", "yes", "on"},
+        help="register dangerous development-only MCP tools, including dev_eval for arbitrary BSL expression evaluation",
+    )
+    parser.add_argument(
         "--dev",
         default=os.getenv("ONEC_MCP_DEV", ""),
         choices=("", "openclaw"),
@@ -4216,6 +4245,8 @@ def main(argv: list[str] | None = None) -> None:
 
     _RAG_ENABLED = not args.disable_rag
     _CREDENTIAL_STORE_ENABLED = not args.disable_credential_store
+    _DEV_TOOLS_ENABLED = bool(args.dev_tools)
+    _register_dev_tools(_DEV_TOOLS_ENABLED)
     logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO))
     if _RAG_ENABLED:
         _register_startup_rag_source_dirs(args.rag_source_dir or [], args.rag_source_prefix, not args.rag_source_no_recursive, args.rag_source_max_depth)

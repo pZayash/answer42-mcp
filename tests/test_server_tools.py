@@ -23,6 +23,7 @@ from mcp_1c.server import (
     _normalize_connection_mode,
     _parse_users_plain_text,
     _rag_diagnostic,
+    _register_dev_tools,
     _users_url_for_base_url,
     main as mcp_main,
     mcp,
@@ -97,7 +98,9 @@ def test_cli_disable_credential_store_flag_is_registered(capsys):
         mcp_main(["--help"])
 
     assert exc_info.value.code == 0
-    assert "--disable-credential-store" in capsys.readouterr().out
+    help_text = capsys.readouterr().out
+    assert "--disable-credential-store" in help_text
+    assert "--dev-tools" in help_text
 
 
 def test_credentials_tools_report_disabled_when_credential_store_is_off(monkeypatch):
@@ -112,9 +115,23 @@ def test_credentials_tools_report_disabled_when_credential_store_is_off(monkeypa
 
 
 def test_new_mcp_tools_are_registered():
+    _register_dev_tools(False)
     tool_names = set(_tools_by_name())
 
     assert EXPECTED_NEW_TOOLS <= tool_names
+
+
+def test_dev_eval_tool_is_registered_only_when_dev_tools_enabled():
+    _register_dev_tools(False)
+    assert "dev_eval" not in set(_tools_by_name())
+
+    try:
+        _register_dev_tools(True)
+        tools = _tools_by_name()
+        assert "dev_eval" in tools
+        assert tools["dev_eval"].inputSchema["required"] == ["code"]
+    finally:
+        _register_dev_tools(False)
 
 
 def test_new_mcp_tools_do_not_include_performance_metrics():
