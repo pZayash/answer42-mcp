@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -11,6 +12,7 @@ from .model import (
     DataCompositionField,
     Form,
     FormElement,
+    HelpPage,
     MetadataObject,
     ParsedSource,
     SourceInfo,
@@ -199,6 +201,7 @@ def parse_edt_source(source: SourceInfo) -> ParsedSource:
                 _extract_metadata_children(parsed, root, full, mdo)
             _extract_forms(parsed, mdo.parent, full)
             _extract_data_composition_schemas(parsed, mdo.parent, full)
+            _extract_help_pages(parsed, mdo.parent, full)
     return parsed
 
 
@@ -230,6 +233,7 @@ def parse_designer_xml_source(source: SourceInfo) -> ParsedSource:
             object_dir = xml.parent if xml.parent != base else base / xml.stem
             _extract_forms(parsed, object_dir, full)
             _extract_data_composition_schemas(parsed, object_dir, full)
+            _extract_help_pages(parsed, object_dir, full)
     return parsed
 
 
@@ -334,6 +338,29 @@ def _extract_embedded_data_composition_fields(parsed: ParsedSource, root: ET.Ele
                 {"embedded_in_form": True},
             )
         )
+
+
+def _extract_help_pages(parsed: ParsedSource, object_dir: Path, full: str) -> None:
+    help_dir = object_dir / "Help"
+    if not help_dir.exists():
+        return
+    for page in sorted(help_dir.glob("*.html")):
+        raw = page.read_text(encoding="utf-8", errors="ignore")
+        title_match = re.search(r"<title[^>]*>(.*?)</title>", raw, flags=re.IGNORECASE | re.DOTALL)
+        h1_match = re.search(r"<h1[^>]*>(.*?)</h1>", raw, flags=re.IGNORECASE | re.DOTALL)
+        title = _html_to_text((title_match or h1_match).group(1)) if (title_match or h1_match) else None
+        text = _html_to_text(raw)
+        if text:
+            parsed.help_pages.append(HelpPage(full, page.stem, title, text, str(page), {"file": page.name}))
+
+
+def _html_to_text(raw: str) -> str:
+    without_scripts = re.sub(r"<\s*(script|style)\b[^>]*>.*?<\s*/\s*\1\s*>", " ", raw, flags=re.IGNORECASE | re.DOTALL)
+    with_breaks = re.sub(r"<\s*/\s*(p|div|br|li|tr|td|th|h[1-6])\s*>", "\n", without_scripts, flags=re.IGNORECASE)
+    without_tags = re.sub(r"<[^>]+>", " ", with_breaks)
+    decoded = html.unescape(without_tags)
+    lines = [re.sub(r"\s+", " ", line).strip() for line in decoded.splitlines()]
+    return "\n".join(line for line in lines if line)
 
 
 def _extract_data_composition_schemas(parsed: ParsedSource, object_dir: Path, full: str) -> None:

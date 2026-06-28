@@ -29,6 +29,7 @@ EXPECTED_NEW_TOOLS = {
     "field_info",
     "field_value_text",
     "field_tooltip",
+    "field_dropdown_items",
     "form_next_element",
     "form_previous_element",
     "form_state",
@@ -47,6 +48,10 @@ EXPECTED_NEW_TOOLS = {
     "decoration_links",
     "decoration_click_link",
     "decoration_click",
+    "configuration_name_version_from_subsystems",
+    "installed_extensions_from_catalog",
+    "metadata_objects_from_catalog",
+    "metadata_objects_catalog_cache_clear",
     "table_select_all",
     "table_clear_selection",
     "table_delete_row",
@@ -58,6 +63,7 @@ EXPECTED_NEW_TOOLS = {
     "rag_sources_add_from_directory",
     "rag_source_roots_list",
     "rag_available_configurations",
+    "rag_session_autoconfigure",
 }
 
 
@@ -84,16 +90,28 @@ def test_selected_new_tool_schemas():
     assert tools["wait_object"].inputSchema["properties"]["timeout"]["default"] == 15
     assert tools["set_file_dialog_result"].inputSchema["required"] == ["paths"]
     assert tools["field_info"].inputSchema["required"] == ["field_name"]
+    assert tools["field_dropdown_items"].inputSchema["required"] == ["field_name"]
+    assert tools["field_dropdown_items"].inputSchema["properties"]["timeout"]["default"] == 10
+    assert tools["field_dropdown_items"].inputSchema["properties"]["max_depth"]["default"] == 3
     assert tools["decoration_click_link"].inputSchema["properties"]["presentation"]["default"] == ""
     assert tools["command_interface_commands"].inputSchema["properties"]["section"]["default"] == ""
     assert tools["command_interface_commands"].inputSchema["properties"]["max_depth"]["default"] == 4
     assert tools["command_interface_search"].inputSchema["required"] == ["query"]
     assert tools["command_interface_search"].inputSchema["properties"]["max_results"]["default"] == 20
+    assert "session_id" in tools["configuration_name_version_from_subsystems"].inputSchema["properties"]
+    assert "session_id" in tools["installed_extensions_from_catalog"].inputSchema["properties"]
+    assert tools["metadata_objects_from_catalog"].inputSchema["properties"]["query"]["default"] == ""
+    assert tools["metadata_objects_from_catalog"].inputSchema["properties"]["refresh_cache"]["default"] is False
+    assert tools["metadata_objects_from_catalog"].inputSchema["properties"]["include_groups"]["default"] is False
+    assert "session_id" in tools["metadata_objects_catalog_cache_clear"].inputSchema["properties"]
     assert tools["window_command_interface"].inputSchema["properties"]["window_title"]["default"] == ""
     assert tools["start_session"].inputSchema["properties"]["rag_enabled"]["default"] is True
     assert tools["rag_sources_add_from_directory"].inputSchema["required"] == ["path"]
     assert tools["rag_sources_add_from_directory"].inputSchema["properties"]["watch"]["default"] is True
     assert tools["rag_available_configurations"].inputSchema["properties"]["sync"]["default"] is True
+    assert tools["rag_session_autoconfigure"].inputSchema["properties"]["snapshot_name"]["default"] == ""
+    assert tools["rag_session_autoconfigure"].inputSchema["properties"]["build_index"]["default"] is True
+    assert tools["rag_session_autoconfigure"].inputSchema["properties"]["sync_sources"]["default"] is True
     assert "connection_mode" not in tools["start_session"].inputSchema["properties"]
     assert "connection_value" not in tools["start_session"].inputSchema["properties"]
     assert tools["credentials_save"].inputSchema["required"] == ["url", "username", "password"]

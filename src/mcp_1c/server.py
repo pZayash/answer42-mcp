@@ -49,6 +49,7 @@ RAG_BINDINGS_FILE = os_support.runtime_path("ONEC_MCP_RAG_BINDINGS", "rag-bindin
 _PORT_ALLOC_LOCK = os_support.runtime_path("ONEC_MCP_PORT_ALLOC_LOCK", "port-allocation.lock")
 _SHARED_FILE_SERVERS_FILE = os_support.runtime_path("ONEC_MCP_SHARED_FILE_SERVERS", "shared-file-servers.json")
 _SHARED_FILE_SERVERS_LOCK = os_support.runtime_path("ONEC_MCP_SHARED_FILE_SERVERS_LOCK", "shared-file-servers.lock")
+_METADATA_OBJECTS_CACHE: dict[str, dict[str, Any]] = {}
 
 
 @contextmanager
@@ -1314,6 +1315,93 @@ def rag_available_configurations(
 
 
 @mcp.tool()
+async def rag_session_autoconfigure(
+    snapshot_name: Annotated[str, "Optional snapshot name; defaults to runtime configuration plus matched extensions"] = "",
+    build_index: Annotated[bool, "Build/rebuild RAG index for the created snapshot"] = True,
+    sync_sources: Annotated[bool, "Discover new sources from watched roots before matching"] = True,
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> dict[str, Any]:
+    """Auto-configure the session RAG snapshot from the live 1C configuration and installed extensions.
+
+    The tool reads the live main configuration/version from `ВерсииПодсистем`, reads
+    installed extensions from `ВерсииРасширений`, matches them against registered
+    RAG sources by metadata name and version, falls back to the nearest available
+    version with warnings, creates a snapshot, attaches it to the session, and
+    optionally builds its index.
+    """
+    params = {"snapshot_name": snapshot_name, "build_index": build_index, "sync_sources": sync_sources}
+    disabled = _rag_require_enabled(session_id, "rag_session_autoconfigure", params)
+    if disabled is not None:
+        return disabled
+
+    available = _RAG.available_configurations(sync=sync_sources)
+    sources = [*available.get("configurations", []), *available.get("extensions", []), *available.get("other_sources", [])]
+    base_sources = [src for src in sources if str(src.get("kind") or "") in {"base", "configuration", "standalone"}]
+    extension_sources = [src for src in sources if str(src.get("kind") or "") in {"extension", "standalone"}]
+
+    config = await configuration_name_version_from_subsystems(session_id=session_id)
+    extensions_info = await installed_extensions_from_catalog(session_id=session_id)
+    config_name = str(config.get("configuration_name") or "")
+    config_version = str(config.get("configuration_version") or "")
+    installed_extensions = extensions_info.get("extensions", []) if isinstance(extensions_info, dict) else []
+
+    warnings: list[str] = []
+    base_match = _best_rag_source_match(config_name, config_version, base_sources, None)
+    if not base_match.get("matched"):
+        raise ValueError(f"RAG source for runtime configuration {config_name!r} {config_version!r} not found")
+    if base_match.get("warning"):
+        warnings.append(str(base_match["warning"]))
+    base_candidate = base_match["candidate"]
+    base_source_name = str(base_candidate["source"].get("name") or "")
+
+    extension_source_names: list[str] = []
+    extension_matches: list[dict[str, Any]] = []
+    used_extension_sources: set[str] = set()
+    for extension in installed_extensions:
+        ext_name = str(extension.get("name") or "")
+        ext_version = str(extension.get("version") or "")
+        match = _best_rag_source_match(ext_name, ext_version, extension_sources, None)
+        public_match = _rag_match_public(match) | {"runtime_name": ext_name, "runtime_version": ext_version}
+        extension_matches.append(public_match)
+        if not match.get("matched"):
+            warnings.append(f"RAG source for extension {ext_name!r} {ext_version!r} not found; extension was not added to snapshot.")
+            continue
+        if match.get("warning"):
+            warnings.append(str(match["warning"]))
+        source_name = str(match["candidate"]["source"].get("name") or "")
+        if source_name and source_name not in used_extension_sources:
+            extension_source_names.append(source_name)
+            used_extension_sources.add(source_name)
+
+    effective_snapshot_name = snapshot_name or "+".join([_safe_snapshot_part(config_name), *(_safe_snapshot_part(ext.get("name", "")) for ext in installed_extensions)])
+    if len(effective_snapshot_name) > 180:
+        digest = hashlib.sha1(effective_snapshot_name.encode("utf-8")).hexdigest()[:10]
+        effective_snapshot_name = f"{_safe_snapshot_part(config_name)}+extensions-{digest}"
+
+    snapshot = _RAG.create_snapshot(name=effective_snapshot_name, base=base_source_name, extensions=extension_source_names)
+    sess = _session(session_id)
+    sess.rag_snapshot = str(snapshot.get("name") or effective_snapshot_name)
+    if sess.base_url:
+        _save_rag_binding(sess.base_url, sess.rag_snapshot)
+    _persist_sessions()
+
+    index_result = _RAG.build_index(snapshot=sess.rag_snapshot) if build_index else None
+    result = {
+        "snapshot": sess.rag_snapshot,
+        "snapshot_result": snapshot,
+        "index_result": index_result,
+        "warnings": warnings,
+        "runtime_configuration": {"name": config_name, "version": config_version, "match": _rag_match_public(base_match)},
+        "runtime_extensions": installed_extensions,
+        "extension_matches": extension_matches,
+        "available_sources_count": len(sources),
+        "session_snapshot": sess.rag_snapshot,
+    }
+    return _record_tool(session_id, "rag_session_autoconfigure", params, result)
+
+
+@mcp.tool()
 def rag_sources_list(
     sync: Annotated[bool, "Discover new sources in watched roots before listing"] = True,
     *,
@@ -2550,6 +2638,23 @@ async def field_tooltip(
 
 
 @mcp.tool()
+async def field_dropdown_items(
+    field_name: Annotated[str, "Field name, or title when search_by_title=true"],
+    search_by_title: Annotated[bool, "Search by visible title instead of technical name"] = False,
+    timeout: Annotated[int, "Dropdown formation timeout in seconds"] = 10,
+    max_depth: Annotated[int, "Maximum depth used to serialize dropdown child objects"] = 3,
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Open a form field dropdown and return its visible choice items when exposed by the 1C test-client API."""
+    return await _bridge_call_recorded(
+        session_id,
+        "field_dropdown_items",
+        {"field_name": field_name, "search_by_title": search_by_title, "timeout": timeout, "max_depth": max_depth},
+    )
+
+
+@mcp.tool()
 async def form_next_element(*,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
@@ -2947,22 +3052,24 @@ async def set_field_value(
     field_name: Annotated[str, "Field technical name or title"],
     value: Annotated[str, "Value to set"],
     search_by_title: Annotated[bool, "If true, match visible title instead of object name"] = False,
+    max_depth: Annotated[int, "Max UI tree depth for nested fields"] = 8,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
     """Set a value in a form field by name or title."""
-    return await _bridge_call_recorded(session_id, "set_field_value", {"field_name": field_name, "value": value, "search_by_title": search_by_title})
+    return await _bridge_call_recorded(session_id, "set_field_value", {"field_name": field_name, "value": value, "search_by_title": search_by_title, "max_depth": max_depth})
 
 
 @mcp.tool()
 async def activate_field(
     field_name: Annotated[str, "Field technical name or title"],
     search_by_title: Annotated[bool, "If true, match visible title instead of object name"] = False,
+    max_depth: Annotated[int, "Max UI tree depth for nested fields"] = 8,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
     """Activate/focus a form field by name or title."""
-    return await _bridge_call_recorded(session_id, "activate_field", {"field_name": field_name, "search_by_title": search_by_title})
+    return await _bridge_call_recorded(session_id, "activate_field", {"field_name": field_name, "search_by_title": search_by_title, "max_depth": max_depth})
 
 
 @mcp.tool()
@@ -3008,6 +3115,437 @@ async def table_rows(
 ) -> Any:
     """Return rows of a tested table as key/value mappings."""
     return await _bridge_call_recorded(session_id, "table_rows", {"name": name, "title": title, "limit": limit, "max_depth": max_depth})
+
+
+def _table_row_pairs(row: Any) -> dict[str, str]:
+    pairs = row.get("pairs", []) if isinstance(row, dict) else []
+    result: dict[str, str] = {}
+    for pair in pairs:
+        if not isinstance(pair, dict):
+            continue
+        key = str(pair.get("key", ""))
+        value = str(pair.get("value", ""))
+        result[key] = value
+        normalized_key = re.sub(r"\\s+", " ", key).strip()
+        if normalized_key and normalized_key != key:
+            result.setdefault(normalized_key, value)
+    return result
+
+
+def _row_value(row: dict[str, str], *keys: str) -> str:
+    for key in keys:
+        if key in row:
+            return row[key]
+    wanted = {re.sub(r"\\s+", "", key).casefold() for key in keys}
+    for key, value in row.items():
+        if re.sub(r"\\s+", "", key).casefold() in wanted:
+            return value
+    return ""
+
+
+def _is_truthy_1c(value: str) -> bool:
+    return value.strip().casefold() in {"да", "истина", "true", "1", "yes", "✓"}
+
+
+def _is_not_deleted_catalog_row(row: dict[str, str]) -> bool:
+    delete_mark = _row_value(row, "Пометка удаления", "ПометкаУдаления", "Пометка\nудаления")
+    return not _is_truthy_1c(delete_mark)
+
+
+def _parse_1c_date_text(value: str) -> datetime:
+    value = value.strip()
+    for fmt in ("%d.%m.%Y %H:%M:%S", "%d.%m.%Y %H:%M", "%d.%m.%Y"):
+        try:
+            return datetime.strptime(value, fmt)
+        except ValueError:
+            pass
+    return datetime.min
+
+
+def _parse_int_text(value: str) -> int:
+    match = re.search(r"-?\d+", value.replace("\xa0", " "))
+    return int(match.group(0)) if match else 0
+
+
+def _extension_catalog_row_sort_key(row: dict[str, str]) -> tuple[datetime, int]:
+    return (
+        _parse_1c_date_text(_row_value(row, "Дата последнего использования", "ДатаПоследнегоИспользования", "Дата последнего\nиспользования")),
+        _parse_int_text(_row_value(row, "Порядковый номер", "Код", "Порядковый\nномер")),
+    )
+
+
+def _parse_extension_metadata_description(description: str) -> list[dict[str, str]]:
+    extensions: list[dict[str, str]] = []
+    pattern = re.compile(r"^(?P<name>.+?)\s*\((?P<version>[^)]*)\)(?:\s+(?P<hash>\S+))?(?:\s+БезопасныйРежим:(?P<safe_mode>\S+))?")
+    for raw_line in description.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("EF_") or line.startswith("#"):
+            continue
+        match = pattern.match(line)
+        if not match:
+            extensions.append({"name": line, "version": "", "hash": "", "safe_mode": ""})
+            continue
+        extensions.append({
+            "name": match.group("name").strip(),
+            "version": (match.group("version") or "").strip(),
+            "hash": match.group("hash") or "",
+            "safe_mode": match.group("safe_mode") or "",
+        })
+    return extensions
+
+
+def _version_tuple(value: str) -> tuple[int, ...]:
+    numbers = [int(part) for part in re.findall(r"\d+", value or "")]
+    return tuple(numbers) if numbers else (0,)
+
+
+def _version_distance(left: str, right: str) -> tuple[int, int]:
+    left_parts = _version_tuple(left)
+    right_parts = _version_tuple(right)
+    width = max(len(left_parts), len(right_parts))
+    padded_left = left_parts + (0,) * (width - len(left_parts))
+    padded_right = right_parts + (0,) * (width - len(right_parts))
+    return (sum(abs(a - b) for a, b in zip(padded_left, padded_right)), abs(len(left_parts) - len(right_parts)))
+
+
+def _read_text_head(path: Path, max_chars: int = 200_000) -> str:
+    try:
+        with path.open("r", encoding="utf-8", errors="ignore") as file:
+            return file.read(max_chars)
+    except OSError:
+        return ""
+
+
+def _tag_value(text: str, tag: str) -> str:
+    match = re.search(rf"<[^:>/]*:?{re.escape(tag)}(?:\s[^>]*)?>(.*?)</[^:>/]*:?{re.escape(tag)}>", text, flags=re.IGNORECASE | re.DOTALL)
+    return re.sub(r"\s+", " ", match.group(1)).strip() if match else ""
+
+
+def _source_metadata(path: str) -> dict[str, str]:
+    root = Path(path)
+    candidates = [root / "Configuration" / "Configuration.mdo", root / "Configuration.xml"]
+    text = ""
+    for candidate in candidates:
+        if candidate.exists():
+            text = _read_text_head(candidate)
+            break
+    return {
+        "name": _tag_value(text, "Name") or _tag_value(text, "name") or root.name,
+        "synonym": _tag_value(text, "Synonym") or _tag_value(text, "synonym"),
+        "version": _tag_value(text, "Version") or _tag_value(text, "version"),
+    }
+
+
+def _normalize_match_text(value: str) -> str:
+    return re.sub(r"[^0-9a-zа-яё]+", "", (value or "").casefold())
+
+
+def _name_similarity(left: str, right: str) -> float:
+    left_norm = _normalize_match_text(left)
+    right_norm = _normalize_match_text(right)
+    if not left_norm or not right_norm:
+        return 0.0
+    if left_norm == right_norm:
+        return 1.0
+    if left_norm in right_norm or right_norm in left_norm:
+        return min(len(left_norm), len(right_norm)) / max(len(left_norm), len(right_norm))
+    left_tokens = set(re.findall(r"[0-9a-zа-яё]+", (left or "").casefold()))
+    right_tokens = set(re.findall(r"[0-9a-zа-яё]+", (right or "").casefold()))
+    return len(left_tokens & right_tokens) / len(left_tokens | right_tokens) if left_tokens and right_tokens else 0.0
+
+
+def _source_display_name(source: dict[str, Any], metadata: dict[str, str]) -> str:
+    return metadata.get("name") or source.get("name") or Path(str(source.get("path") or "")).name
+
+
+def _safe_snapshot_part(value: str) -> str:
+    normalized = re.sub(r"[^0-9A-Za-zА-Яа-яЁё_.-]+", "_", value or "")
+    return normalized.strip("_") or "Runtime"
+
+
+def _rag_match_public(match: dict[str, Any]) -> dict[str, Any]:
+    candidate = match.get("candidate") or match.get("best_candidate") or {}
+    source = candidate.get("source") or {}
+    metadata = candidate.get("metadata") or {}
+    return {
+        "matched": bool(match.get("matched")),
+        "reason": match.get("reason", ""),
+        "warning": match.get("warning", ""),
+        "source_name": source.get("name", ""),
+        "source_path": source.get("path", ""),
+        "source_kind": source.get("kind", ""),
+        "source_version": candidate.get("source_version", "") or metadata.get("version", ""),
+        "source_metadata_name": metadata.get("name", ""),
+        "source_metadata_synonym": metadata.get("synonym", ""),
+        "similarity": candidate.get("similarity", 0),
+        "exact_version": bool(candidate.get("exact_version")),
+    }
+
+
+def _best_rag_source_match(target_name: str, target_version: str, sources: list[dict[str, Any]], expected_kind: str | None = None) -> dict[str, Any]:
+    candidates: list[dict[str, Any]] = []
+    for source in sources:
+        if expected_kind and str(source.get("kind") or "") not in {expected_kind, "configuration" if expected_kind == "base" else expected_kind}:
+            continue
+        metadata = _source_metadata(str(source.get("path") or ""))
+        source_names = [str(source.get("name") or ""), Path(str(source.get("path") or "")).name, metadata.get("name", ""), metadata.get("synonym", "")]
+        similarity = max((_name_similarity(target_name, name) for name in source_names), default=0.0)
+        source_version = metadata.get("version", "")
+        exact_version = bool(target_version) and source_version == target_version
+        distance = _version_distance(target_version, source_version) if target_version and source_version else (999_999, 999_999)
+        candidates.append({
+            "source": source,
+            "metadata": metadata,
+            "similarity": similarity,
+            "source_version": source_version,
+            "exact_version": exact_version,
+            "version_distance": distance,
+        })
+    if not candidates:
+        return {"matched": False, "reason": "no_sources"}
+    exact_name = [item for item in candidates if item["similarity"] >= 0.99]
+    pool = exact_name or [item for item in candidates if item["similarity"] >= 0.35]
+    if not pool:
+        best = max(candidates, key=lambda item: item["similarity"])
+        return {"matched": False, "reason": "no_name_match", "best_candidate": best}
+    exact_versions = [item for item in pool if item["exact_version"]]
+    if exact_versions:
+        best = max(exact_versions, key=lambda item: (item["similarity"], str(item["source"].get("name") or "")))
+        return {"matched": True, "warning": "", "candidate": best}
+    best = min(pool, key=lambda item: (item["version_distance"], -item["similarity"], str(item["source"].get("name") or "")))
+    warning = ""
+    if target_version:
+        warning = f"Exact version {target_version} for {target_name} not found; selected nearest version {best['source_version'] or 'unknown'} from source {best['source'].get('name')}."
+    else:
+        warning = f"Runtime version for {target_name} is empty; selected source {best['source'].get('name')} without exact version check."
+    return {"matched": True, "warning": warning, "candidate": best}
+
+
+def _metadata_cache_key(session_id: str) -> str:
+    session = _SESSIONS.get(session_id)
+    if session and session.base_url:
+        return f"{session_id}:{session.base_url}"
+    return session_id
+
+
+def _metadata_object_from_row(row: dict[str, str]) -> dict[str, str]:
+    presentation = _row_value(row, "Ссылка", "Наименование")
+    full_name = _row_value(row, "Полное имя", "ПолноеИмя", "СписокПолноеИмя")
+    synonym = _row_value(row, "Синоним")
+    if not full_name:
+        full_name = _metadata_full_name_from_presentation(presentation)
+    metadata_type = _metadata_type_from_full_name(full_name) or _metadata_type_from_presentation(presentation)
+    name = _metadata_name_from_full_name(full_name)
+    if not synonym:
+        synonym = _metadata_synonym_from_presentation(presentation)
+    is_group = not full_name and bool(presentation) and not presentation.startswith("?") and not re.search(r"\([^)]+\)$", presentation)
+    return {
+        "presentation": presentation,
+        "full_name": full_name,
+        "type": metadata_type,
+        "name": name,
+        "synonym": synonym,
+        "is_group": "Да" if is_group else "Нет",
+    }
+
+
+def _metadata_full_name_from_presentation(presentation: str) -> str:
+    text = presentation.strip()
+    if text.startswith("?"):
+        return text[1:].strip()
+    match = re.match(r"^(.+?)\s*\(([^()]+)\)$", text)
+    if match:
+        synonym = match.group(1).strip()
+        metadata_type = match.group(2).strip()
+        if "." in synonym:
+            return synonym
+        return ""
+    return text if "." in text else ""
+
+
+def _metadata_type_from_full_name(full_name: str) -> str:
+    return full_name.split(".", 1)[0] if "." in full_name else ""
+
+
+def _metadata_name_from_full_name(full_name: str) -> str:
+    return full_name.rsplit(".", 1)[-1] if "." in full_name else ""
+
+
+def _metadata_type_from_presentation(presentation: str) -> str:
+    match = re.search(r"\(([^()]+)\)$", presentation.strip())
+    return match.group(1).strip() if match else ""
+
+
+def _metadata_synonym_from_presentation(presentation: str) -> str:
+    text = presentation.strip()
+    match = re.match(r"^(.+?)\s*\(([^()]+)\)$", text)
+    return match.group(1).strip() if match else ""
+
+
+def _match_metadata_object(item: dict[str, str], query: str) -> bool:
+    if not query:
+        return True
+    needle = query.casefold()
+    return any(needle in str(item.get(field, "")).casefold() for field in ("presentation", "full_name", "type", "name", "synonym"))
+
+
+async def _load_metadata_objects_from_catalog(session_id: str, limit: int) -> dict[str, Any]:
+    navigation_link = "e1cib/list/Справочник.ИдентификаторыОбъектовМетаданных"
+    await _bridge_call_recorded(session_id, "open_navigation_link", {"navigation_link": navigation_link})
+    await _bridge_call_recorded(session_id, "click_button", {"name": "ФормаСписок", "search_by_title": False})
+    rows_result = await _bridge_call_recorded(session_id, "table_rows", {"name": "Список", "title": "", "limit": limit, "max_depth": 8})
+    rows = rows_result.get("rows", []) if isinstance(rows_result, dict) else []
+    parsed_rows = [_table_row_pairs(row) for row in rows]
+    actual_rows = [row for row in parsed_rows if _is_not_deleted_catalog_row(row)]
+    objects = [_metadata_object_from_row(row) for row in actual_rows]
+    groups = [item for item in objects if item["is_group"] == "Да"]
+    metadata_items = [item for item in objects if item["is_group"] != "Да"]
+    type_counts: dict[str, int] = {}
+    for item in metadata_items:
+        metadata_type = item["type"] or "<unknown>"
+        type_counts[metadata_type] = type_counts.get(metadata_type, 0) + 1
+    return {
+        "objects": objects,
+        "groups": groups,
+        "type_counts": dict(sorted(type_counts.items())),
+        "rows_count": len(parsed_rows),
+        "non_deleted_rows_count": len(actual_rows),
+        "objects_count": len(objects),
+        "groups_count": len(groups),
+        "metadata_objects_count": len(metadata_items),
+        "navigation_link": navigation_link,
+        "source": "Справочник.ИдентификаторыОбъектовМетаданных",
+        "loaded_at": datetime.now().isoformat(timespec="seconds"),
+        "limit": limit,
+    }
+
+
+@mcp.tool()
+async def metadata_objects_from_catalog(
+    query: Annotated[str, "Substring to search in presentation, full name, type, name or synonym"] = "",
+    limit: Annotated[int, "Maximum rows to read from the catalog when cache is refreshed"] = 5000,
+    max_results: Annotated[int, "Maximum matched objects to return"] = 200,
+    refresh_cache: Annotated[bool, "Force rereading the hierarchical catalog instead of using the session cache"] = False,
+    include_groups: Annotated[bool, "Include hierarchy group rows in results"] = False,
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> dict[str, Any]:
+    """Return/search metadata objects from the hierarchical catalog `Справочник.ИдентификаторыОбъектовМетаданных`.
+
+    The first call reads the catalog in flat list mode, skips rows marked for
+    deletion when that field is available in the form, normalizes objects to
+    `presentation/full_name/type/name/synonym`, and stores them in an in-memory
+    per-session cache. Later calls use the cache unless `refresh_cache=true`.
+    """
+    cache_key = _metadata_cache_key(session_id)
+    cache_hit = cache_key in _METADATA_OBJECTS_CACHE and not refresh_cache
+    if cache_hit:
+        catalog_data = _METADATA_OBJECTS_CACHE[cache_key]
+    else:
+        catalog_data = await _load_metadata_objects_from_catalog(session_id, limit)
+        _METADATA_OBJECTS_CACHE[cache_key] = catalog_data
+
+    all_objects = catalog_data["objects"]
+    searchable = all_objects if include_groups else [item for item in all_objects if item["is_group"] != "Да"]
+    matches = [item for item in searchable if _match_metadata_object(item, query)]
+    return {
+        "found": bool(matches),
+        "cache_hit": cache_hit,
+        "query": query,
+        "objects": matches[:max_results],
+        "matched_count": len(matches),
+        "returned_count": min(len(matches), max_results),
+        "truncated": len(matches) > max_results,
+        "type_counts": catalog_data["type_counts"],
+        "rows_count": catalog_data["rows_count"],
+        "non_deleted_rows_count": catalog_data["non_deleted_rows_count"],
+        "objects_count": catalog_data["objects_count"],
+        "groups_count": catalog_data["groups_count"],
+        "metadata_objects_count": catalog_data["metadata_objects_count"],
+        "navigation_link": catalog_data["navigation_link"],
+        "source": catalog_data["source"],
+        "loaded_at": catalog_data["loaded_at"],
+    }
+
+
+@mcp.tool()
+async def metadata_objects_catalog_cache_clear(
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> dict[str, Any]:
+    """Clear cached metadata objects for the current session."""
+    cache_key = _metadata_cache_key(session_id)
+    existed = cache_key in _METADATA_OBJECTS_CACHE
+    _METADATA_OBJECTS_CACHE.pop(cache_key, None)
+    return {"cleared": existed, "cache_key": cache_key}
+
+
+@mcp.tool()
+async def configuration_name_version_from_subsystems(
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> dict[str, Any]:
+    """Open the 'Subsystem versions' information register and return the main configuration name/version.
+
+    The tool reads `РегистрСведений.ВерсииПодсистем`, scans list rows and returns
+    the row where `Это основная конфигурация` is `Да`.
+    """
+    navigation_link = "e1cib/list/РегистрСведений.ВерсииПодсистем"
+    await _bridge_call_recorded(session_id, "open_navigation_link", {"navigation_link": navigation_link})
+    rows_result = await _bridge_call_recorded(session_id, "table_rows", {"name": "Список", "title": "", "limit": 200, "max_depth": 8})
+    rows = rows_result.get("rows", []) if isinstance(rows_result, dict) else []
+
+    parsed_rows = [_table_row_pairs(row) for row in rows]
+    main_rows = [row for row in parsed_rows if _row_value(row, "Это основная конфигурация") == "Да"]
+    main = main_rows[0] if main_rows else {}
+
+    return {
+        "found": bool(main),
+        "configuration_name": _row_value(main, "Имя подсистемы"),
+        "configuration_version": _row_value(main, "Версия"),
+        "main_configuration_row": main,
+        "main_configuration_rows_count": len(main_rows),
+        "rows_count": len(parsed_rows),
+        "navigation_link": navigation_link,
+        "source": "РегистрСведений.ВерсииПодсистем",
+    }
+
+
+@mcp.tool()
+async def installed_extensions_from_catalog(
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> dict[str, Any]:
+    """Open `Справочник.ВерсииРасширений` and return installed extensions from the latest non-deleted metadata snapshot.
+
+    The tool reads catalog rows, ignores rows marked for deletion, takes the latest
+    row by last-use date/code and parses `Описание метаданных`. Metadata lines
+    starting with `EF_` and the main configuration line starting with `#` are not
+    returned as extensions.
+    """
+    navigation_link = "e1cib/list/Справочник.ВерсииРасширений"
+    await _bridge_call_recorded(session_id, "open_navigation_link", {"navigation_link": navigation_link})
+    rows_result = await _bridge_call_recorded(session_id, "table_rows", {"name": "Список", "title": "", "limit": 500, "max_depth": 8})
+    rows = rows_result.get("rows", []) if isinstance(rows_result, dict) else []
+
+    parsed_rows = [_table_row_pairs(row) for row in rows]
+    actual_rows = [row for row in parsed_rows if _is_not_deleted_catalog_row(row)]
+    selected_row = max(actual_rows, key=_extension_catalog_row_sort_key) if actual_rows else {}
+    description = _row_value(selected_row, "Описание метаданных", "ОписаниеМетаданных")
+    extensions = _parse_extension_metadata_description(description)
+
+    return {
+        "found": bool(selected_row),
+        "extensions": extensions,
+        "extensions_count": len(extensions),
+        "selected_row": selected_row,
+        "selected_row_code": _row_value(selected_row, "Порядковый номер", "Код", "Порядковый\nномер"),
+        "selected_row_last_use_date": _row_value(selected_row, "Дата последнего использования", "ДатаПоследнегоИспользования", "Дата последнего\nиспользования"),
+        "rows_count": len(parsed_rows),
+        "non_deleted_rows_count": len(actual_rows),
+        "navigation_link": navigation_link,
+        "source": "Справочник.ВерсииРасширений",
+    }
 
 
 @mcp.tool()

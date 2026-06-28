@@ -43,6 +43,39 @@ def test_index_designer_xml(tmp_path: Path):
     assert obj["matches"][0]["navigation"][0]["url"] == "e1cib/app/Обработка.MCPTestManager"
 
 
+def test_index_help_html_pages(tmp_path: Path):
+    root = tmp_path / "src"
+    (root / "Configuration").mkdir(parents=True)
+    (root / "Configuration" / "Configuration.mdo").write_text(
+        "<MetaDataObject><Configuration><name>Test</name></Configuration></MetaDataObject>",
+        encoding="utf-8",
+    )
+    processor_dir = root / "DataProcessors" / "PL_ИзменениеВремениБекапирования"
+    (processor_dir / "Help").mkdir(parents=True)
+    (processor_dir / "PL_ИзменениеВремениБекапирования.mdo").write_text(
+        "<MetaDataObject><DataProcessor><name>PL_ИзменениеВремениБекапирования</name></DataProcessor></MetaDataObject>",
+        encoding="utf-8",
+    )
+    (processor_dir / "Help" / "ru.html").write_text(
+        dedent(
+            """
+            <html><head><title>Изменение времени бекапирования</title><style>.x{color:red}</style></head>
+            <body><h1>Настройка резервного копирования</h1><p>Позволяет изменить время бекапирования областей данных.</p><script>ignore()</script></body></html>
+            """
+        ).strip(),
+        encoding="utf-8",
+    )
+
+    svc = RagService(tmp_path / "rag.sqlite")
+    svc.add_source("SRC", str(root), kind="configuration")
+    svc.create_snapshot("SRC-only", sources=["SRC"])
+    result = svc.build_index(snapshot="SRC-only")
+    assert result["help_pages"] == 1
+
+    found = svc.query("время бекапирования", snapshot="SRC-only")
+    assert any(row["kind"] == "Справка" and row["object_full_name"] == "Обработка.PL_ИзменениеВремениБекапирования" for row in found["fts"])
+
+
 def test_index_register_roles_and_dcs_fields(tmp_path: Path):
     root = tmp_path / "src"
     (root / "Configuration").mkdir(parents=True)

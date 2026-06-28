@@ -103,6 +103,16 @@ class DataCompositionField:
 
 
 @dataclass(slots=True)
+class HelpPage:
+    object_full_name: str
+    language: str
+    title: str | None = None
+    text: str | None = None
+    source_path: str | None = None
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
 class ParsedSource:
     source: SourceInfo
     objects: list[MetadataObject] = field(default_factory=list)
@@ -112,3 +122,4 @@ class ParsedSource:
     forms: list[Form] = field(default_factory=list)
     form_elements: list[FormElement] = field(default_factory=list)
     data_composition_fields: list[DataCompositionField] = field(default_factory=list)
+    help_pages: list[HelpPage] = field(default_factory=list)
