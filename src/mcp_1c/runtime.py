@@ -304,7 +304,7 @@ def start_standalone_server(
     data_dir: Path,
     log_dir: Path,
     db_path: Path | None = None,
-    timeout: float = 30.0,
+    timeout: float = 60.0,
     direct_regport: int | None = None,
     direct_range: tuple[int, int] | None = None,
 ) -> subprocess.Popen:

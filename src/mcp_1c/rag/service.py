@@ -223,7 +223,7 @@ class RagService:
                 snapshot_id = None
                 source_rows = [r for r in con.execute("SELECT * FROM sources ORDER BY id")]
             source_rows = [r for r in source_rows if r is not None]
-            counts = {"sources": 0, "objects": 0, "attributes": 0, "table_parts": 0, "forms": 0, "form_elements": 0, "data_composition_fields": 0, "chunks": 0}
+            counts = {"sources": 0, "objects": 0, "attributes": 0, "table_parts": 0, "forms": 0, "form_elements": 0, "data_composition_fields": 0, "help_pages": 0, "chunks": 0}
             for src in source_rows:
                 info = SourceInfo(src["name"], Path(src["path"]), src["kind"], src["format"], src["repo_url"], src["branch"], src["commit_hash"])
                 parsed = parse_source(info)
@@ -295,6 +295,16 @@ class RagService:
                     chunk_text = " ".join(part for part in text_parts if part)
                     cid = _insert_chunk(con, snapshot_id, oid, "dcs_field", chunk_text, dcs_field.source_path, {"source": src["name"], "schema": dcs_field.schema_name})
                     con.execute("INSERT INTO search_fts(text, object_full_name, kind, source_path, chunk_id) VALUES(?,?,?,?,?)", (chunk_text, dcs_field.object_full_name, "СКД", dcs_field.source_path, cid))
+                    counts["chunks"] += 1
+                for help_page in parsed.help_pages:
+                    oid = object_ids.get(help_page.object_full_name)
+                    if not oid:
+                        continue
+                    text_parts = [help_page.object_full_name, "справка", help_page.language, help_page.title or "", help_page.text or ""]
+                    chunk_text = "\n".join(part for part in text_parts if part)
+                    cid = _insert_chunk(con, snapshot_id, oid, "help", chunk_text, help_page.source_path, {"source": src["name"], "language": help_page.language, "title": help_page.title})
+                    con.execute("INSERT INTO search_fts(text, object_full_name, kind, source_path, chunk_id) VALUES(?,?,?,?,?)", (chunk_text, help_page.object_full_name, "Справка", help_page.source_path, cid))
+                    counts["help_pages"] += 1
                     counts["chunks"] += 1
         return {"db_path": self.db_path, **counts}
 
