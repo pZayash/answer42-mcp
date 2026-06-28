@@ -254,14 +254,18 @@ def _acquire_shared_file_server(
             cf = Path(cf_path) if cf_path else None
             if cf and not cf.exists():
                 raise FileNotFoundError(f"Shared file infobase CF not found at {cf}.")
+            if cf and resolved_db_path.exists() and not _cf_marker_matches(resolved_db_path, cf):
+                logging.info("Shared file infobase %s has stale Answer42 CF marker; recreating", resolved_db_path)
+                shutil.rmtree(resolved_db_path, ignore_errors=True)
             # Shared file infobases are intentionally persistent across several
             # MCP server processes.  If a previous process already created the
             # database but died before writing the registry entry, do not wipe it
-            # here: just publish it through a fresh ibsrv.
+            # here: just publish it through a fresh ibsrv unless its CF marker is stale.
             if not resolved_db_path.exists() or not any(resolved_db_path.iterdir()):
                 runtime.create_file_infobase(ibcmd, resolved_db_path)
                 if cf:
                     runtime.load_configuration(ibcmd, resolved_db_path, str(cf))
+                    _write_cf_marker(resolved_db_path, cf)
         elif not resolved_db_path.exists():
             raise FileNotFoundError(f"File infobase directory not found: {resolved_db_path}")
 
@@ -580,19 +584,41 @@ def _packaged_cf_name(src_dir: str) -> str:
     return "MCPTestManager.cf"
 
 
-def _copy_packaged_cf(target: Path, src_dir: str) -> bool:
+def _file_sha256(path: Path | str) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _packaged_cf_path(src_dir: str) -> Path | None:
     cf_name = _packaged_cf_name(src_dir)
     try:
         resource = importlib.resources.files("mcp_1c.assets").joinpath(cf_name)
         if not resource.is_file():
-            return False
-        target.parent.mkdir(parents=True, exist_ok=True)
+            return None
         with importlib.resources.as_file(resource) as path:
-            shutil.copy2(path, target)
+            return Path(path)
+    except Exception as exc:
+        logging.debug("Packaged CF artifact %s is not available: %s", cf_name, exc)
+        return None
+
+
+def _copy_packaged_cf(target: Path, src_dir: str, *, force: bool = False) -> bool:
+    cf_name = _packaged_cf_name(src_dir)
+    source = _packaged_cf_path(src_dir)
+    if source is None:
+        return False
+    try:
+        if target.exists() and not force and _file_sha256(target) == _file_sha256(source):
+            return True
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
         logging.info("Copied packaged CF artifact %s to %s", cf_name, target)
         return True
     except Exception as exc:
-        logging.debug("Packaged CF artifact %s is not available: %s", cf_name, exc)
+        logging.debug("Could not copy packaged CF artifact %s: %s", cf_name, exc)
         return False
 
 
@@ -600,17 +626,18 @@ def _ensure_cf_built(out_cf: str, *, src_dir: str, platform_dir: Path) -> str:
     """Build a .cf artifact when XML sources are available; otherwise copy packaged CF."""
     target = Path(out_cf)
     source = Path(src_dir)
+    script = Path(__file__).resolve().parents[2] / "scripts" / "build_cf.py"
+    if not source.exists() or not script.exists():
+        packaged = _packaged_cf_path(src_dir)
+        if packaged is not None:
+            force = not target.exists() or _file_sha256(target) != _file_sha256(packaged)
+            if _copy_packaged_cf(target, src_dir, force=force):
+                return str(target)
+        if not source.exists():
+            raise FileNotFoundError(f"CF source directory not found and no packaged CF is available: {source}")
+        raise FileNotFoundError(f"CF build script not found and no packaged CF is available: {script}")
     if not _source_newer_than(target, source):
         return str(target)
-    if not source.exists():
-        if _copy_packaged_cf(target, src_dir):
-            return str(target)
-        raise FileNotFoundError(f"CF source directory not found and no packaged CF is available: {source}")
-    script = Path(__file__).resolve().parents[2] / "scripts" / "build_cf.py"
-    if not script.exists():
-        if _copy_packaged_cf(target, src_dir):
-            return str(target)
-        raise FileNotFoundError(f"CF build script not found and no packaged CF is available: {script}")
     target.parent.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     env["ONEC_PLATFORM_DIR"] = str(platform_dir)
@@ -631,6 +658,32 @@ def _ensure_cf_built(out_cf: str, *, src_dir: str, platform_dir: Path) -> str:
             f"(rc={completed.returncode}):\n{completed.stdout}"
         )
     return str(target)
+
+
+def _cf_marker_path(db_path: Path) -> Path:
+    return db_path.parent / f".{db_path.name}.answer42-cf.json"
+
+
+def _cf_marker_data(cf_path: Path | str) -> dict[str, str]:
+    path = Path(cf_path)
+    return {"answer42_version": __version__, "cf_sha256": _file_sha256(path), "cf_path": str(path)}
+
+
+def _write_cf_marker(db_path: Path, cf_path: Path | str) -> None:
+    marker = _cf_marker_path(db_path)
+    marker.write_text(json.dumps(_cf_marker_data(cf_path), ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _cf_marker_matches(db_path: Path, cf_path: Path | str) -> bool:
+    marker = _cf_marker_path(db_path)
+    if not db_path.exists() or not marker.exists() or not Path(cf_path).exists():
+        return False
+    try:
+        stored = json.loads(marker.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    expected = _cf_marker_data(cf_path)
+    return stored.get("answer42_version") == expected["answer42_version"] and stored.get("cf_sha256") == expected["cf_sha256"]
 
 
 def _normalize_base_url(url: str) -> str:
@@ -777,6 +830,17 @@ async def _ensure_restored_session(session_id: str = DEFAULT_SESSION) -> Session
     sess = persisted.get(session_id)
     if sess is None:
         raise ValueError(f"Session {session_id!r} not found. Call start_session first.")
+    cf_path = _ensure_cf_built(runtime.DEFAULT_CF_BUILT, src_dir="src/cf", platform_dir=sess.platform_dir)
+    if not _cf_marker_matches(sess.db_path, cf_path):
+        _cleanup_stale_session_processes(sess, "stale manager CF marker")
+        shutil.rmtree(sess.data_dir, ignore_errors=True)
+        persisted.pop(session_id, None)
+        STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        STATE_FILE.write_text(json.dumps({sid: s.to_json() for sid, s in persisted.items()}, ensure_ascii=False, indent=2), encoding="utf-8")
+        raise ValueError(
+            f"Session {session_id!r} was created with an older Answer42 manager CF. "
+            "Its temporary manager infobase was removed; call start_session again."
+        )
     await sess.bridge.start()
     _SESSIONS[session_id] = sess
     logging.info("Restored MCP session %s from %s; bridge=%s", session_id, STATE_FILE, sess.bridge.url)
@@ -1700,6 +1764,7 @@ async def start_session(
                 platform_dir=platform_dir,
             )
             runtime.load_configuration(sess.ibcmd, sess.db_path, cf_path)
+            _write_cf_marker(sess.db_path, cf_path)
     except Exception:
         await _cleanup_failed_start_session(sess, "infobase preparation failure")
         raise
@@ -1801,6 +1866,7 @@ async def start_session(
                 platform_dir=platform_dir,
             )
             runtime.load_configuration(sess.ibcmd, sess.client_db_path, client_cf_path)
+            _write_cf_marker(sess.client_db_path, client_cf_path)
             sess.client_runtime = runtime.ManagerRuntime(
                 infobase=runtime.InfobaseSpec(db_path=sess.client_db_path),
                 server=runtime.StandaloneServerSpec(address="", port=0, name="file-direct", data_dir=sess.client_server_data_dir),

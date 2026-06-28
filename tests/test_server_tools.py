@@ -1,5 +1,6 @@
 import asyncio
 import builtins
+import json
 import pytest
 from pathlib import Path, PureWindowsPath
 
@@ -10,9 +11,12 @@ from mcp_1c.server import (
     SessionState,
     _SESSIONS,
     _append_available_users_to_auth_error,
+    _cf_marker_matches,
+    _ensure_restored_session,
     _extract_error_lines,
     _test_client_startup_error_from_logs,
     _wait_for_test_client_ready,
+    _write_cf_marker,
     credentials_check,
     credentials_list,
     _is_placeholder_password,
@@ -300,6 +304,42 @@ def test_screenshot_missing_mss_hint_uses_pypi_package_name(tmp_path, monkeypatc
     assert "answer42[screenshot]" in message
     assert "pipx inject answer42 mss" in message
     assert ".[screenshot]" not in message
+
+
+def test_cf_marker_detects_changed_manager_configuration(tmp_path):
+    db_path = tmp_path / "ib"
+    db_path.mkdir()
+    cf_path = tmp_path / "MCPTestManager.cf"
+    cf_path.write_bytes(b"old cf")
+
+    _write_cf_marker(db_path, cf_path)
+    assert _cf_marker_matches(db_path, cf_path)
+
+    cf_path.write_bytes(b"new cf")
+    assert not _cf_marker_matches(db_path, cf_path)
+
+
+def test_restore_drops_session_with_stale_manager_cf_marker(tmp_path, monkeypatch):
+    data_dir = tmp_path / "session"
+    db_path = data_dir / "ib"
+    db_path.mkdir(parents=True)
+    cf_path = tmp_path / "MCPTestManager.cf"
+    cf_path.write_bytes(b"current cf")
+    stale_cf = tmp_path / "old.cf"
+    stale_cf.write_bytes(b"old cf")
+    _write_cf_marker(db_path, stale_cf)
+
+    state_file = tmp_path / "sessions.json"
+    sess = SessionState("stale", "", tmp_path, 10001, 10002, 10003, data_dir)
+    state_file.write_text(json.dumps({"stale": sess.to_json()}), encoding="utf-8")
+    monkeypatch.setattr("mcp_1c.server.STATE_FILE", state_file)
+    monkeypatch.setattr("mcp_1c.server._ensure_cf_built", lambda *args, **kwargs: str(cf_path))
+
+    with pytest.raises(ValueError, match="older Answer42 manager CF"):
+        asyncio.run(_ensure_restored_session("stale"))
+
+    assert not data_dir.exists()
+    assert json.loads(state_file.read_text(encoding="utf-8")) == {}
 
 
 def test_cp866_process_output_decoding():
