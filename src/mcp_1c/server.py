@@ -2255,12 +2255,55 @@ async def _enrich_auth_failure_for_web_base(error: Exception, base_url: str) -> 
     return type(error)(enriched_text)
 
 
+def _decode_log_bytes(data: bytes) -> str:
+    """Decode 1C text logs written by different OS/platform versions.
+
+    Linux logs are usually UTF-8, while Windows 1C /Out logs may be
+    UTF-16LE/UTF-16BE or an ANSI codepage.  Decoding Windows UTF-16LE as
+    UTF-8 with replacement hides Russian startup errors behind NUL bytes,
+    so auth failures such as ``Пользователь ИБ не идентифицирован`` are not
+    detected and the user only sees a generic startup timeout.
+    """
+    if not data:
+        return ""
+    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        for encoding in ("utf-16", "utf-8-sig"):
+            try:
+                return data.decode(encoding)
+            except UnicodeDecodeError:
+                pass
+    sample = data[:4096]
+    if sample:
+        even_nuls = sample[0::2].count(0)
+        odd_nuls = sample[1::2].count(0)
+        # Heuristic for UTF-16 logs without BOM.  Russian/ASCII text in
+        # UTF-16LE has most NULs in odd bytes; UTF-16BE has them in even bytes.
+        threshold = max(8, len(sample) // 8)
+        if odd_nuls > threshold and odd_nuls > even_nuls * 2:
+            try:
+                return data.decode("utf-16-le")
+            except UnicodeDecodeError:
+                pass
+        if even_nuls > threshold and even_nuls > odd_nuls * 2:
+            try:
+                return data.decode("utf-16-be")
+            except UnicodeDecodeError:
+                pass
+    for encoding in ("utf-8-sig", "cp1251"):
+        try:
+            return data.decode(encoding)
+        except UnicodeDecodeError:
+            pass
+    return data.decode("utf-8", errors="replace")
+
+
 def _tail_text_file(path: Path | str, *, max_lines: int = 80, max_chars: int = 20000) -> str:
     file_path = Path(path)
     if not file_path.exists():
         return ""
     try:
-        lines = file_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        text_data = _decode_log_bytes(file_path.read_bytes())
+        lines = text_data.splitlines()
     except Exception as exc:
         return f"<не удалось прочитать {file_path}: {exc}>"
     text = "\n".join(lines[-max_lines:])

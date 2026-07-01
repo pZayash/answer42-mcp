@@ -12,6 +12,7 @@ from mcp_1c.server import (
     _SESSIONS,
     _append_available_users_to_auth_error,
     _cf_marker_matches,
+    _decode_log_bytes,
     _ensure_restored_session,
     _extract_error_lines,
     _test_client_startup_error_from_logs,
@@ -276,6 +277,30 @@ def test_test_client_startup_error_from_logs_prefers_auth_error(tmp_path):
     (sess.client_log_dir / "test_client_1c_out.log").write_text(
         "ordinary startup line\nПользователь ИБ не идентифицирован\nmore details\n",
         encoding="utf-8",
+    )
+
+    assert _test_client_startup_error_from_logs(sess) == "Пользователь ИБ не идентифицирован"
+
+
+def test_decode_log_bytes_supports_windows_utf16le_without_bom():
+    text = "ordinary startup line\nПользователь ИБ не идентифицирован\nmore details\n"
+
+    assert _decode_log_bytes(text.encode("utf-16-le")) == text
+
+
+def test_test_client_startup_error_from_logs_detects_windows_utf16le_auth_error(tmp_path):
+    sess = _session_with_client_log_dir(tmp_path)
+    (sess.client_log_dir / "test_client_1c_out.log").write_bytes(
+        "ordinary startup line\nПользователь ИБ не идентифицирован\nmore details\n".encode("utf-16-le")
+    )
+
+    assert _test_client_startup_error_from_logs(sess) == "Пользователь ИБ не идентифицирован"
+
+
+def test_test_client_startup_error_from_logs_detects_windows_cp1251_auth_error(tmp_path):
+    sess = _session_with_client_log_dir(tmp_path)
+    (sess.client_log_dir / "test_client_1c_out.log").write_bytes(
+        "ordinary startup line\nПользователь ИБ не идентифицирован\nmore details\n".encode("cp1251")
     )
 
     assert _test_client_startup_error_from_logs(sess) == "Пользователь ИБ не идентифицирован"
