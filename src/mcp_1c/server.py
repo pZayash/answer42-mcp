@@ -382,6 +382,8 @@ class SessionState:
         self.file_client_runtime: runtime.ManagerRuntime | None = None
         self.shared_file_key: str = ""  # shared ibsrv key for connection_mode=file
         self.xvfb_process: subprocess.Popen | None = None
+        self.client_display: str = ""
+        self.client_xvfb_process: subprocess.Popen | None = None
         self.runtime: runtime.ManagerRuntime | None = None
         self.test_client_process: subprocess.Popen | None = None
         self.bridge = OneCBridgeServer(
@@ -399,6 +401,7 @@ class SessionState:
         return {
             "session_id": self.session_id,
             "display": self.display,
+            "client_display": self.client_display,
             "platform_dir": str(self.platform_dir),
             "ws_port": self.ws_port,
             "ibsrv_port": self.ibsrv_port,
@@ -434,7 +437,7 @@ class SessionState:
         sess.shared_client_key = str(data.get("shared_client_key") or "")
         sess.file_client_ibsrv_port = int(data.get("file_client_ibsrv_port") or 0)
         sess.shared_file_key = str(data.get("shared_file_key") or "")
-        sess.rag_snapshot = str(data.get("rag_snapshot", ""))
+        sess.client_display = str(data.get("client_display", ""))
         sess.rag_enabled = bool(data.get("rag_enabled", True))
         sess.idle_timeout_seconds = int(data.get("idle_timeout_seconds") or 60 * 60)
         return sess
@@ -816,6 +819,7 @@ async def _cleanup_failed_start_session(sess: SessionState, reason: str) -> None
         await sess.bridge.stop()
     except Exception:
         pass
+    runtime.stop_xvfb(sess.client_xvfb_process)
     runtime.stop_xvfb(sess.xvfb_process)
     _cleanup_stale_session_processes(sess, reason)
     if sess.data_dir.exists():
@@ -1596,6 +1600,7 @@ def sessions_list() -> dict[str, Any]:
             "base_url": sess.base_url,
             "version": _platform.platform_version_from_dir(sess.platform_dir),
             "display": sess.display,
+            "client_display": sess.client_display,
             "ws_port": sess.ws_port,
             "bridge_connected": bool(bridge_status.get("connected")),
             "manager_alive": bool(rt and rt.manager_process and rt.manager_process.poll() is None),
@@ -1650,6 +1655,7 @@ def session_status(*,
         "base_url": sess.base_url,
         "version": _platform.platform_version_from_dir(sess.platform_dir),
         "display": sess.display,
+        "client_display": sess.client_display,
         "bridge": bridge,
         "manager": None if rt is None else {
             "pid": rt.manager_process.pid if rt.manager_process else None,
@@ -1739,6 +1745,11 @@ async def start_session(
                 sess.rag_snapshot = bound_snapshot
         if display:
             sess.xvfb_process = runtime.start_xvfb(display)
+        # Separate display for the test client so screenshots capture only the client window
+        client_display = "" if os_support.IS_WINDOWS else runtime.find_free_display(runtime.DEFAULT_DISPLAY_START + display_offset + 1)
+        sess.client_display = client_display
+        if client_display:
+            sess.client_xvfb_process = runtime.start_xvfb(client_display)
         await sess.bridge.start()
     _SESSIONS[sid] = sess
     _persist_sessions()
@@ -1911,7 +1922,7 @@ async def start_session(
             diagnostic_error = _client_failure_diagnostics(sess, enriched, target_mode)
             await _cleanup_failed_start_session(sess, "test-client startup failure")
             raise diagnostic_error from exc
-        _auto_maximize_test_client_result(connect_result, sess.display)
+        _auto_maximize_test_client_result(connect_result, sess.client_display or sess.display)
 
     if sess.idle_timeout_seconds > 0:
         asyncio.create_task(_idle_watch_session(sid))
@@ -1920,6 +1931,7 @@ async def start_session(
     return {
         "session_id": sid, "version": actual_version,
         "platform_dir": str(platform_dir), "display": display,
+        "client_display": sess.client_display,
         "ws_port": ws_port, "ibsrv_port": ibsrv_port,
         "testclient_port": testclient_port, "data_dir": str(data_dir),
         "bridge_url": sess.bridge.url, "rag_snapshot": sess.rag_snapshot,
@@ -1968,6 +1980,8 @@ async def _stop_session_impl(session_id: str = DEFAULT_SESSION, clean_data: bool
         stopped.append("bridge")
     except Exception as exc:
         logging.warning("stop_session: bridge.stop failed: %s", exc)
+    runtime.stop_xvfb(sess.client_xvfb_process)
+    stopped.append("client-xvfb")
     runtime.stop_xvfb(sess.xvfb_process)
     stopped.append("xvfb")
     _cleanup_stale_session_processes(sess, "stop_session")
@@ -2573,7 +2587,7 @@ async def _connect_test_client_impl(
     sess.test_client_process = runtime.start_test_client(
         argv,
         log_dir=sess.client_log_dir,
-        display=sess.display,
+        display=sess.client_display or sess.display,
         log_name=client_stdout_log,
     )
     params = {"base_url": r_base, "username": r_user, "password": r_pass,
@@ -4228,7 +4242,7 @@ def screenshot(
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     sess = _session(session_id)
-    resolved_display = display or sess.display
+    resolved_display = display or sess.client_display or sess.display
 
     try:
         import mss  # type: ignore
@@ -4293,6 +4307,7 @@ async def _run() -> None:
                 await sess.bridge.stop()
             except Exception:
                 pass
+            runtime.stop_xvfb(sess.client_xvfb_process)
             runtime.stop_xvfb(sess.xvfb_process)
         _SESSIONS.clear()
 
