@@ -3204,11 +3204,12 @@ async def tabular_document_save(
 async def toggle_field(
     field_name: Annotated[str, "Field technical name"],
     value: Annotated[bool, "Desired checkbox value"] = False,
+    max_depth: Annotated[int, "Max UI tree depth for nested fields"] = 20,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
     """Set a checkbox-like field using the 1C test client API."""
-    return await _bridge_call_recorded(session_id, "toggle_field", {"field_name": field_name, "value": value})
+    return await _bridge_call_recorded(session_id, "toggle_field", {"field_name": field_name, "value": value, "max_depth": max_depth})
 
 
 @mcp.tool()
