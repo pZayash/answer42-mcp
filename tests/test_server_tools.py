@@ -152,6 +152,7 @@ def test_selected_new_tool_schemas():
     assert tools["field_dropdown_items"].inputSchema["properties"]["timeout"]["default"] == 10
     assert tools["field_dropdown_items"].inputSchema["properties"]["max_depth"]["default"] == 3
     assert tools["field_dropdown_items"].inputSchema["properties"]["search_depth"]["default"] == 0
+    assert tools["toggle_field"].inputSchema["properties"]["max_depth"]["default"] == 20
     assert tools["decoration_click_link"].inputSchema["properties"]["presentation"]["default"] == ""
     assert tools["command_interface_commands"].inputSchema["properties"]["section"]["default"] == ""
     assert tools["command_interface_commands"].inputSchema["properties"]["max_depth"]["default"] == 4
