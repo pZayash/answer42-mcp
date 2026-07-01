@@ -75,4 +75,23 @@ create_gitlab_release:
   release:
     tag_name: "$CI_COMMIT_TAG"
     name: "Answer42 $CI_COMMIT_TAG"
-    description: "Answer42 $CI_COMMIT_TAG published to PyPI. Install with `pipx install answer42` or `pip install answer42`."
+    description: |
+      ## Исправления запуска тест-клиента
+
+      - `start_session` больше не маскирует ошибки подключения тест-клиента generic timeout'ом, если 1С успела записать причину в `/Out`.
+      - При ошибке `attach_test_client` Answer42 читает `test_client_1c_out.log` и `test_client_stdout.log` и возвращает диагностическое сообщение с хвостами логов.
+      - Во время `attach_test_client` добавлен мониторинг процесса `1cv8c`: если клиент тестирования завершился раньше ответа bridge, вызов завершается явной ошибкой `Test client process exited during attach_test_client; exit_code=...` с логами клиента.
+      - Для web-баз auth-ошибки вроде `Пользователь ИБ не идентифицирован` по-прежнему дополняются попыткой получить список пользователей из `<base_url>/ru_RU/e1cib/users`.
+
+      ## Тесты
+
+      - Добавлены регрессионные тесты на проброс auth-ошибки из `/Out` и generic 1C-ошибки из лога клиента.
+      - Проверяется в CI: `py_compile`, `pytest`, `ruff`.
+
+      ## Установка
+
+      ```bash
+      pipx install answer42
+      # или
+      pip install answer42
+      ```
