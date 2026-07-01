@@ -3127,6 +3127,39 @@ async def current_element(*,
 
 
 @mcp.tool()
+async def field_dropdown_state(
+    field_name: Annotated[str, "Field technical name or title"],
+    search_by_title: Annotated[bool, "Search field by visible title"] = False,
+    timeout: Annotated[int, "Wait timeout for dropdown formation"] = 60,
+    max_depth: Annotated[int, "Maximum search depth"] = 32,
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Return whether a field dropdown is open and its visible choice items."""
+    return await _bridge_call_recorded(
+        session_id,
+        "field_dropdown_state",
+        {"field_name": field_name, "search_by_title": search_by_title, "timeout": timeout, "max_depth": max_depth},
+    )
+
+
+@mcp.tool()
+async def field_dropdown_close(
+    field_name: Annotated[str, "Field technical name or title"],
+    search_by_title: Annotated[bool, "Search field by visible title"] = False,
+    max_depth: Annotated[int, "Maximum search depth"] = 32,
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Close an open dropdown for a form field, if it is open."""
+    return await _bridge_call_recorded(
+        session_id,
+        "field_dropdown_close",
+        {"field_name": field_name, "search_by_title": search_by_title, "max_depth": max_depth},
+    )
+
+
+@mcp.tool()
 async def table_current_row(
     name: Annotated[str, "Table technical name"] = "",
     title: Annotated[str, "Table visible title"] = "",
