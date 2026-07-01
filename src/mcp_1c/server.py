@@ -2800,6 +2800,7 @@ async def field_dropdown_items(
     search_by_title: Annotated[bool, "Search by visible title instead of technical name"] = False,
     timeout: Annotated[int, "Dropdown formation timeout in seconds"] = 10,
     max_depth: Annotated[int, "Maximum depth used to serialize dropdown child objects"] = 3,
+    search_depth: Annotated[int, "Maximum depth used to find the field; 0 means auto-expand search depth"] = 0,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
@@ -2807,7 +2808,13 @@ async def field_dropdown_items(
     return await _bridge_call_recorded(
         session_id,
         "field_dropdown_items",
-        {"field_name": field_name, "search_by_title": search_by_title, "timeout": timeout, "max_depth": max_depth},
+        {
+            "field_name": field_name,
+            "search_by_title": search_by_title,
+            "timeout": timeout,
+            "max_depth": max_depth,
+            "search_depth": search_depth,
+        },
     )
 
 
