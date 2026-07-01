@@ -327,6 +327,53 @@ def test_wait_for_test_client_ready_reports_invalid_credentials_from_1c_out_log(
     assert "did not open test port" not in message
 
 
+def test_test_client_startup_error_from_logs_detects_generic_1c_error(tmp_path):
+    sess = _session_with_client_log_dir(tmp_path)
+    (sess.client_log_dir / "test_client_1c_out.log").write_text(
+        "ordinary startup line\nОшибка при выполнении операции\nmore details\n",
+        encoding="utf-8",
+    )
+
+    assert _test_client_startup_error_from_logs(sess) == "Ошибка при выполнении операции"
+
+
+def test_attach_test_client_surfaces_auth_error_from_logs(tmp_path):
+    """When attach_test_client fails and the /Out log contains an auth error,
+    the error message must include the auth failure text and log paths."""
+    from mcp_1c.server import _append_file_tail, _looks_like_auth_failure
+
+    sess = _session_with_client_log_dir(tmp_path)
+    (sess.client_log_dir / "test_client_1c_out.log").write_text(
+        "\ufeffПользователь ИБ не идентифицирован\n",
+        encoding="utf-8",
+    )
+    (sess.client_log_dir / "test_client_stdout.log").write_text(
+        "stdout line\n",
+        encoding="utf-8",
+    )
+
+    attach_error = _test_client_startup_error_from_logs(sess)
+    assert attach_error == "Пользователь ИБ не идентифицирован"
+    assert _looks_like_auth_failure(attach_error)
+
+    message = f"Test client attach error:\n{attach_error}"
+    message = _append_file_tail(
+        message,
+        "Лог stdout/stderr клиента тестирования",
+        sess.client_log_dir / "test_client_stdout.log",
+    )
+    message = _append_file_tail(
+        message,
+        "Лог 1С /Out клиента тестирования",
+        sess.client_log_dir / "test_client_1c_out.log",
+    )
+
+    assert "Test client attach error:" in message
+    assert "Пользователь ИБ не идентифицирован" in message
+    assert "test_client_1c_out.log" in message
+    assert "test_client_stdout.log" in message
+
+
 def test_screenshot_missing_mss_hint_uses_pypi_package_name(tmp_path, monkeypatch):
     sess = _session_with_client_log_dir(tmp_path)
     _SESSIONS[sess.session_id] = sess

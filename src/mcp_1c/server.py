@@ -19,7 +19,7 @@ import importlib.resources
 import urllib.request
 from urllib.parse import urlsplit, urlunsplit
 from dataclasses import dataclass, field
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -2402,6 +2402,12 @@ def _test_client_startup_error_from_logs(sess: SessionState) -> str:
     return ""
 
 
+async def _wait_for_test_client_process_exit(process: subprocess.Popen[Any]) -> int | None:
+    while process.poll() is None:
+        await asyncio.sleep(0.2)
+    return process.returncode
+
+
 async def _wait_for_test_client_ready(sess: SessionState, host: str, port: int, timeout: float) -> None:
     deadline = time.time() + timeout
     proc = sess.test_client_process
@@ -2576,14 +2582,58 @@ async def _connect_test_client_impl(
               "connection_mode": mode, "connection_value": r_value,
               "target_connection_mode": target_connection_mode}
     _touch_session(sess)
+    monitor_task: asyncio.Task[int | None] | None = None
     try:
         wait_timeout = float(os.getenv("ONEC_MCP_TEST_CLIENT_READY_TIMEOUT", "55"))
         await _wait_for_test_client_ready(sess, host, r_port, timeout=wait_timeout)
-        result = await sess.bridge.call("attach_test_client", params)
-    except Exception:
+        if sess.test_client_process is not None:
+            monitor_task = asyncio.create_task(_wait_for_test_client_process_exit(sess.test_client_process))
+        attach_task = asyncio.create_task(sess.bridge.call("attach_test_client", params))
+        wait_tasks: set[asyncio.Task[Any]] = {attach_task}
+        if monitor_task is not None:
+            wait_tasks.add(monitor_task)
+        done, pending = await asyncio.wait(wait_tasks, return_when=asyncio.FIRST_COMPLETED)
+        if monitor_task is not None and monitor_task in done and not attach_task.done():
+            exit_code = monitor_task.result()
+            attach_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await attach_task
+            message = f"Test client process exited during attach_test_client; exit_code={exit_code}"
+            message = _append_file_tail(
+                message,
+                "Лог stdout/stderr клиента тестирования",
+                sess.client_log_dir / "test_client_stdout.log",
+            )
+            message = _append_file_tail(
+                message,
+                "Лог 1С /Out клиента тестирования",
+                sess.client_log_dir / "test_client_1c_out.log",
+            )
+            raise RuntimeError(message)
+        for pending_task in pending:
+            pending_task.cancel()
+        result = await attach_task
+    except Exception as exc:
         runtime.kill_process(sess.test_client_process, "test-client")
         sess.test_client_process = None
+        attach_error = _test_client_startup_error_from_logs(sess)
+        if attach_error:
+            message = f"Test client attach error:\n{attach_error}"
+            message = _append_file_tail(
+                message,
+                "Лог stdout/stderr клиента тестирования",
+                sess.client_log_dir / "test_client_stdout.log",
+            )
+            message = _append_file_tail(
+                message,
+                "Лог 1С /Out клиента тестирования",
+                sess.client_log_dir / "test_client_1c_out.log",
+            )
+            raise RuntimeError(message) from exc
         raise
+    finally:
+        if monitor_task is not None and not monitor_task.done():
+            monitor_task.cancel()
     return _record_tool(sess.session_id, "connect_test_client", params, result)
 
 
