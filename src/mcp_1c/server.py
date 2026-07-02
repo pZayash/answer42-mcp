@@ -3294,7 +3294,59 @@ async def tabular_document_save(
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
     """Save a tabular document field to a file in the selected format."""
-    return await _bridge_call_recorded(session_id, "tabular_document_save", {"name": name, "title": title, "path": path, "format": format, "max_depth": max_depth})
+    result = await _bridge_call_recorded(session_id, "tabular_document_save", {"name": name, "title": title, "path": path, "format": format, "max_depth": max_depth})
+    return _select_saved_tabular_document_file(result, format)
+
+
+def _select_saved_tabular_document_file(result: Any, format: str) -> Any:
+    if not isinstance(result, dict):
+        return result
+    files = result.get("files")
+    if not isinstance(files, list) or not files:
+        return result
+    selected = _find_saved_tabular_document_file(files, format)
+    if selected is None:
+        result["selected"] = None
+        return result
+    selected_path = selected.get("path")
+    requested_path = result.get("path")
+    if isinstance(selected_path, str) and isinstance(requested_path, str) and requested_path and selected_path != requested_path:
+        with suppress(Exception):
+            shutil.copyfile(selected_path, requested_path)
+            selected = dict(selected)
+            selected["copied_to"] = requested_path
+            result["path"] = requested_path
+    result["selected"] = selected
+    result["saved"] = True
+    return result
+
+
+def _find_saved_tabular_document_file(files: list[Any], format: str) -> dict[str, Any] | None:
+    wanted = format.lower()
+    for item in files:
+        if not isinstance(item, dict):
+            continue
+        file_path = item.get("path")
+        if not isinstance(file_path, str):
+            continue
+        p = Path(file_path)
+        if not p.is_file():
+            continue
+        try:
+            header = p.read_bytes()[:8]
+        except OSError:
+            continue
+        if wanted == "pdf" and header.startswith(b"%PDF"):
+            return item
+        if wanted in {"xlsx", "docx"} and header.startswith(b"PK\x03\x04"):
+            return item
+        if wanted == "xls" and header.startswith(bytes.fromhex("d0cf11e0a1b11ae1")):
+            return item
+        if wanted in {"html", "htm"} and (header.startswith(b"<") or header.startswith(b"\xef\xbb\xbf<")):
+            return item
+        if wanted in {"txt", "mxl"} and p.stat().st_size > 0:
+            return item
+    return None
 
 
 @mcp.tool()
