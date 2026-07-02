@@ -3058,7 +3058,7 @@ async def maximize_test_client_window(*,
 ) -> Any:
     """Activate and maximize the 1C test-client OS window via wmctrl/xdotool/Xlib."""
     sess = _session(session_id)
-    return _maximize_external_window(title_contains="", display=sess.display, width=None, height=None)
+    return _maximize_external_window(title_contains="", display=sess.client_display or sess.display, width=None, height=None)
 
 
 @mcp.tool()
@@ -3074,7 +3074,7 @@ def maximize_test_client_external_window(
     sess = _session(session_id)
     return _maximize_external_window(
         title_contains=title_contains,
-        display=display or sess.display,
+        display=display or sess.client_display or sess.display,
         width=width or None,
         height=height or None,
     )
