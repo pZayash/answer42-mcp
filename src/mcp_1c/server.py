@@ -3288,7 +3288,7 @@ async def tabular_document_save(
     name: Annotated[str, "Tabular document field technical name"] = "",
     title: Annotated[str, "Tabular document field visible title"] = "",
     path: Annotated[str, "Output file path; empty = auto-generated temp path"] = "",
-    format: Annotated[str, "Output format: pdf | xlsx | xls | mxl | html | txt"] = "pdf",
+    format: Annotated[str, "Output format: pdf | xlsx | xls | html | txt"] = "pdf",
     max_depth: Annotated[int, "Maximum search depth"] = 8,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
@@ -3298,15 +3298,32 @@ async def tabular_document_save(
     return _select_saved_tabular_document_file(result, format)
 
 
+@mcp.tool()
+async def tabular_document_state_display(
+    name: Annotated[str, "Tabular document field technical name"] = "",
+    title: Annotated[str, "Tabular document field visible title"] = "",
+    max_depth: Annotated[int, "Maximum search depth"] = 8,
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Return the state display of a tabular document field, when exposed by 1C."""
+    return await _bridge_call_recorded(session_id, "tabular_document_state_display", {"name": name, "title": title, "max_depth": max_depth})
+
+
 def _select_saved_tabular_document_file(result: Any, format: str) -> Any:
     if not isinstance(result, dict):
         return result
     files = result.get("files")
     if not isinstance(files, list) or not files:
+        if result.get("found", True) is not False:
+            result["saved"] = False
+            result.setdefault("error", f"No files were produced for requested tabular document format: {format.lower()}")
         return result
     selected = _find_saved_tabular_document_file(files, format)
     if selected is None:
         result["selected"] = None
+        result["saved"] = False
+        result["error"] = f"No produced file matches requested tabular document format: {format.lower()}"
         return result
     selected_path = selected.get("path")
     requested_path = result.get("path")
@@ -3333,20 +3350,52 @@ def _find_saved_tabular_document_file(files: list[Any], format: str) -> dict[str
         if not p.is_file():
             continue
         try:
-            header = p.read_bytes()[:8]
+            data = p.read_bytes()
+            header = data[:8]
         except OSError:
             continue
         if wanted == "pdf" and header.startswith(b"%PDF"):
             return item
-        if wanted in {"xlsx", "docx"} and header.startswith(b"PK\x03\x04"):
+        if wanted == "xlsx" and _zip_contains(p, "xl/workbook.xml"):
+            return item
+        if wanted == "docx" and _zip_contains(p, "word/document.xml"):
             return item
         if wanted == "xls" and header.startswith(bytes.fromhex("d0cf11e0a1b11ae1")):
             return item
-        if wanted in {"html", "htm"} and (header.startswith(b"<") or header.startswith(b"\xef\xbb\xbf<")):
+        if wanted in {"html", "htm"} and (data.startswith(b"<") or data.startswith(b"\xef\xbb\xbf<")):
             return item
-        if wanted in {"txt", "mxl"} and p.stat().st_size > 0:
+        if wanted == "txt" and _looks_like_plain_text(data):
             return item
     return None
+
+
+def _zip_contains(path: Path, member: str) -> bool:
+    import zipfile
+
+    try:
+        with zipfile.ZipFile(path) as archive:
+            return member in archive.namelist()
+    except Exception:
+        return False
+
+
+def _looks_like_plain_text(data: bytes) -> bool:
+    if not data:
+        return False
+    sample = data[:4096]
+    if sample.startswith(b"\xef\xbb\xbf"):
+        sample = sample[3:]
+    stripped = sample.lstrip().lower()
+    if stripped.startswith((b"<", b"<!doctype", b"<html")):
+        return False
+    if b"\x00" in sample:
+        return False
+    try:
+        sample.decode("utf-8")
+        return True
+    except UnicodeDecodeError:
+        return False
+
 
 
 @mcp.tool()

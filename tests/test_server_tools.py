@@ -79,6 +79,7 @@ EXPECTED_NEW_TOOLS = {
     "rag_source_roots_list",
     "rag_available_configurations",
     "rag_session_autoconfigure",
+    "tabular_document_state_display",
 }
 
 
@@ -176,6 +177,8 @@ def test_selected_new_tool_schemas():
     assert "connection_value" not in tools["start_session"].inputSchema["properties"]
     assert tools["credentials_save"].inputSchema["required"] == ["url", "username", "password"]
     assert tools["credentials_remove"].inputSchema["required"] == ["url"]
+    assert tools["tabular_document_save"].inputSchema["properties"]["format"]["default"] == "pdf"
+    assert tools["tabular_document_state_display"].inputSchema["properties"]["max_depth"]["default"] == 8
 
 
 def test_rag_diagnostic_reports_missing_session_snapshot():
@@ -471,3 +474,32 @@ def test_connection_mode_normalization(tmp_path):
     assert _normalize_connection_mode("auto", str(file_ib), "") == "file"
     assert _normalize_connection_mode("server", "cluster/ib", "") == "server"
     assert _normalize_connection_mode("auto", "cluster/ib", "") == "server"
+
+
+def test_tabular_document_file_selection_reports_format_mismatch(tmp_path):
+    from mcp_1c.server import _select_saved_tabular_document_file
+
+    wrong_pdf = tmp_path / "wrong.pdf"
+    wrong_pdf.write_bytes(b"not a pdf")
+    result = {"saved": True, "path": str(tmp_path / "requested.pdf"), "format": "pdf", "files": [{"path": str(wrong_pdf)}]}
+
+    selected = _select_saved_tabular_document_file(result, "pdf")
+
+    assert selected["saved"] is False
+    assert selected["selected"] is None
+    assert "No produced file matches" in selected["error"]
+
+
+def test_tabular_document_file_selection_accepts_requested_format(tmp_path):
+    from mcp_1c.server import _select_saved_tabular_document_file
+
+    actual_pdf = tmp_path / "actual.pdf"
+    actual_pdf.write_bytes(b"%PDF-1.7\n")
+    requested_pdf = tmp_path / "requested.pdf"
+    result = {"saved": True, "path": str(requested_pdf), "format": "pdf", "files": [{"path": str(actual_pdf)}]}
+
+    selected = _select_saved_tabular_document_file(result, "pdf")
+
+    assert selected["saved"] is True
+    assert selected["selected"]["copied_to"] == str(requested_pdf)
+    assert requested_pdf.read_bytes().startswith(b"%PDF")
