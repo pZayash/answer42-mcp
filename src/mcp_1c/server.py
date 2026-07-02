@@ -2661,6 +2661,8 @@ def _auto_maximize_on_error(display: str) -> None:
 def _auto_maximize_test_client_result(result: Any, display: str) -> None:
     try:
         mr = _maximize_external_window(title_contains="Клиент тестирования (1С:Предприятие)", display=display, width=None, height=None)
+        if not mr.get("ok"):
+            mr = _maximize_external_window(title_contains="", display=display, width=None, height=None)
         if isinstance(result, dict):
             result["auto_maximize"] = mr
     except Exception as exc:
