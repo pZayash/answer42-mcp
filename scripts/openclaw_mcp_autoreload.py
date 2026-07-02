@@ -11,6 +11,7 @@ import argparse
 import atexit
 import hashlib
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -35,12 +36,73 @@ def snapshot(root: Path, patterns: tuple[str, ...]) -> str:
     return digest.hexdigest()
 
 
+def _active_answer42_pids() -> list[int]:
+    """Return active Answer42 MCP stdio process PIDs, excluding this watcher."""
+    current_pid = os.getpid()
+    try:
+        result = subprocess.run(
+            ["ps", "-eo", "pid=,args="],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except Exception:
+        return []
+    pids: list[int] = []
+    for line in result.stdout.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        pid_text, _, cmd = stripped.partition(" ")
+        try:
+            pid = int(pid_text)
+        except ValueError:
+            continue
+        if pid == current_pid:
+            continue
+        if "openclaw_mcp_autoreload.py" in cmd:
+            continue
+        if "--dev openclaw" not in cmd:
+            continue
+        if "/answer42" in cmd or "mcp_1c.server" in cmd:
+            pids.append(pid)
+    return pids
+
+
+def kill_active_answer42(timeout: float = 5.0) -> list[int]:
+    """Terminate active Answer42 MCP processes so next tool call starts fresh code/env."""
+    pids = _active_answer42_pids()
+    if not pids:
+        return []
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    deadline = time.monotonic() + timeout
+    remaining = set(pids)
+    while remaining and time.monotonic() < deadline:
+        time.sleep(0.2)
+        for pid in list(remaining):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                remaining.discard(pid)
+    for pid in sorted(remaining):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    return pids
+
+
 def run_reload(server: str | None) -> int:
     cmd = ["openclaw", "mcp", "reload"]
     # Current OpenClaw reload command is global; keep --server support ready if added later.
     if server:
         probe = subprocess.run(["openclaw", "mcp", "reload", "--help"], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        if f"--server" in probe.stdout:
+        if "--server" in probe.stdout:
             cmd.extend(["--server", server])
     result = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     sys.stdout.write(result.stdout)
@@ -59,7 +121,12 @@ def main() -> int:
         default=30.0,
         help="seconds to wait after the last detected change before reloading OpenClaw MCP runtimes",
     )
-    parser.add_argument("--server", default="answer42")
+    parser.add_argument("--server", default="Answer42")
+    parser.add_argument(
+        "--no-kill-active",
+        action="store_true",
+        help="do not terminate active Answer42 stdio processes after OpenClaw cache reload",
+    )
     parser.add_argument("--once", action="store_true", help="wait for one change, reload once, exit")
     parser.add_argument("--pid-file", default="", help="write watcher pid to this file and remove it on exit")
     args = parser.parse_args()
@@ -108,6 +175,10 @@ def main() -> int:
         print("[mcp-autoreload] change detected; running openclaw mcp reload", flush=True)
         code = run_reload(args.server)
         print(f"[mcp-autoreload] reload exit code {code}", flush=True)
+        if code == 0 and not args.no_kill_active:
+            killed = kill_active_answer42()
+            if killed:
+                print(f"[mcp-autoreload] terminated active Answer42 MCP processes: {killed}", flush=True)
         if args.once:
             return code
 
