@@ -5,7 +5,7 @@ Reads a JSON file mapping base URLs (exact or wildcard) to
 a sample ``credentials.example.json`` is provided for reference.
 
 Environment variable ``ONEC_MCP_CREDENTIALS_FILE`` overrides the
-default path (``~/.onec-mcp-credentials.json``).
+default path (``~/.answer42-credentials.json``).
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ LOGGER = logging.getLogger(__name__)
 
 DEFAULT_CREDENTIALS_PATH = Path(
     os.getenv("ONEC_MCP_CREDENTIALS_FILE",
-              str(Path.home() / ".onec-mcp-credentials.json"))
+              str(Path.home() / ".answer42-credentials.json"))
 )
 
 
