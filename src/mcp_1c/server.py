@@ -4468,7 +4468,13 @@ def screenshot(
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> dict[str, Any]:
-    """Capture a screenshot from the MCP host. Defaults to the active visible 1C window."""
+    """Capture a screenshot from the MCP host. Defaults to the active visible 1C window.
+
+    Screenshots are for user evidence and UI diagnostics only. Do not use them
+    to analyze report/table/tabular-document/list data; use structured tools
+    such as tabular_document_text, tabular_documents, table_rows,
+    dynamic_list_output, or report export/save tools instead.
+    """
     output_path = Path(path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
