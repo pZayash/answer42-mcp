@@ -13,7 +13,6 @@ import uuid
 from datetime import datetime
 import shlex
 import subprocess
-import shutil
 import re
 import hashlib
 import importlib.resources
