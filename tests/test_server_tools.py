@@ -116,6 +116,25 @@ def test_credentials_tools_report_disabled_when_credential_store_is_off(monkeypa
     assert credentials_list() == []
 
 
+
+
+def test_default_data_dir_uses_answer42_temp_root(monkeypatch, tmp_path):
+    from mcp_1c.os_support import default_data_dir
+
+    monkeypatch.delenv("ONEC_MCP_DATA_DIR", raising=False)
+    monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path))
+
+    assert default_data_dir() == tmp_path / "answer42"
+
+
+def test_default_data_dir_honors_legacy_env_override(monkeypatch, tmp_path):
+    from mcp_1c.os_support import default_data_dir
+
+    override = tmp_path / "custom-runtime"
+    monkeypatch.setenv("ONEC_MCP_DATA_DIR", str(override))
+
+    assert default_data_dir() == override
+
 def test_new_mcp_tools_are_registered():
     _register_dev_tools(False)
     tool_names = set(_tools_by_name())

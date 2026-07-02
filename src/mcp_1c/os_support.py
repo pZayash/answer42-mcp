@@ -24,7 +24,7 @@ def default_data_dir() -> Path:
     override = os.getenv("ONEC_MCP_DATA_DIR")
     if override:
         return Path(override)
-    return Path(tempfile.gettempdir()) / "onec-mcp"
+    return Path(tempfile.gettempdir()) / "answer42"
 
 
 def runtime_path(env_name: str, *parts: str) -> Path:

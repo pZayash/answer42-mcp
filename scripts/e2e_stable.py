@@ -66,7 +66,7 @@ def _prebuild_shared_client_base(shared_id: str) -> None:
 
     platform_dir = _platform.find_platform_dir(os.environ.get("ONEC_VERSION") or None)
     ibcmd = str(platform_dir / "ibcmd")
-    db_path = Path(os.getenv("ONEC_MCP_SHARED_CLIENT_BASE_DIR", "/tmp/onec-mcp/shared-client-bases")) / shared_id / "ib"
+    db_path = Path(os.getenv("ONEC_MCP_SHARED_CLIENT_BASE_DIR", "/tmp/answer42/shared-client-bases")) / shared_id / "ib"
     if db_path.exists() and any(db_path.iterdir()):
         return
     cf_path = runtime.DEFAULT_CLIENT_CF_BUILT
