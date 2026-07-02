@@ -29,8 +29,6 @@ from mcp_1c.server import (
     _users_url_for_base_url,
     main as mcp_main,
     mcp,
-    maximize_test_client_external_window,
-    maximize_test_client_window,
     screenshot,
 )
 
@@ -403,49 +401,8 @@ def test_default_xvfb_resolution_is_large_enough_for_1c_windows():
     assert runtime.DEFAULT_DISPLAY_RES == "1920x1200x24"
 
 
-def test_maximize_test_client_window_uses_client_display(tmp_path, monkeypatch):
-    sess = _session_with_client_log_dir(tmp_path)
-    sess.display = ":101"
-    sess.client_display = ":102"
-    _SESSIONS[sess.session_id] = sess
-    calls = []
 
-    def fake_maximize(**kwargs):
-        calls.append(kwargs)
-        return {"ok": True}
-
-    monkeypatch.setattr("mcp_1c.server._maximize_external_window", fake_maximize)
-    try:
-        result = asyncio.run(maximize_test_client_window(session_id=sess.session_id))
-    finally:
-        _SESSIONS.pop(sess.session_id, None)
-
-    assert result == {"ok": True}
-    assert calls == [{"title_contains": "", "display": ":102", "width": None, "height": None}]
-
-
-def test_maximize_test_client_external_window_uses_client_display_by_default(tmp_path, monkeypatch):
-    sess = _session_with_client_log_dir(tmp_path)
-    sess.display = ":101"
-    sess.client_display = ":102"
-    _SESSIONS[sess.session_id] = sess
-    calls = []
-
-    def fake_maximize(**kwargs):
-        calls.append(kwargs)
-        return {"ok": True}
-
-    monkeypatch.setattr("mcp_1c.server._maximize_external_window", fake_maximize)
-    try:
-        result = maximize_test_client_external_window(session_id=sess.session_id)
-    finally:
-        _SESSIONS.pop(sess.session_id, None)
-
-    assert result == {"ok": True}
-    assert calls == [{"title_contains": "", "display": ":102", "width": None, "height": None}]
-
-
-def test_active_x11_window_geometry_accepts_1c_title_and_clamps_to_screen(monkeypatch):
+def test_active_x11_window_geometry_accepts_test_client_title_and_clamps_to_screen(monkeypatch):
     def fake_run(args, **kwargs):
         class Result:
             pass
@@ -455,7 +412,7 @@ def test_active_x11_window_geometry_accepts_1c_title_and_clamps_to_screen(monkey
             return result
         if args[0] == "xwininfo":
             result.stdout = (
-                '0x100001 "Бухгалтерия предприятия Marvin [42_19_3364]" '
+                '0x100001 "Клиент тестирования (1С:Предприятие) - Бухгалтерия предприятия Marvin [42_19_3364]" '
                 '("1cv8c" "1cv8c") 1918x1005+0+0 +0+0\n'
             )
             return result
@@ -465,7 +422,7 @@ def test_active_x11_window_geometry_accepts_1c_title_and_clamps_to_screen(monkey
 
     geometry = _active_x11_window_geometry(":99")
     assert geometry is not None
-    assert geometry["title"] == "Бухгалтерия предприятия Marvin [42_19_3364]"
+    assert geometry["title"] == "Клиент тестирования (1С:Предприятие) - Бухгалтерия предприятия Marvin [42_19_3364]"
     assert geometry["left"] == 0
     assert geometry["top"] == 0
     assert geometry["width"] == 1280

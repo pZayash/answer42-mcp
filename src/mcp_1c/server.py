@@ -2653,14 +2653,14 @@ async def _connect_test_client_impl(
 
 def _auto_maximize_on_error(display: str) -> None:
     try:
-        _maximize_external_window(title_contains="", display=display, width=None, height=None)
+        _maximize_external_window(title_contains="Клиент тестирования (1С:Предприятие)", display=display, width=None, height=None)
     except Exception as exc:
         logging.debug("auto maximize after failed connect_test_client failed: %s", exc)
 
 
 def _auto_maximize_test_client_result(result: Any, display: str) -> None:
     try:
-        mr = _maximize_external_window(title_contains="", display=display, width=None, height=None)
+        mr = _maximize_external_window(title_contains="Клиент тестирования (1С:Предприятие)", display=display, width=None, height=None)
         if isinstance(result, dict):
             result["auto_maximize"] = mr
     except Exception as exc:
@@ -3050,34 +3050,6 @@ async def decoration_click_link(name: Annotated[str, "Decoration technical name"
 async def decoration_click(name: Annotated[str, "Decoration technical name"] = "", title: Annotated[str, "Decoration title substring"] = "", *, session_id: Annotated[str, "Session id"] = DEFAULT_SESSION) -> Any:
     """Click a form decoration."""
     return await _bridge_call_recorded(session_id, "decoration_click", {"name": name, "title": title})
-
-
-@mcp.tool()
-async def maximize_test_client_window(*,
-    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
-) -> Any:
-    """Activate and maximize the 1C test-client OS window via wmctrl/xdotool/Xlib."""
-    sess = _session(session_id)
-    return _maximize_external_window(title_contains="", display=sess.client_display or sess.display, width=None, height=None)
-
-
-@mcp.tool()
-def maximize_test_client_external_window(
-    title_contains: Annotated[str, "Window title substring; empty means choose likely 1C test-client window"] = "",
-    display: Annotated[str, "X11 display override (empty = use session's)"] = "",
-    width: Annotated[int, "Target width; 0 means display width"] = 0,
-    height: Annotated[int, "Target height; 0 means display height"] = 0,
-    *,
-    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
-) -> dict[str, Any]:
-    """Maximize/resize the 1C test-client OS window: wmctrl -> xdotool -> Xlib fallback."""
-    sess = _session(session_id)
-    return _maximize_external_window(
-        title_contains=title_contains,
-        display=display or sess.client_display or sess.display,
-        width=width or None,
-        height=height or None,
-    )
 
 
 @mcp.tool()

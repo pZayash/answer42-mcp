@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.wintypes
+import logging
 import os
 import shutil
 import subprocess
 import time
 from dataclasses import dataclass
 from typing import Any
+
+LOGGER = logging.getLogger(__name__)
+
+TEST_CLIENT_WINDOW_TITLE = "Клиент тестирования (1С:Предприятие)"
 
 
 @dataclass
@@ -97,6 +102,8 @@ def _maximize_with_wmctrl(title_contains: str, display: str, width: int | None, 
             candidates.append(item)
             if _title_matches(title, title_contains):
                 chosen=item
+        if chosen is None and not title_contains and len(candidates) == 1:
+            chosen = candidates[0]
         if chosen is None:
             return WindowControlResult(False, "wmctrl", candidates=candidates, error="window not found")
         wid=chosen["id"]
@@ -113,8 +120,12 @@ def _maximize_with_xdotool(title_contains: str, display: str, width: int | None,
         return WindowControlResult(False, "xdotool", error="xdotool not installed")
     try:
         sw, sh = (width, height) if width and height else _screen_size(display, env)
-        pattern = title_contains or ".*"
+        pattern = title_contains or TEST_CLIENT_WINDOW_TITLE
         ids = subprocess.check_output(["xdotool", "search", "--name", pattern], env=env, text=True).split()
+        if not ids and not title_contains:
+            all_ids = subprocess.check_output(["xdotool", "search", "--class", "1cv8"], env=env, text=True).split()
+            if len(all_ids) == 1:
+                ids = all_ids
         if not ids:
             return WindowControlResult(False, "xdotool", error="window not found")
         wid=ids[-1]
@@ -128,25 +139,11 @@ def _maximize_with_xdotool(title_contains: str, display: str, width: int | None,
 
 
 def _title_matches(title: str, title_contains: str) -> bool:
-    if title_contains and title_contains.lower() not in title.lower():
-        return False
+    if title_contains:
+        return title_contains.lower() in title.lower()
     if "Конфигурация" in title:
         return False
-    return any(s in title for s in [
-        "DEV-AREA",
-        "Начальная",
-        "Приложения",
-        "1С:Предприятие",
-        "Бухгалтерия",
-        "Предприятие",
-        "Управление",
-        "Зарплата",
-        "ERP",
-        "Комплексная",
-        "Розница",
-        "ЭмФешн",
-        "Время создания",
-    ])
+    return TEST_CLIENT_WINDOW_TITLE.lower() in title.lower()
 
 
 def _maximize_with_xlib(title_contains: str, display: str, width: int | None, height: int | None, env: dict[str, str]) -> WindowControlResult:
@@ -181,6 +178,7 @@ def _maximize_with_xlib(title_contains: str, display: str, width: int | None, he
                     pass
             return ""
         chosen=None
+        candidate_windows=[]
         for win in walk(root):
             title=get_name(win)
             if not title:
@@ -193,8 +191,11 @@ def _maximize_with_xlib(title_contains: str, display: str, width: int | None, he
                 continue
             item={"title": title, "width": geo.width, "height": geo.height}
             candidates.append(item)
+            candidate_windows.append((win, item))
             if _title_matches(title, title_contains):
                 chosen=(win, item)
+        if chosen is None and not title_contains and len(candidate_windows) == 1:
+            chosen = candidate_windows[0]
         if chosen is None:
             return WindowControlResult(False, "xlib", candidates=candidates, error="window not found")
         win,item=chosen
