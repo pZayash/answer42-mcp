@@ -75,6 +75,42 @@ def test_credentials_upsert_creates_file_and_returns_bool(tmp_path):
     }
 
 
+def test_credentials_title_and_alias_lookup(tmp_path):
+    path = tmp_path / "credentials.json"
+    store = CredentialsStore(path)
+
+    updated = store.upsert(
+        "https://example.com/infobase",
+        "u",
+        "p",
+        title="bp27932",
+        aliases=["test-base"],
+    )
+
+    assert updated is False
+    assert store.lookup("bp27932") == {"username": "u", "password": "p"}
+    assert store.lookup("test-base") == {"username": "u", "password": "p"}
+    assert store.resolve("bp27932")["url"] == "https://example.com/infobase"
+    assert store.list_entries() == [
+        {"url": "https://example.com/infobase", "title": "bp27932", "aliases": ["test-base"]}
+    ]
+    assert store.titles() == [
+        {"url": "https://example.com/infobase", "title": "bp27932", "aliases": ["test-base"]}
+    ]
+
+
+def test_credentials_upsert_updates_by_title(tmp_path):
+    path = tmp_path / "credentials.json"
+    store = CredentialsStore(path)
+    store.upsert("https://old.example/ib", "u1", "p1", title="main")
+
+    updated = store.upsert("https://new.example/ib", "u2", "p2", title="main")
+
+    assert updated is True
+    assert store.resolve("main")["url"] == "https://new.example/ib"
+    assert store.lookup("main") == {"username": "u2", "password": "p2"}
+
+
 def test_credentials_remove_exact_match(tmp_path):
     path = tmp_path / "credentials.json"
     path.write_text(json.dumps({

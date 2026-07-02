@@ -1698,6 +1698,13 @@ async def start_session(
     rag_enabled: Annotated[bool, "Enable built-in RAG for this session"] = True,
 ) -> dict[str, Any]:
     """One-shot session factory: detect version, start infrastructure and connect the 1C test client."""
+    credential_ref = _resolve_credential_reference(base_url)
+    if credential_ref is not None and credential_ref.get("url"):
+        base_url = str(credential_ref["url"])
+        if not username:
+            username = str(credential_ref.get("username", ""))
+        if not password:
+            password = str(credential_ref.get("password", ""))
     base_url = _platform.normalize_infobase_url(base_url)
     connection_mode = "auto"
     connection_value = ""
@@ -2117,18 +2124,24 @@ def _lookup_credentials(base_url: str) -> dict[str, str] | None:
     return _credentials_store().lookup(base_url)
 
 
+def _resolve_credential_reference(value: str) -> dict[str, str] | None:
+    if not _CREDENTIAL_STORE_ENABLED or not value:
+        return None
+    return _credentials_store().resolve(value)
+
+
 @mcp.tool()
 def credentials_check(base_url: str) -> dict[str, object]:
-    """Check whether credentials exist for a base URL without returning secrets."""
+    """Check whether credentials exist for a base URL or saved title without returning secrets."""
     if not _CREDENTIAL_STORE_ENABLED:
         return {"base_url": base_url, "found": False, "disabled": True}
-    credentials = _credentials_store().lookup(base_url)
+    credentials = _credentials_store().resolve(base_url)
     if credentials is None:
         return {"base_url": base_url, "found": False}
-    return {
-        "base_url": base_url,
-        "found": True,
-    }
+    result: dict[str, object] = {"base_url": base_url, "found": True, "url": credentials.get("url", "")}
+    if credentials.get("title"):
+        result["title"] = credentials["title"]
+    return result
 
 
 @mcp.tool()
@@ -2136,6 +2149,8 @@ def credentials_save(
     url: Annotated[str, "Base URL pattern (exact or wildcard like https://*.example.com/*)"],
     username: Annotated[str, "1C username"],
     password: Annotated[str, "1C password"],
+    title: Annotated[str, "Optional saved base title/alias, e.g. bp27932"] = "",
+    aliases: Annotated[str, "Optional comma-separated aliases for the same entry"] = "",
 ) -> dict[str, object]:
     """Save or update credentials for a URL pattern in the local credentials store.
 
@@ -2145,12 +2160,14 @@ def credentials_save(
     """
     if not _CREDENTIAL_STORE_ENABLED:
         raise _credential_store_disabled_error()
-    updated = _credentials_store().upsert(url, username, password)
-    return {
-        "url": url,
-        "saved": True,
-        "updated": updated,
-    }
+    alias_list = [part.strip() for part in aliases.split(",") if part.strip()]
+    updated = _credentials_store().upsert(url, username, password, title=title, aliases=alias_list)
+    result: dict[str, object] = {"url": url, "saved": True, "updated": updated}
+    if title:
+        result["title"] = title
+    if alias_list:
+        result["aliases"] = alias_list
+    return result
 
 
 @mcp.tool()
@@ -2165,11 +2182,19 @@ def credentials_remove(
 
 
 @mcp.tool()
-def credentials_list() -> list[dict[str, str]]:
-    """List configured credential URL patterns (no usernames or passwords)."""
+def credentials_list() -> list[dict[str, object]]:
+    """List configured credential URL patterns/titles (no usernames or passwords)."""
     if not _CREDENTIAL_STORE_ENABLED:
         return []
     return _credentials_store().list_entries()
+
+
+@mcp.tool()
+def credentials_titles() -> list[dict[str, object]]:
+    """List saved credential titles/aliases that can be used as start_session base_url."""
+    if not _CREDENTIAL_STORE_ENABLED:
+        return []
+    return _credentials_store().titles()
 
 
 _PLACEHOLDER_PASSWORD_RE = re.compile(r"^\*{3,}$")
@@ -3256,13 +3281,19 @@ async def table_cell_text(
 
 @mcp.tool()
 async def tabular_documents(
-    include_text: Annotated[bool, "Include tabular document text"] = False,
+    include_text: Annotated[bool, "Include tabular document cells"] = False,
     max_depth: Annotated[int, "Maximum search depth"] = 8,
+    row_start: Annotated[int, "First row to read when include_text=true (1-based)"] = 1,
+    row_end: Annotated[int, "Last row to read when include_text=true; 0 = row_start + max_rows - 1"] = 0,
+    column_start: Annotated[int, "First column to read when include_text=true (1-based)"] = 1,
+    column_end: Annotated[int, "Last column to read when include_text=true; 0 = column_start + max_columns - 1"] = 0,
+    max_rows: Annotated[int, "Maximum rows to read when row_end=0; 0 = all rows"] = 50,
+    max_columns: Annotated[int, "Maximum columns to read when column_end=0; 0 = all columns"] = 20,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
-    """List tabular document fields in the active window; optionally include their text."""
-    return await _bridge_call_recorded(session_id, "tabular_documents", {"include_text": include_text, "max_depth": max_depth})
+    """List tabular document fields with dimensions; optionally include a cells range."""
+    return await _bridge_call_recorded(session_id, "tabular_documents", {"include_text": include_text, "max_depth": max_depth, "row_start": row_start, "row_end": row_end, "column_start": column_start, "column_end": column_end, "max_rows": max_rows, "max_columns": max_columns})
 
 
 @mcp.tool()
@@ -3270,11 +3301,17 @@ async def tabular_document_text(
     name: Annotated[str, "Tabular document field technical name"] = "",
     title: Annotated[str, "Tabular document field visible title"] = "",
     max_depth: Annotated[int, "Maximum search depth"] = 8,
+    row_start: Annotated[int, "First row to read (1-based)"] = 1,
+    row_end: Annotated[int, "Last row to read; 0 = row_start + max_rows - 1"] = 0,
+    column_start: Annotated[int, "First column to read (1-based)"] = 1,
+    column_end: Annotated[int, "Last column to read; 0 = column_start + max_columns - 1"] = 0,
+    max_rows: Annotated[int, "Maximum rows to read when row_end=0; 0 = all rows"] = 50,
+    max_columns: Annotated[int, "Maximum columns to read when column_end=0; 0 = all columns"] = 20,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
-    """Return text and dimensions of a tabular document field in the active window."""
-    return await _bridge_call_recorded(session_id, "tabular_document_text", {"name": name, "title": title, "max_depth": max_depth})
+    """Return dimensions and a cells range of a tabular document field in the active window."""
+    return await _bridge_call_recorded(session_id, "tabular_document_text", {"name": name, "title": title, "max_depth": max_depth, "row_start": row_start, "row_end": row_end, "column_start": column_start, "column_end": column_end, "max_rows": max_rows, "max_columns": max_columns})
 
 
 @mcp.tool()
