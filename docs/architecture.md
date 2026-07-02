@@ -26,7 +26,7 @@ class SessionState:
     ws_port: int              # порт WebSocket bridge
     ibsrv_port: int           # порт HTTP-gate автономного сервера (0 если file-direct fallback)
     testclient_port: int      # TCP-порт клиента тестирования
-    data_dir: Path            # временная директория сессии (tempdir/onec-mcp/sessions/{session_id})
+    data_dir: Path            # временная директория сессии (tempdir/answer42/sessions/{session_id})
     base_url: str
     username: str
     password: str
@@ -95,7 +95,7 @@ class SessionState:
 
 ### `mcp_1c.os_support`
 
-Кроссплатформенные OS-хелперы: `file_lock` (POSIX `fcntl` / Windows `msvcrt`), `kill_process_tree` (SIGTERM/SIGKILL / `taskkill`), `subprocess_creation_kwargs` (start_new_session / CREATE_NEW_PROCESS_GROUP), `executable_name` (`.exe` на Windows), `default_data_dir` (tempdir/onec-mcp).
+Кроссплатформенные OS-хелперы: `file_lock` (POSIX `fcntl` / Windows `msvcrt`), `kill_process_tree` (SIGTERM/SIGKILL / `taskkill`), `subprocess_creation_kwargs` (start_new_session / CREATE_NEW_PROCESS_GROUP), `executable_name` (`.exe` на Windows), `default_data_dir` (tempdir/answer42).
 
 ### `mcp_1c.platform`
 
@@ -207,7 +207,7 @@ machine-readable code and remediation message for the agent.
 | `ONEC_MCP_WS_HOST` | WebSocket host | `127.0.0.1` |
 | `ONEC_MCP_WS_PORT` | WebSocket port | `8765` |
 | `ONEC_MCP_REQUEST_TIMEOUT` | Таймаут запроса, сек | `60` |
-| `ONEC_MCP_DATA_DIR` | Рабочая директория | `/tmp/onec-mcp` |
+| `ONEC_MCP_DATA_DIR` | Рабочая директория | `/tmp/answer42` |
 | `MCP_1C_RAG_DB` | Путь к RAG SQLite | `build/rag/onec-rag.sqlite` |
 | `ONEC_MCP_DISABLE_RAG` | Отключить встроенный RAG (`1/true/yes/on`) | пусто |
 | `ONEC_MCP_RAG_SOURCE_DIRS` | `:`/`;`-separated directories for startup RAG discovery/watch | пусто |
