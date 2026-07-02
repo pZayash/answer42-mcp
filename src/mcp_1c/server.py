@@ -3895,24 +3895,38 @@ async def configuration_name_version_from_subsystems(
 ) -> dict[str, Any]:
     """Open the 'Subsystem versions' information register and return the main configuration name/version.
 
-    The tool reads `РегистрСведений.ВерсииПодсистем`, scans list rows and returns
-    the row where `Это основная конфигурация` is `Да`.
+    The tool reads `РегистрСведений.ВерсииПодсистем`, applies a dynamic-list
+    filter `Это основная конфигурация = Да`, then reads the remaining row
+    for `Имя подсистемы` and `Версия`.  This works even when the main-config
+    column is not visible in the default list form.
     """
     navigation_link = "e1cib/list/РегистрСведений.ВерсииПодсистем"
     await _bridge_call_recorded(session_id, "open_navigation_link", {"navigation_link": navigation_link})
+
+    # Apply filter: only the main configuration row
+    await _bridge_call_recorded(session_id, "dynamic_list_open_settings", {"button": ""})
+    await _bridge_call_recorded(session_id, "dynamic_list_apply_filter", {
+        "field": "Это основная конфигурация",
+        "value": "Да",
+        "comparison": "Equal",
+        "name": "Список",
+        "title": "",
+        "max_depth": 8,
+    })
+    await _bridge_call_recorded(session_id, "close_form", {})
+
     rows_result = await _bridge_call_recorded(session_id, "table_rows", {"name": "Список", "title": "", "limit": 200, "max_depth": 8})
     rows = rows_result.get("rows", []) if isinstance(rows_result, dict) else []
 
     parsed_rows = [_table_row_pairs(row) for row in rows]
-    main_rows = [row for row in parsed_rows if _row_value(row, "Это основная конфигурация") == "Да"]
-    main = main_rows[0] if main_rows else {}
+    main = parsed_rows[0] if parsed_rows else {}
 
     return {
         "found": bool(main),
         "configuration_name": _row_value(main, "Имя подсистемы"),
         "configuration_version": _row_value(main, "Версия"),
         "main_configuration_row": main,
-        "main_configuration_rows_count": len(main_rows),
+        "main_configuration_rows_count": len(parsed_rows),
         "rows_count": len(parsed_rows),
         "navigation_link": navigation_link,
         "source": "РегистрСведений.ВерсииПодсистем",
