@@ -3297,7 +3297,11 @@ async def tabular_documents(
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
-    """List tabular document fields with dimensions; optionally include a cells range."""
+    """List tabular document fields with dimensions; optionally include a cells range.
+
+    include_text is intended for small/partial ranges. For large tabular
+    documents, save/export the report to a file and analyze that file instead.
+    """
     return await _bridge_call_recorded(session_id, "tabular_documents", {"include_text": include_text, "max_depth": max_depth, "row_start": row_start, "row_end": row_end, "column_start": column_start, "column_end": column_end, "max_rows": max_rows, "max_columns": max_columns})
 
 
@@ -3315,7 +3319,13 @@ async def tabular_document_text(
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
-    """Return dimensions and a cells range of a tabular document field in the active window."""
+    """Return dimensions and a cells range of a tabular document field in the active window.
+
+    Use this for small tables or partial reads (headers, totals, spot checks). For
+    large reports/tabular documents, prefer tabular_document_save/report export
+    and analyze the saved PDF/XLSX/TXT/HTML file instead of reading UI cells one
+    by one.
+    """
     return await _bridge_call_recorded(session_id, "tabular_document_text", {"name": name, "title": title, "max_depth": max_depth, "row_start": row_start, "row_end": row_end, "column_start": column_start, "column_end": column_end, "max_rows": max_rows, "max_columns": max_columns})
 
 
