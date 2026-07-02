@@ -1699,8 +1699,13 @@ async def start_session(
 ) -> dict[str, Any]:
     """One-shot session factory: detect version, start infrastructure and connect the 1C test client."""
     credential_ref = _resolve_credential_reference(base_url)
-    if credential_ref is not None and credential_ref.get("url"):
-        base_url = str(credential_ref["url"])
+    input_looks_like_url = bool(re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", str(base_url or "")))
+    if credential_ref is not None:
+        # For saved titles/aliases, replace title -> real URL.  For URL/wildcard matches,
+        # keep the original requested URL; using the wildcard pattern itself as /WS value
+        # would make the 1C client fail with invalid connection parameters.
+        if credential_ref.get("url") and not input_looks_like_url:
+            base_url = str(credential_ref["url"])
         if not username:
             username = str(credential_ref.get("username", ""))
         if not password:
