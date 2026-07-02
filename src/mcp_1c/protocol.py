@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+MANAGER_PROTOCOL_VERSION = "2026.07.02.1"
+
 
 @dataclass(slots=True)
 class BridgeRequest:

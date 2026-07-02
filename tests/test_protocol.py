@@ -1,4 +1,11 @@
-from mcp_1c.protocol import BridgeRequest, BridgeResponse
+from pathlib import Path
+
+from mcp_1c.protocol import BridgeRequest, BridgeResponse, MANAGER_PROTOCOL_VERSION
+
+
+def test_manager_protocol_version_is_embedded_in_cf_sources():
+    module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
+    assert f'Возврат "{MANAGER_PROTOCOL_VERSION}"' in module
 
 
 def test_bridge_request_shape():

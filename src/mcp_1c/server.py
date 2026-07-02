@@ -27,6 +27,7 @@ from mcp.server.fastmcp import FastMCP
 
 from . import __version__
 from . import os_support
+from .protocol import MANAGER_PROTOCOL_VERSION
 from . import platform as _platform
 from . import runtime
 from . import skill_installer
@@ -2448,6 +2449,23 @@ async def _wait_for_test_client_ready(sess: SessionState, host: str, port: int, 
     raise RuntimeError(message)
 
 
+async def _verify_manager_protocol(sess: SessionState) -> dict[str, Any]:
+    info = await sess.bridge.call("manager_info", {})
+    if not isinstance(info, dict):
+        raise RuntimeError(
+            "MCPTestManager.cf is too old or incompatible: manager_info returned an unexpected response. "
+            f"Expected protocol {MANAGER_PROTOCOL_VERSION}. Rebuild/reload MCPTestManager.cf."
+        )
+    actual = str(info.get("manager_protocol_version") or "")
+    if actual != MANAGER_PROTOCOL_VERSION:
+        raise RuntimeError(
+            "MCPTestManager.cf protocol mismatch: "
+            f"Python expects {MANAGER_PROTOCOL_VERSION}, but 1C manager reports {actual or '<missing>'}. "
+            "Rebuild MCPTestManager.cf from current sources and restart/reload Answer42 MCP."
+        )
+    return info
+
+
 async def _connect_test_client_impl(
     sess: SessionState,
     *,
@@ -2465,6 +2483,7 @@ async def _connect_test_client_impl(
 ) -> Any:
     """Launch 1cv8c /TESTCLIENT from Python and attach the test manager to it."""
     await _wait_for_bridge_connected(sess, timeout=60.0)
+    manager_info = await _verify_manager_protocol(sess)
     r_base = _platform.normalize_infobase_url(base_url or sess.base_url)
     r_value = connection_value or r_base
     mode = _normalize_connection_mode(connection_mode, r_value, r_base)
@@ -2594,7 +2613,8 @@ async def _connect_test_client_impl(
               "port": r_port, "host": host, "client_pid": sess.test_client_process.pid,
               "client_log": str(client_out_log), "client_stdout_log": str(sess.client_log_dir / client_stdout_log),
               "connection_mode": mode, "connection_value": r_value,
-              "target_connection_mode": target_connection_mode}
+              "target_connection_mode": target_connection_mode,
+              "expected_manager_protocol_version": MANAGER_PROTOCOL_VERSION}
     _touch_session(sess)
     monitor_task: asyncio.Task[int | None] | None = None
     try:
