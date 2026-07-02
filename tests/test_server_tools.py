@@ -29,6 +29,8 @@ from mcp_1c.server import (
     _users_url_for_base_url,
     main as mcp_main,
     mcp,
+    maximize_test_client_external_window,
+    maximize_test_client_window,
     screenshot,
 )
 
@@ -395,6 +397,52 @@ def test_attach_test_client_surfaces_auth_error_from_logs(tmp_path):
     assert "Пользователь ИБ не идентифицирован" in message
     assert "test_client_1c_out.log" in message
     assert "test_client_stdout.log" in message
+
+
+def test_default_xvfb_resolution_is_large_enough_for_1c_windows():
+    assert runtime.DEFAULT_DISPLAY_RES == "1920x1200x24"
+
+
+def test_maximize_test_client_window_uses_client_display(tmp_path, monkeypatch):
+    sess = _session_with_client_log_dir(tmp_path)
+    sess.display = ":101"
+    sess.client_display = ":102"
+    _SESSIONS[sess.session_id] = sess
+    calls = []
+
+    def fake_maximize(**kwargs):
+        calls.append(kwargs)
+        return {"ok": True}
+
+    monkeypatch.setattr("mcp_1c.server._maximize_external_window", fake_maximize)
+    try:
+        result = asyncio.run(maximize_test_client_window(session_id=sess.session_id))
+    finally:
+        _SESSIONS.pop(sess.session_id, None)
+
+    assert result == {"ok": True}
+    assert calls == [{"title_contains": "", "display": ":102", "width": None, "height": None}]
+
+
+def test_maximize_test_client_external_window_uses_client_display_by_default(tmp_path, monkeypatch):
+    sess = _session_with_client_log_dir(tmp_path)
+    sess.display = ":101"
+    sess.client_display = ":102"
+    _SESSIONS[sess.session_id] = sess
+    calls = []
+
+    def fake_maximize(**kwargs):
+        calls.append(kwargs)
+        return {"ok": True}
+
+    monkeypatch.setattr("mcp_1c.server._maximize_external_window", fake_maximize)
+    try:
+        result = maximize_test_client_external_window(session_id=sess.session_id)
+    finally:
+        _SESSIONS.pop(sess.session_id, None)
+
+    assert result == {"ok": True}
+    assert calls == [{"title_contains": "", "display": ":102", "width": None, "height": None}]
 
 
 def test_active_x11_window_geometry_accepts_1c_title_and_clamps_to_screen(monkeypatch):
