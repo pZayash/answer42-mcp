@@ -103,7 +103,7 @@ export ONEC_MCP_CREDENTIALS_FILE=/secure/path/credentials.json
 Если переменная окружения не задана, MCP-сервер читает файл по умолчанию:
 
 ```text
-~/.onec-mcp-credentials.json
+~/.answer42-credentials.json
 ```
 
 Формат файла:

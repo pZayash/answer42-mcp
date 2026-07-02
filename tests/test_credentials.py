@@ -1,6 +1,12 @@
 import json
 
-from mcp_1c.credentials import CredentialsStore
+from pathlib import Path
+
+from mcp_1c.credentials import CredentialsStore, DEFAULT_CREDENTIALS_PATH
+
+
+def test_default_credentials_path_uses_answer42_name():
+    assert DEFAULT_CREDENTIALS_PATH == Path.home() / ".answer42-credentials.json"
 
 
 def test_credentials_exact_match_wins_over_wildcard(tmp_path):

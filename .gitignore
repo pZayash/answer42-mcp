@@ -7,7 +7,7 @@ venv/
 
 # Local credentials (never commit secrets)
 credentials.json
-.onec-mcp-credentials.json
+.answer42-credentials.json
 
 # Build artefacts
 build/
