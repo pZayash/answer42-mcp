@@ -58,38 +58,80 @@ class CredentialsStore:
     # ------------------------------------------------------------------
 
     def lookup(self, base_url: str) -> dict[str, str] | None:
-        """Return {username, password} for *base_url*, or None."""
-        url = base_url.rstrip("/")
+        """Return {username, password} for *base_url*, title or alias, or None."""
+        resolved = self.resolve(base_url)
+        if resolved is None:
+            return None
+        return {"username": resolved["username"], "password": resolved["password"]}
+
+    def resolve(self, base_url_or_title: str) -> dict[str, str] | None:
+        """Return full credential entry for URL, title or alias, without mutating it."""
+        value = str(base_url_or_title or "").strip()
+        url = value.rstrip("/")
+        normalized_title = value.lower()
+        for entry in self._entries:
+            title = str(entry.get("title", "")).strip().lower()
+            aliases = [str(a).strip().lower() for a in entry.get("aliases", [])]
+            if title and title == normalized_title or normalized_title in aliases:
+                return dict(entry)
         for entry in self._entries:
             pattern = entry["url"].rstrip("/")
             if url == pattern:
-                return {"username": entry["username"], "password": entry["password"]}
+                return dict(entry)
         for entry in self._entries:
             pattern = entry["url"].rstrip("/")
             if fnmatch.fnmatch(url, pattern):
-                return {"username": entry["username"], "password": entry["password"]}
+                return dict(entry)
         return None
 
-    def list_entries(self) -> list[dict[str, str]]:
-        """Return credential URL patterns without usernames or passwords."""
-        return [{"url": e["url"]} for e in self._entries]
+    def list_entries(self) -> list[dict[str, object]]:
+        """Return credential titles and URL patterns without usernames or passwords."""
+        result: list[dict[str, str]] = []
+        for entry in self._entries:
+            public = {"url": entry["url"]}
+            if entry.get("title"):
+                public["title"] = entry["title"]
+            if entry.get("aliases"):
+                public["aliases"] = list(entry["aliases"])
+            result.append(public)
+        return result
 
-    def upsert(self, url: str, username: str, password: str) -> bool:
+    def titles(self) -> list[dict[str, object]]:
+        """Return named credential entries only, without secrets."""
+        return [e for e in self.list_entries() if e.get("title")]
+
+    def upsert(self, url: str, username: str, password: str, title: str = "", aliases: list[str] | None = None) -> bool:
         """Add or update a credential entry for *url*.
 
         Returns True when an existing entry was updated, False when a new entry
         was created.  Usernames and passwords are intentionally not returned.
         """
         url = url.rstrip("/")
+        title = str(title or "").strip()
+        aliases = [str(alias).strip() for alias in (aliases or []) if str(alias).strip()]
         updated = False
         for entry in self._entries:
-            if entry["url"].rstrip("/") == url:
+            if entry["url"].rstrip("/") == url or (title and str(entry.get("title", "")).strip() == title):
+                entry["url"] = url
                 entry["username"] = username
                 entry["password"] = password
+                if title:
+                    entry["title"] = title
+                else:
+                    entry.pop("title", None)
+                if aliases:
+                    entry["aliases"] = aliases
+                else:
+                    entry.pop("aliases", None)
                 updated = True
                 break
         else:
-            self._entries.append({"url": url, "username": username, "password": password})
+            entry = {"url": url, "username": username, "password": password}
+            if title:
+                entry["title"] = title
+            if aliases:
+                entry["aliases"] = aliases
+            self._entries.append(entry)
         self._save()
         return updated
 
