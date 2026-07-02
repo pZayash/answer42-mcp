@@ -16,7 +16,7 @@ import sys
 import time
 from pathlib import Path
 
-DEFAULT_PATTERNS = ("src/mcp_1c/**/*.py", "pyproject.toml")
+DEFAULT_PATTERNS = ("src/mcp_1c/**/*.py", "src/cf/**/*.bsl", "pyproject.toml")
 
 
 def snapshot(root: Path, patterns: tuple[str, ...]) -> str:
