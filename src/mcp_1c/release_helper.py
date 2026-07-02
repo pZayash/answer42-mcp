@@ -35,9 +35,46 @@ def _replace_version(pyproject: Path, version: str) -> bool:
     return True
 
 
+def _commits_since_last_tag() -> str:
+    previous_tag = _git_output(["describe", "--tags", "--abbrev=0", "--match", "v*"])
+    if previous_tag:
+        return _git_output(["log", "--pretty=format:- %s (%h)", f"{previous_tag}..HEAD"])
+    return _git_output(["log", "--pretty=format:- %s (%h)", "HEAD"])
+
+
+def _default_release_notes(tag: str) -> str:
+    try:
+        commits = _commits_since_last_tag()
+    except subprocess.CalledProcessError:
+        commits = _git_output(["log", "--pretty=format:- %s (%h)", "-n", "20"])
+    if not commits.strip():
+        commits = "- Maintenance release"
+    return (
+        f"# Answer42 {tag}\n\n"
+        "## Changes\n"
+        f"{commits}\n\n"
+        "## Verification\n"
+        "- GitLab CI runs unit tests and package checks on branch and tag pipelines.\n"
+        "- PyPI publishing and GitLab Release creation are performed by the tag pipeline.\n"
+    )
+
+
+def _ensure_release_notes(repo_root: Path, tag: str, *, dry_run: bool, overwrite: bool) -> Path:
+    notes_path = repo_root / "release-notes" / f"{tag}.md"
+    if notes_path.exists() and notes_path.stat().st_size > 0 and not overwrite:
+        print(f"Release notes already exist: {notes_path.relative_to(repo_root)}")
+        return notes_path
+    text = _default_release_notes(tag)
+    print(f"+ write {notes_path.relative_to(repo_root)}")
+    if not dry_run:
+        notes_path.parent.mkdir(parents=True, exist_ok=True)
+        notes_path.write_text(text, encoding="utf-8")
+    return notes_path
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Bump pyproject.toml version, commit, tag and push to trigger PyPI release CI"
+        description="Bump version, create release notes, commit, tag and push to trigger Answer42 release CI"
     )
     parser.add_argument("version", help="Version without leading v, e.g. 0.2.1")
     parser.add_argument("--remote", default="origin", help="Git remote to push. Default: origin")
@@ -45,6 +82,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true", help="Print commands without executing them")
     parser.add_argument("--no-push", action="store_true", help="Create commit/tag locally but do not push")
     parser.add_argument("--allow-dirty", action="store_true", help="Allow unrelated uncommitted changes")
+    parser.add_argument("--overwrite-notes", action="store_true", help="Overwrite existing release notes")
     args = parser.parse_args(argv)
 
     version = args.version.removeprefix("v")
@@ -63,21 +101,28 @@ def main(argv: list[str] | None = None) -> int:
     if existing_tags:
         raise SystemExit(f"Tag already exists: {tag}")
 
-    print(f"Bumping {pyproject} to {version}")
+    print(f"Preparing {tag}")
     changed = True
     if not args.dry_run:
         changed = _replace_version(pyproject, version)
     else:
-        print(f"+ update {pyproject}: version = {version!r}")
+        print(f"+ update {pyproject.relative_to(repo_root)}: version = {version!r}")
+    notes_path = _ensure_release_notes(
+        repo_root, tag, dry_run=args.dry_run, overwrite=args.overwrite_notes
+    )
 
+    files_to_add = [str(notes_path.relative_to(repo_root))]
     if changed:
-        _run(["git", "add", str(pyproject.relative_to(repo_root))], dry_run=args.dry_run)
-        _run(["git", "commit", "-m", f"Release {tag}"], dry_run=args.dry_run)
-    else:
-        print(f"Version is already {version}; tagging current HEAD without a version commit.")
+        files_to_add.insert(0, str(pyproject.relative_to(repo_root)))
+    _run(["git", "add", *files_to_add], dry_run=args.dry_run)
+    _run(["git", "commit", "-m", f"Release {tag}"], dry_run=args.dry_run)
     _run(["git", "tag", "-a", tag, "-m", f"Release {tag}"], dry_run=args.dry_run)
     if not args.no_push:
         _run(["git", "push", args.remote, args.branch], dry_run=args.dry_run)
         _run(["git", "push", args.remote, tag], dry_run=args.dry_run)
         print("CI will publish PyPI package and create GitLab Release from the pushed tag.")
     return 0
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())
