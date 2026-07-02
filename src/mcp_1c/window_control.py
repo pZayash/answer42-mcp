@@ -132,7 +132,21 @@ def _title_matches(title: str, title_contains: str) -> bool:
         return False
     if "Конфигурация" in title:
         return False
-    return any(s in title for s in ["DEV-AREA", "Начальная", "Приложения", "1С:Предприятие", "ЭмФешн", "Время создания"])
+    return any(s in title for s in [
+        "DEV-AREA",
+        "Начальная",
+        "Приложения",
+        "1С:Предприятие",
+        "Бухгалтерия",
+        "Предприятие",
+        "Управление",
+        "Зарплата",
+        "ERP",
+        "Комплексная",
+        "Розница",
+        "ЭмФешн",
+        "Время создания",
+    ])
 
 
 def _maximize_with_xlib(title_contains: str, display: str, width: int | None, height: int | None, env: dict[str, str]) -> WindowControlResult:
