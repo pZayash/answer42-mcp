@@ -13,6 +13,7 @@ import uuid
 from datetime import datetime
 import shlex
 import subprocess
+import shutil
 import re
 import hashlib
 import importlib.resources
@@ -4268,6 +4269,34 @@ async def close_form(*,
     return await _bridge_call_recorded(session_id, "close_form", {})
 
 
+def _x11_screen_size(display: str | None = None) -> tuple[int, int] | None:
+    env = os.environ.copy()
+    if display:
+        env["DISPLAY"] = display
+    try:
+        out = subprocess.run(
+            ["xdpyinfo"],
+            env=env,
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=10,
+        ).stdout
+    except (subprocess.SubprocessError, FileNotFoundError):
+        return None
+    for line in out.splitlines():
+        if "dimensions:" not in line:
+            continue
+        try:
+            dimensions = line.split("dimensions:", 1)[1].strip().split()[0]
+            width, height = dimensions.split("x", 1)
+            return int(width), int(height)
+        except Exception:
+            return None
+    return None
+
+
 def _active_x11_window_geometry(display: str | None = None) -> dict[str, int] | None:
     env = os.environ.copy()
     if display:
@@ -4285,6 +4314,9 @@ def _active_x11_window_geometry(display: str | None = None) -> dict[str, int] | 
     except (subprocess.SubprocessError, FileNotFoundError):
         return None
 
+    screen_size = _x11_screen_size(display)
+    screen_width = screen_size[0] if screen_size else None
+    screen_height = screen_size[1] if screen_size else None
     candidates: list[tuple[int, dict[str, int]]] = []
     for line in tree.splitlines():
         if '("1cv8c" "1cv8c")' not in line and '("1cv8" "1cv8")' not in line:
@@ -4296,17 +4328,51 @@ def _active_x11_window_geometry(display: str | None = None) -> dict[str, int] | 
         width, height, left, top = map(int, match.groups()[1:])
         if width < 300 or height < 150:
             continue
-        if left < 0 or top < 0:
-            continue
         priority = 0
         if title and title not in {"1cv8c", "1cv8", "Конфигурация"}:
             priority += 100
-        if "1С:Предприятие" in title:
+        if any(word in title for word in (
+            "1С:Предприятие",
+            "Бухгалтерия",
+            "Предприятие",
+            "Управление",
+            "Зарплата",
+            "ERP",
+            "Комплексная",
+            "Розница",
+        )):
             priority += 50
         if any(word in title for word in ("создание", "Инструменты", "Шаблон", "Сессия", "DEV-AREA")):
             priority += 25
         priority += min(width * height // 10000, 50)
-        candidates.append((priority, {"left": left, "top": top, "width": width, "height": height, "title": title}))
+
+        # ``xwininfo -root -tree`` reports child coordinates relative to their
+        # parent.  For many 1C/X11 windows this means the client area appears as
+        # e.g. ``1280x1024+0+0`` even when the decorated top-level window is
+        # slightly larger or shifted.  mss needs root-relative, in-bounds
+        # monitor coordinates, so normalize the candidate to the virtual screen
+        # instead of discarding negative/off-screen decorations.
+        capture_left = max(0, left)
+        capture_top = max(0, top)
+        capture_width = width - max(0, -left)
+        capture_height = height - max(0, -top)
+        if screen_width is not None:
+            capture_width = min(capture_width, max(0, screen_width - capture_left))
+        if screen_height is not None:
+            capture_height = min(capture_height, max(0, screen_height - capture_top))
+        if capture_width < 300 or capture_height < 150:
+            continue
+        candidates.append((priority, {
+            "left": capture_left,
+            "top": capture_top,
+            "width": capture_width,
+            "height": capture_height,
+            "title": title,
+            "xwininfo_left": left,
+            "xwininfo_top": top,
+            "xwininfo_width": width,
+            "xwininfo_height": height,
+        }))
     if not candidates:
         return None
     candidates.sort(key=lambda item: item[0], reverse=True)
@@ -4392,6 +4458,12 @@ def screenshot(
             os.environ["DISPLAY"] = resolved_display
             try:
                 geometry = _active_x11_window_geometry(resolved_display) if window else None
+                if window and geometry is None:
+                    raise RuntimeError(
+                        "Cannot capture 1C window screenshot: window geometry was not detected. "
+                        "Use window=false to capture the whole virtual display, or maximize/resize the "
+                        "test client window and retry."
+                    )
                 with mss.mss() as sct:
                     monitor = geometry or sct.monitors[0]
                     image = sct.grab(monitor)

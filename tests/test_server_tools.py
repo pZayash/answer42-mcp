@@ -16,6 +16,7 @@ from mcp_1c.server import (
     _ensure_restored_session,
     _extract_error_lines,
     _test_client_startup_error_from_logs,
+    _active_x11_window_geometry,
     _wait_for_test_client_ready,
     _write_cf_marker,
     credentials_check,
@@ -394,6 +395,34 @@ def test_attach_test_client_surfaces_auth_error_from_logs(tmp_path):
     assert "Пользователь ИБ не идентифицирован" in message
     assert "test_client_1c_out.log" in message
     assert "test_client_stdout.log" in message
+
+
+def test_active_x11_window_geometry_accepts_1c_title_and_clamps_to_screen(monkeypatch):
+    def fake_run(args, **kwargs):
+        class Result:
+            pass
+        result = Result()
+        if args[0] == "xdpyinfo":
+            result.stdout = "screen #0:\n  dimensions:    1280x1024 pixels\n"
+            return result
+        if args[0] == "xwininfo":
+            result.stdout = (
+                '0x100001 "Бухгалтерия предприятия Marvin [42_19_3364]" '
+                '("1cv8c" "1cv8c") 1918x1005+0+0 +0+0\n'
+            )
+            return result
+        raise AssertionError(args)
+
+    monkeypatch.setattr("mcp_1c.server.subprocess.run", fake_run)
+
+    geometry = _active_x11_window_geometry(":99")
+    assert geometry is not None
+    assert geometry["title"] == "Бухгалтерия предприятия Marvin [42_19_3364]"
+    assert geometry["left"] == 0
+    assert geometry["top"] == 0
+    assert geometry["width"] == 1280
+    assert geometry["height"] == 1005
+    assert geometry["xwininfo_width"] == 1918
 
 
 def test_screenshot_missing_mss_hint_uses_pypi_package_name(tmp_path, monkeypatch):
