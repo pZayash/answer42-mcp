@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -61,19 +62,29 @@ def _prebuild_shared_client_base(shared_id: str) -> None:
     This avoids three child MCP servers racing to create/load the same file
     infobase.  The shared ibsrv itself is still started lazily by start_session.
     """
+    from mcp_1c import __version__
     from mcp_1c import platform as _platform
     from mcp_1c import runtime
+    from mcp_1c.server import _file_sha256
 
     platform_dir = _platform.find_platform_dir(os.environ.get("ONEC_VERSION") or None)
     ibcmd = str(platform_dir / "ibcmd")
     db_path = Path(os.getenv("ONEC_MCP_SHARED_CLIENT_BASE_DIR", "/tmp/answer42/shared-client-bases")) / shared_id / "ib"
-    if db_path.exists() and any(db_path.iterdir()):
-        return
     cf_path = runtime.DEFAULT_CLIENT_CF_BUILT
     if not Path(cf_path).exists():
         raise FileNotFoundError(f"MCPTestClient.cf not found at {cf_path}.")
+    marker_path = db_path.parent / f".{db_path.name}.answer42-cf.json"
+    marker_data = {"answer42_version": __version__, "cf_sha256": _file_sha256(Path(cf_path)), "cf_path": str(cf_path)}
+    if db_path.exists() and any(db_path.iterdir()) and marker_path.exists():
+        try:
+            if json.loads(marker_path.read_text(encoding="utf-8")) == marker_data:
+                return
+        except Exception:
+            pass
+        shutil.rmtree(db_path, ignore_errors=True)
     runtime.create_file_infobase(ibcmd, db_path)
     runtime.load_configuration(ibcmd, db_path, cf_path)
+    marker_path.write_text(json.dumps(marker_data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _safe_suffix(value: str) -> str:
