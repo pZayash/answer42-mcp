@@ -978,6 +978,29 @@ def _walk_ui_tree(node: Any):
         yield from _walk_ui_tree(child)
 
 
+def _summarize_ui_tree(tree: Any, max_depth: int, include_hidden: bool) -> dict[str, Any]:
+    """Return compact diagnostics about omitted/truncated UI tree parts."""
+    nodes = list(_walk_ui_tree(tree))
+    truncated_nodes = [node for node in nodes if node.get("truncated")]
+    hidden_children_total = 0
+    hidden_nodes = []
+    for node in nodes:
+        hidden_count = node.get("hidden_children_count", 0)
+        if isinstance(hidden_count, int):
+            hidden_children_total += hidden_count
+        if node.get("visible") is False:
+            hidden_nodes.append(node)
+    return {
+        "max_depth": max_depth,
+        "include_hidden": include_hidden,
+        "nodes_count": len(nodes),
+        "truncated": bool(truncated_nodes),
+        "truncated_nodes_count": len(truncated_nodes),
+        "hidden_children_count": hidden_children_total,
+        "hidden_nodes_count": len(hidden_nodes),
+    }
+
+
 def _metadata_name_from_navigation_url(url: str) -> str:
     """Best-effort conversion from e1cib/list/... to a metadata full name."""
     value = str(url or "")
@@ -3120,6 +3143,8 @@ async def ui_tree(max_depth: Annotated[int, "Maximum UI tree depth"] = 4,
     omitted by default; pass include_hidden=true to inspect the full 1C form tree.
     """
     tree = await _bridge_call_recorded(session_id, "ui_tree", {"max_depth": max_depth, "include_hidden": include_hidden})
+    if isinstance(tree, dict):
+        tree["tree_summary"] = _summarize_ui_tree(tree, max_depth=max_depth, include_hidden=include_hidden)
     if include_rag_types:
         sess = _session(session_id)
         if _RAG_ENABLED and sess.rag_enabled:
@@ -3161,6 +3186,20 @@ async def find_object(
 ) -> Any:
     """Find an object in the active UI hierarchy by name, title, or test object type."""
     return await _bridge_call_recorded(session_id, "find_object", {"name": name, "title": title, "type": type, "max_depth": max_depth})
+
+
+@mcp.tool()
+async def search_objects(
+    name: Annotated[str, "Object technical name, exact match when specified"] = "",
+    title: Annotated[str, "Object visible title/caption, exact match when specified"] = "",
+    type: Annotated[str, "1C test object type, e.g. ТестируемаяФорма"] = "",
+    limit: Annotated[int, "Maximum number of matched objects to return"] = 50,
+    max_depth: Annotated[int, "Maximum search depth"] = 8,
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Find all UI objects matching name, title and/or 1C test object type."""
+    return await _bridge_call_recorded(session_id, "search_objects", {"name": name, "title": title, "type": type, "limit": limit, "max_depth": max_depth})
 
 
 @mcp.tool()
