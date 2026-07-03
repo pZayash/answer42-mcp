@@ -3168,11 +3168,12 @@ async def command_bar(*,
 async def click_button(
     name: Annotated[str, "Button name or title text"],
     search_by_title: Annotated[bool, "If true, match visible title instead of object name"] = False,
+    max_depth: Annotated[int, "Maximum search depth"] = 8,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
     """Find a button in the active UI tree and press it."""
-    return await _bridge_call_recorded(session_id, "click_button", {"name": name, "search_by_title": search_by_title})
+    return await _bridge_call_recorded(session_id, "click_button", {"name": name, "search_by_title": search_by_title, "max_depth": max_depth})
 
 
 @mcp.tool()
