@@ -4734,6 +4734,28 @@ async def dynamic_list_open_settings(
 
 
 @mcp.tool()
+async def dynamic_list_filter_by_current_value(
+    name: Annotated[str, "Dynamic list/table technical name"] = "Список",
+    title: Annotated[str, "Dynamic list/table visible title"] = "",
+    cell: Annotated[str, "Column/cell technical name to make current before filtering; empty uses current cell"] = "",
+    text: Annotated[str, "Optional substring: first move to a row containing this text, then filter by the current value"] = "",
+    limit: Annotated[int, "Max rows to scan when text is set"] = 200,
+    max_depth: Annotated[int, "Maximum UI search depth"] = 8,
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Quickly filter a dynamic list via context menu 'Найти по текущему значению'."""
+    return await _bridge_call_recorded(session_id, "dynamic_list_filter_by_current_value", {
+        "name": name,
+        "title": title,
+        "cell": cell,
+        "text": text,
+        "limit": limit,
+        "max_depth": max_depth,
+    })
+
+
+@mcp.tool()
 async def dynamic_list_clear_settings(
     button: Annotated[str, "Optional exact 1C button name/title; empty tries common reset/clear settings buttons"] = "",
     *,
