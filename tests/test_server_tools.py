@@ -1,6 +1,9 @@
 import asyncio
 import builtins
 import json
+import os
+import subprocess
+import sys
 import pytest
 from pathlib import Path, PureWindowsPath
 
@@ -8,6 +11,7 @@ from mcp_1c import __version__
 from mcp_1c import platform as onec_platform
 from mcp_1c import runtime
 from mcp_1c.server import (
+    DEFAULT_SESSION,
     SessionState,
     _SESSIONS,
     _append_available_users_to_auth_error,
@@ -137,6 +141,28 @@ def test_default_data_dir_honors_legacy_env_override(monkeypatch, tmp_path):
     monkeypatch.setenv("ONEC_MCP_DATA_DIR", str(override))
 
     assert default_data_dir() == override
+
+
+def test_default_session_is_scoped_to_answer42_process_pid():
+    expected = os.getenv("ONEC_MCP_DEFAULT_SESSION") or f"default-{os.getpid()}"
+
+    assert DEFAULT_SESSION == expected
+
+
+def test_default_session_env_override_for_compatibility():
+    env = os.environ.copy()
+    env["ONEC_MCP_DEFAULT_SESSION"] = "custom-default-session"
+    completed = subprocess.run(
+        [sys.executable, "-c", "from mcp_1c.server import DEFAULT_SESSION; print(DEFAULT_SESSION)"],
+        check=True,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    assert completed.stdout.strip() == "custom-default-session"
+
 
 def test_new_mcp_tools_are_registered():
     _register_dev_tools(False)
