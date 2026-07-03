@@ -25,6 +25,7 @@ from mcp_1c.server import (
     _normalize_connection_mode,
     _parse_users_plain_text,
     _rag_diagnostic,
+    configuration_name_version_from_subsystems,
     _register_dev_tools,
     _users_url_for_base_url,
     main as mcp_main,
@@ -199,6 +200,36 @@ def test_selected_new_tool_schemas():
     assert tools["credentials_remove"].inputSchema["required"] == ["url"]
     assert tools["tabular_document_save"].inputSchema["properties"]["format"]["default"] == "pdf"
     assert tools["tabular_document_state_display"].inputSchema["properties"]["max_depth"]["default"] == 8
+
+
+def test_configuration_name_version_reads_main_configuration_from_list_output(monkeypatch):
+    calls = []
+
+    async def fake_bridge_call(session_id, method, params):
+        calls.append((method, params))
+        if method == "dynamic_list_output":
+            return {"tabular_documents": {"items": [{"name": "ТабличныйДокумент"}]}}
+        if method == "tabular_document_text":
+            return {
+                "cells": [
+                    ["Имя подсистемы", "Версия", "Это основная конфигурация"],
+                    ["Platform42", "1.1.9.728", "Нет"],
+                    ["МенеджерСервиса", "1.1.56.26", "Да"],
+                    ["СтандартныеПодсистемы", "2.3.2.44", "Нет"],
+                ]
+            }
+        return {"ok": True}
+
+    monkeypatch.setattr("mcp_1c.server._bridge_call_recorded", fake_bridge_call)
+
+    result = asyncio.run(configuration_name_version_from_subsystems(session_id="unit"))
+
+    assert result["found"] is True
+    assert result["configuration_name"] == "МенеджерСервиса"
+    assert result["configuration_version"] == "1.1.56.26"
+    assert calls[0] == ("open_navigation_link", {"navigation_link": "e1cib/list/РегистрСведений.ВерсииПодсистем"})
+    assert calls[1][0] == "dynamic_list_output"
+    assert calls[2][0] == "tabular_document_text"
 
 
 def test_rag_diagnostic_reports_missing_session_snapshot():

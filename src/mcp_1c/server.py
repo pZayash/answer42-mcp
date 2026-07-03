@@ -3895,42 +3895,86 @@ async def configuration_name_version_from_subsystems(
 ) -> dict[str, Any]:
     """Open the 'Subsystem versions' information register and return the main configuration name/version.
 
-    The tool reads `РегистрСведений.ВерсииПодсистем`, applies a dynamic-list
-    filter `Это основная конфигурация = Да`, then reads the remaining row
-    for `Имя подсистемы` and `Версия`.  This works even when the main-config
-    column is not visible in the default list form.
+    The tool reads `РегистрСведений.ВерсииПодсистем` via the list output
+    command so that columns available to the dynamic list, including
+    `Это основная конфигурация`, are visible even when they are not displayed
+    in the default form table.
     """
     navigation_link = "e1cib/list/РегистрСведений.ВерсииПодсистем"
     await _bridge_call_recorded(session_id, "open_navigation_link", {"navigation_link": navigation_link})
 
-    # Apply filter: only the main configuration row
-    await _bridge_call_recorded(session_id, "dynamic_list_open_settings", {"button": ""})
-    await _bridge_call_recorded(session_id, "dynamic_list_apply_filter", {
-        "field": "Это основная конфигурация",
-        "value": "Да",
-        "comparison": "Equal",
-        "name": "Список",
-        "title": "",
+    output_result = await _bridge_call_recorded(session_id, "dynamic_list_output", {
+        "button": "",
+        "wait_seconds": 3,
         "max_depth": 8,
     })
-    await _bridge_call_recorded(session_id, "close_form", {})
+    tabular_docs = output_result.get("tabular_documents", {}) if isinstance(output_result, dict) else {}
+    items = tabular_docs.get("items", []) if isinstance(tabular_docs, dict) else []
 
-    rows_result = await _bridge_call_recorded(session_id, "table_rows", {"name": "Список", "title": "", "limit": 200, "max_depth": 8})
-    rows = rows_result.get("rows", []) if isinstance(rows_result, dict) else []
-
-    parsed_rows = [_table_row_pairs(row) for row in rows]
-    main = parsed_rows[0] if parsed_rows else {}
+    main: dict[str, str] = {}
+    cells: list[list[str]] = []
+    if items:
+        doc_name = items[0].get("name", "")
+        text_result = await _bridge_call_recorded(session_id, "tabular_document_text", {
+            "name": doc_name,
+            "max_rows": 50,
+            "max_columns": 20,
+        })
+        cells = text_result.get("cells", []) if isinstance(text_result, dict) else []
+        main = _find_main_configuration_in_tabular_cells(cells)
 
     return {
         "found": bool(main),
-        "configuration_name": _row_value(main, "Имя подсистемы"),
-        "configuration_version": _row_value(main, "Версия"),
+        "configuration_name": main.get("configuration_name", ""),
+        "configuration_version": main.get("configuration_version", ""),
         "main_configuration_row": main,
-        "main_configuration_rows_count": len(parsed_rows),
-        "rows_count": len(parsed_rows),
+        "main_configuration_rows_count": 1 if main else 0,
+        "rows_count": max(0, len(cells) - 1),
         "navigation_link": navigation_link,
         "source": "РегистрСведений.ВерсииПодсистем",
     }
+
+
+def _find_main_configuration_in_tabular_cells(cells: list[list[str]]) -> dict[str, str]:
+    """Scan tabular document cells for the main configuration row."""
+    if not cells or len(cells) < 2:
+        return {}
+
+    header_row_idx = -1
+    name_col = -1
+    version_col = -1
+    main_cfg_col = -1
+    for i, row in enumerate(cells):
+        local_name_col = local_version_col = local_main_cfg_col = -1
+        for j, cell in enumerate(row):
+            cell_norm = str(cell).strip()
+            if cell_norm == "Имя подсистемы":
+                local_name_col = j
+            elif cell_norm == "Версия":
+                local_version_col = j
+            elif cell_norm == "Это основная конфигурация":
+                local_main_cfg_col = j
+        if local_name_col >= 0 and local_version_col >= 0 and local_main_cfg_col >= 0:
+            header_row_idx = i
+            name_col = local_name_col
+            version_col = local_version_col
+            main_cfg_col = local_main_cfg_col
+            break
+
+    if header_row_idx < 0:
+        return {}
+
+    for row in cells[header_row_idx + 1:]:
+        if len(row) <= max(name_col, version_col, main_cfg_col):
+            continue
+        if _is_truthy_1c(str(row[main_cfg_col])):
+            return {
+                "configuration_name": str(row[name_col]).strip(),
+                "configuration_version": str(row[version_col]).strip(),
+                "Это основная конфигурация": str(row[main_cfg_col]).strip(),
+            }
+
+    return {}
 
 
 @mcp.tool()
