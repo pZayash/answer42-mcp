@@ -4132,11 +4132,12 @@ async def table_set_row_values(
     table: Annotated[str, "Table technical name"],
     values: Annotated[str, "JSON object mapping column names/titles to values"],
     search_by_title: Annotated[bool, "If true, match visible title instead of object name"] = False,
+    max_depth: Annotated[int, "Maximum UI search depth"] = 20,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
     """Set multiple fields in the current row of a form table and verify each value."""
-    return await _bridge_call_recorded(session_id, "table_set_row_values", {"table": table, "values": values, "search_by_title": search_by_title})
+    return await _bridge_call_recorded(session_id, "table_set_row_values", {"table": table, "values": values, "search_by_title": search_by_title, "max_depth": max_depth})
 
 
 @mcp.tool()
