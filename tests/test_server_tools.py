@@ -15,8 +15,10 @@ from mcp_1c.server import (
     SessionState,
     _SESSIONS,
     _append_available_users_to_auth_error,
+    _configure_session_scope,
     _cf_marker_matches,
     _decode_log_bytes,
+    _load_global_registry_unlocked,
     _ensure_restored_session,
     _extract_error_lines,
     _test_client_startup_error_from_logs,
@@ -31,6 +33,9 @@ from mcp_1c.server import (
     _rag_diagnostic,
     configuration_name_version_from_subsystems,
     _register_dev_tools,
+    _reap_global_orphan_sessions,
+    _state_file_for_scope,
+    _update_global_session_registry,
     _users_url_for_base_url,
     main as mcp_main,
     mcp,
@@ -162,6 +167,129 @@ def test_default_session_env_override_for_compatibility():
     )
 
     assert completed.stdout.strip() == "custom-default-session"
+
+
+def test_session_scope_maps_to_dedicated_state_and_lock(tmp_path, monkeypatch):
+    monkeypatch.setenv("ONEC_MCP_SESSION_SCOPES_DIR", str(tmp_path))
+
+    scope_dir, state_file, lock_file = _state_file_for_scope("beta/ms:main")
+
+    assert scope_dir == tmp_path / "beta-ms-main"
+    assert state_file == scope_dir / "sessions.json"
+    assert lock_file == scope_dir / "answer42.lock"
+
+
+def test_configure_empty_session_scope_keeps_legacy_state(monkeypatch, tmp_path):
+    import mcp_1c.server as server
+
+    legacy = tmp_path / "legacy-sessions.json"
+    monkeypatch.setenv("ONEC_MCP_SESSION_STATE", str(legacy))
+
+    _configure_session_scope("")
+
+    assert server.SESSION_SCOPE_ID == ""
+    assert server.SCOPE_DIR is None
+    assert server.SCOPE_LOCK_FILE is None
+    assert server.STATE_FILE == legacy
+
+
+def test_configure_session_scope_enables_scoped_state(monkeypatch, tmp_path):
+    import mcp_1c.server as server
+
+    monkeypatch.setenv("ONEC_MCP_SESSION_SCOPES_DIR", str(tmp_path))
+
+
+    _configure_session_scope("sort-live")
+
+    assert server.SESSION_SCOPE_ID == "sort-live"
+    assert server.SCOPE_DIR == tmp_path / "sort-live"
+    assert server.SCOPE_LOCK_FILE == tmp_path / "sort-live" / "answer42.lock"
+    assert server.STATE_FILE == tmp_path / "sort-live" / "sessions.json"
+
+    _configure_session_scope("")
+
+
+def test_global_registry_tracks_session_process_pids(monkeypatch, tmp_path):
+    import mcp_1c.server as server
+
+    monkeypatch.setattr(server, "GLOBAL_REGISTRY_FILE", tmp_path / "global-sessions.json")
+    monkeypatch.setattr(server, "GLOBAL_REGISTRY_LOCK", tmp_path / "global-sessions.lock")
+    monkeypatch.setattr(server, "SESSION_SCOPE_ID", "scope-a")
+    monkeypatch.setattr(server, "STATE_FILE", tmp_path / "scope-a" / "sessions.json")
+    sess = SessionState(
+        session_id="s1",
+        display=":99",
+        platform_dir=tmp_path / "platform",
+        ws_port=12345,
+        ibsrv_port=23456,
+        testclient_port=34567,
+        data_dir=tmp_path / "session-s1",
+    )
+    sess.base_url = "https://example.invalid/base"
+    sess.manager_pid = 111
+    sess.ibsrv_pid = 222
+    sess.test_client_pid = 333
+
+    _update_global_session_registry(sess)
+    data = _load_global_registry_unlocked()
+    records = data["sessions"]
+
+    assert "scope-a:s1" in records
+    assert records["scope-a:s1"]["manager_pid"] == 111
+    assert records["scope-a:s1"]["ibsrv_pid"] == 222
+    assert records["scope-a:s1"]["test_client_pid"] == 333
+    assert records["scope-a:s1"]["owner_pid"] == os.getpid()
+
+
+def test_global_registry_reaper_marks_dead_owner_before_ttl(monkeypatch, tmp_path):
+    import mcp_1c.server as server
+
+    monkeypatch.setattr(server, "GLOBAL_REGISTRY_FILE", tmp_path / "global-sessions.json")
+    monkeypatch.setattr(server, "GLOBAL_REGISTRY_LOCK", tmp_path / "global-sessions.lock")
+    server.GLOBAL_REGISTRY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    server.GLOBAL_REGISTRY_FILE.write_text(json.dumps({
+        "sessions": {
+            "scope-a:s1": {"owner_pid": 999999999, "status": "active", "manager_pid": 0, "updated_at": 1}
+        }
+    }), encoding="utf-8")
+
+    result = _reap_global_orphan_sessions(ttl_seconds=1800)
+    data = _load_global_registry_unlocked()
+
+    assert result["orphaned"] == ["scope-a:s1"]
+    assert result["reaped"] == []
+    assert data["sessions"]["scope-a:s1"]["status"] == "orphaned"
+    assert "orphaned_at" in data["sessions"]["scope-a:s1"]
+
+
+def test_global_registry_reaper_kills_expired_orphan(monkeypatch, tmp_path):
+    import mcp_1c.server as server
+
+    killed: list[int] = []
+    monkeypatch.setattr(server, "GLOBAL_REGISTRY_FILE", tmp_path / "global-sessions.json")
+    monkeypatch.setattr(server, "GLOBAL_REGISTRY_LOCK", tmp_path / "global-sessions.lock")
+    monkeypatch.setattr(server, "_kill_pid_group", lambda pid, label: killed.append(pid))
+    server.GLOBAL_REGISTRY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    server.GLOBAL_REGISTRY_FILE.write_text(json.dumps({
+        "sessions": {
+            "scope-a:s1": {
+                "owner_pid": 999999999,
+                "status": "orphaned",
+                "orphaned_at": 1,
+                "updated_at": 1,
+                "manager_pid": 111,
+                "ibsrv_pid": 222,
+                "test_client_pid": 333,
+            }
+        }
+    }), encoding="utf-8")
+
+    result = _reap_global_orphan_sessions(ttl_seconds=0)
+    data = _load_global_registry_unlocked()
+
+    assert result["reaped"] == ["scope-a:s1"]
+    assert killed == [111, 222, 333]
+    assert data["sessions"] == {}
 
 
 def test_new_mcp_tools_are_registered():

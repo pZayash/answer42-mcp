@@ -45,7 +45,14 @@ _RAG_ENABLED = os.getenv("ONEC_MCP_DISABLE_RAG", "").strip().lower() not in {"1"
 _CREDENTIAL_STORE_ENABLED = os.getenv("ONEC_MCP_DISABLE_CREDENTIAL_STORE", "").strip().lower() not in {"1", "true", "yes", "on"}
 _DEV_TOOLS_ENABLED = os.getenv("ONEC_MCP_DEV_TOOLS", "").strip().lower() in {"1", "true", "yes", "on"}
 DEFAULT_SESSION = os.getenv("ONEC_MCP_DEFAULT_SESSION", f"default-{os.getpid()}")
+SESSION_SCOPE_ID = os.getenv("ONEC_MCP_SESSION_SCOPE_ID") or os.getenv("ONEC_MCP_SESSION_SCOPE") or ""
 STATE_FILE = os_support.runtime_path("ONEC_MCP_SESSION_STATE", "sessions.json")
+SCOPE_DIR: Path | None = None
+SCOPE_LOCK_FILE: Path | None = None
+_SCOPE_LOCK_HANDLE: Any | None = None
+GLOBAL_REGISTRY_FILE = os_support.runtime_path("ONEC_MCP_GLOBAL_SESSION_REGISTRY", "global-sessions.json")
+GLOBAL_REGISTRY_LOCK = os_support.runtime_path("ONEC_MCP_GLOBAL_SESSION_REGISTRY_LOCK", "global-sessions.lock")
+GLOBAL_ORPHAN_TTL_SECONDS = int(os.getenv("ONEC_MCP_ORPHAN_TTL_SECONDS", "1800"))
 AUTORELOAD_PID_FILE = os_support.runtime_path("ONEC_MCP_AUTORELOAD_PID_FILE", "answer42-autoreload.pid")
 AUTORELOAD_LOG_FILE = os_support.runtime_path("ONEC_MCP_AUTORELOAD_LOG_FILE", "answer42-autoreload.log")
 RAG_BINDINGS_FILE = os_support.runtime_path("ONEC_MCP_RAG_BINDINGS", "rag-bindings.json")
@@ -387,6 +394,11 @@ class SessionState:
         self.client_xvfb_process: subprocess.Popen | None = None
         self.runtime: runtime.ManagerRuntime | None = None
         self.test_client_process: subprocess.Popen | None = None
+        self.manager_pid: int = 0
+        self.ibsrv_pid: int = 0
+        self.test_client_pid: int = 0
+        self.xvfb_pid: int = 0
+        self.client_xvfb_pid: int = 0
         self.bridge = OneCBridgeServer(
             host="127.0.0.1",
             port=ws_port,
@@ -418,6 +430,11 @@ class SessionState:
             "rag_snapshot": self.rag_snapshot,
             "rag_enabled": self.rag_enabled,
             "idle_timeout_seconds": self.idle_timeout_seconds,
+            "manager_pid": self.runtime.manager_process.pid if self.runtime and self.runtime.manager_process and self.runtime.manager_process.poll() is None else self.manager_pid,
+            "ibsrv_pid": self.runtime.server_process.pid if self.runtime and self.runtime.server_process and self.runtime.server_process.poll() is None else self.ibsrv_pid,
+            "test_client_pid": self.test_client_process.pid if self.test_client_process and self.test_client_process.poll() is None else self.test_client_pid,
+            "xvfb_pid": self.xvfb_process.pid if self.xvfb_process and self.xvfb_process.poll() is None else self.xvfb_pid,
+            "client_xvfb_pid": self.client_xvfb_process.pid if self.client_xvfb_process and self.client_xvfb_process.poll() is None else self.client_xvfb_pid,
         }
 
     @classmethod
@@ -441,6 +458,11 @@ class SessionState:
         sess.client_display = str(data.get("client_display", ""))
         sess.rag_enabled = bool(data.get("rag_enabled", True))
         sess.idle_timeout_seconds = int(data.get("idle_timeout_seconds") or 60 * 60)
+        sess.manager_pid = int(data.get("manager_pid") or 0)
+        sess.ibsrv_pid = int(data.get("ibsrv_pid") or 0)
+        sess.test_client_pid = int(data.get("test_client_pid") or 0)
+        sess.xvfb_pid = int(data.get("xvfb_pid") or 0)
+        sess.client_xvfb_pid = int(data.get("client_xvfb_pid") or 0)
         return sess
 
     @property
@@ -501,6 +523,211 @@ def _pid_is_running(pid: int) -> bool:
     except PermissionError:
         return True
     return True
+
+
+def _sanitize_scope_id(scope_id: str) -> str:
+    value = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(scope_id or "").strip())
+    value = value.strip(".-")
+    if not value:
+        raise ValueError("Answer42 session scope id must contain at least one safe character")
+    return value[:128]
+
+
+def _state_file_for_scope(scope_id: str) -> tuple[Path, Path, Path]:
+    safe = _sanitize_scope_id(scope_id)
+    root = Path(os.getenv("ONEC_MCP_SESSION_SCOPES_DIR", str(os_support.default_data_dir() / "session-scopes")))
+    scope_dir = root / safe
+    return scope_dir, scope_dir / "sessions.json", scope_dir / "answer42.lock"
+
+
+def _configure_session_scope(scope_id: str) -> None:
+    """Switch Answer42 from legacy global state to scoped lock/reconnect mode."""
+    global SESSION_SCOPE_ID, STATE_FILE, SCOPE_DIR, SCOPE_LOCK_FILE
+    SESSION_SCOPE_ID = str(scope_id or "").strip()
+    if not SESSION_SCOPE_ID:
+        SCOPE_DIR = None
+        SCOPE_LOCK_FILE = None
+        STATE_FILE = os_support.runtime_path("ONEC_MCP_SESSION_STATE", "sessions.json")
+        return
+    SCOPE_DIR, STATE_FILE, SCOPE_LOCK_FILE = _state_file_for_scope(SESSION_SCOPE_ID)
+
+
+def _acquire_scope_lock_if_configured() -> bool:
+    """Acquire the configured scope lock. Return True when a stale lock existed."""
+    global _SCOPE_LOCK_HANDLE
+    if not SCOPE_LOCK_FILE:
+        return False
+    SCOPE_LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    stale = SCOPE_LOCK_FILE.exists()
+    handle = SCOPE_LOCK_FILE.open("a+", encoding="utf-8")
+    if os_support.IS_WINDOWS:
+        import msvcrt  # type: ignore
+
+        try:
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        except OSError as exc:
+            handle.close()
+            raise RuntimeError(f"Answer42 session scope {SESSION_SCOPE_ID!r} is locked by another live process") from exc
+    else:
+        import fcntl  # type: ignore
+
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            handle.close()
+            raise RuntimeError(f"Answer42 session scope {SESSION_SCOPE_ID!r} is locked by another live process") from exc
+    handle.seek(0)
+    handle.truncate()
+    handle.write(json.dumps({"pid": os.getpid(), "scope_id": SESSION_SCOPE_ID, "started_at": datetime.utcnow().isoformat() + "Z"}))
+    handle.flush()
+    _SCOPE_LOCK_HANDLE = handle
+    return stale
+
+
+def _release_scope_lock() -> None:
+    global _SCOPE_LOCK_HANDLE
+    if _SCOPE_LOCK_HANDLE is None:
+        return
+    handle = _SCOPE_LOCK_HANDLE
+    _SCOPE_LOCK_HANDLE = None
+    try:
+        if os_support.IS_WINDOWS:
+            import msvcrt  # type: ignore
+
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl  # type: ignore
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        handle.close()
+
+
+def _load_global_registry_unlocked() -> dict[str, Any]:
+    if not GLOBAL_REGISTRY_FILE.exists():
+        return {"sessions": {}}
+    try:
+        raw = json.loads(GLOBAL_REGISTRY_FILE.read_text(encoding="utf-8"))
+        if isinstance(raw, dict):
+            raw.setdefault("sessions", {})
+            if isinstance(raw["sessions"], dict):
+                return raw
+    except Exception as exc:
+        logging.warning("Could not read Answer42 global session registry %s: %s", GLOBAL_REGISTRY_FILE, exc)
+    return {"sessions": {}}
+
+
+def _write_global_registry_unlocked(data: dict[str, Any]) -> None:
+    GLOBAL_REGISTRY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = GLOBAL_REGISTRY_FILE.with_suffix(GLOBAL_REGISTRY_FILE.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    tmp.replace(GLOBAL_REGISTRY_FILE)
+
+
+def _session_registry_key(sess: SessionState) -> str:
+    scope = _sanitize_scope_id(SESSION_SCOPE_ID) if SESSION_SCOPE_ID else "legacy"
+    return f"{scope}:{sess.session_id}"
+
+
+def _session_global_registry_record(sess: SessionState, *, status: str = "active") -> dict[str, Any]:
+    pids = {
+        "manager_pid": sess.runtime.manager_process.pid if sess.runtime and sess.runtime.manager_process and sess.runtime.manager_process.poll() is None else sess.manager_pid,
+        "ibsrv_pid": sess.runtime.server_process.pid if sess.runtime and sess.runtime.server_process and sess.runtime.server_process.poll() is None else sess.ibsrv_pid,
+        "test_client_pid": sess.test_client_process.pid if sess.test_client_process and sess.test_client_process.poll() is None else sess.test_client_pid,
+        "xvfb_pid": sess.xvfb_process.pid if sess.xvfb_process and sess.xvfb_process.poll() is None else sess.xvfb_pid,
+        "client_xvfb_pid": sess.client_xvfb_process.pid if sess.client_xvfb_process and sess.client_xvfb_process.poll() is None else sess.client_xvfb_pid,
+    }
+    return {
+        "scope_id": SESSION_SCOPE_ID,
+        "session_id": sess.session_id,
+        "owner_pid": os.getpid(),
+        "status": status,
+        "updated_at": time.time(),
+        "base_url": sess.base_url,
+        "state_file": str(STATE_FILE),
+        "data_dir": str(sess.data_dir),
+        **pids,
+    }
+
+
+def _update_global_session_registry(sess: SessionState, *, status: str = "active") -> None:
+    with os_support.file_lock(GLOBAL_REGISTRY_LOCK):
+        data = _load_global_registry_unlocked()
+        data["sessions"][_session_registry_key(sess)] = _session_global_registry_record(sess, status=status)
+        _write_global_registry_unlocked(data)
+
+
+def _remove_global_session_registry(sess: SessionState) -> None:
+    with os_support.file_lock(GLOBAL_REGISTRY_LOCK):
+        data = _load_global_registry_unlocked()
+        data.get("sessions", {}).pop(_session_registry_key(sess), None)
+        _write_global_registry_unlocked(data)
+
+
+def _mark_global_sessions_orphaned_for_owner(owner_pid: int | None = None) -> None:
+    owner = int(owner_pid or os.getpid())
+    now = time.time()
+    with os_support.file_lock(GLOBAL_REGISTRY_LOCK):
+        data = _load_global_registry_unlocked()
+        changed = False
+        for rec in data.get("sessions", {}).values():
+            if int(rec.get("owner_pid") or 0) != owner:
+                continue
+            rec["status"] = "orphaned"
+            rec["orphaned_at"] = now
+            rec["updated_at"] = now
+            changed = True
+        if changed:
+            _write_global_registry_unlocked(data)
+
+
+def _registry_process_pids(rec: dict[str, Any]) -> list[int]:
+    result: list[int] = []
+    for name in ("manager_pid", "ibsrv_pid", "test_client_pid", "xvfb_pid", "client_xvfb_pid"):
+        try:
+            pid = int(rec.get(name) or 0)
+        except Exception:
+            pid = 0
+        if pid > 0 and pid not in result:
+            result.append(pid)
+    return result
+
+
+def _reap_global_orphan_sessions(ttl_seconds: int = GLOBAL_ORPHAN_TTL_SECONDS) -> dict[str, Any]:
+    """Kill 1C processes recorded for dead Answer42 owners after the TTL."""
+    now = time.time()
+    reaped: list[str] = []
+    orphaned: list[str] = []
+    with os_support.file_lock(GLOBAL_REGISTRY_LOCK):
+        data = _load_global_registry_unlocked()
+        sessions = data.get("sessions", {})
+        for key, rec in list(sessions.items()):
+            owner_pid = int(rec.get("owner_pid") or 0)
+            owner_alive = _pid_is_running(owner_pid)
+            if owner_alive and rec.get("status") == "active":
+                continue
+            if not owner_alive and rec.get("status") == "active":
+                rec["status"] = "orphaned"
+                rec["orphaned_at"] = now
+                rec["updated_at"] = now
+                orphaned.append(key)
+                continue
+            if rec.get("status") != "orphaned":
+                continue
+            orphaned_at = float(rec.get("orphaned_at") or rec.get("updated_at") or now)
+            if now - orphaned_at < ttl_seconds:
+                continue
+            for pid in _registry_process_pids(rec):
+                _kill_pid_group(pid, f"orphaned Answer42 session {key}")
+            sessions.pop(key, None)
+            reaped.append(key)
+        _write_global_registry_unlocked(data)
+    return {"orphaned": orphaned, "reaped": reaped, "ttl_seconds": ttl_seconds}
+
+
+if SESSION_SCOPE_ID:
+    _configure_session_scope(SESSION_SCOPE_ID)
 
 
 def _start_autoreload_watcher(dev: str = "", dev_restart_timeout: float = 30.0) -> None:
@@ -568,6 +795,8 @@ def _persist_sessions() -> None:
         json.dumps({sid: sess.to_json() for sid, sess in _SESSIONS.items()}, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    for sess in _SESSIONS.values():
+        _update_global_session_registry(sess)
 
 
 def _source_newer_than(target: Path, src_dir: Path) -> bool:
@@ -800,6 +1029,132 @@ def _cleanup_stale_session_processes(sess: SessionState, reason: str) -> None:
     )
 
 
+def _kill_persisted_session_processes(sess: SessionState, reason: str, *, include_test_client: bool) -> None:
+    logging.info("Cleaning persisted session %s processes: %s", sess.session_id, reason)
+    for pid, label in (
+        (sess.manager_pid, "test-manager"),
+        (sess.ibsrv_pid, "ibsrv"),
+        (sess.xvfb_pid, "xvfb"),
+        (sess.client_xvfb_pid, "client-xvfb"),
+    ):
+        _kill_pid_group(pid, f"{label} for Answer42 session {sess.session_id}")
+    if include_test_client:
+        _kill_pid_group(sess.test_client_pid, f"test-client for Answer42 session {sess.session_id}")
+        _cleanup_stale_session_processes(sess, reason)
+
+
+async def _reconnect_persisted_session(sess: SessionState) -> bool:
+    """Reconnect a scoped session after MCP process restart.
+
+    If the test client is gone, the session is considered finished.  If the
+    client is alive and the manager ibsrv is still reachable, restart only the
+    test-manager process and attach it to the existing test client port.
+    """
+    if not _pid_is_running(sess.test_client_pid):
+        _kill_persisted_session_processes(sess, "test client is not running during scoped reconnect", include_test_client=False)
+        return False
+    if sess.ibsrv_pid and not _pid_is_running(sess.ibsrv_pid):
+        _kill_persisted_session_processes(sess, "manager ibsrv is not running during scoped reconnect", include_test_client=True)
+        return False
+    if sess.ibsrv_port and not runtime.is_port_listening("127.0.0.1", sess.ibsrv_port):
+        _kill_persisted_session_processes(sess, "manager ibsrv port is not listening during scoped reconnect", include_test_client=True)
+        return False
+
+    # Old manager was connected to a dead websocket URL.  Kill it before
+    # starting a manager that connects to this fresh MCP process' bridge.
+    _kill_pid_group(sess.manager_pid, f"old test-manager for Answer42 session {sess.session_id}")
+
+    await sess.bridge.start()
+    log_dir = sess.log_dir
+    log_dir.mkdir(parents=True, exist_ok=True)
+    rt = _resolve_runtime(
+        platform_dir=sess.platform_dir,
+        db_path=sess.db_path,
+        ibsrv_address="127.0.0.1",
+        ibsrv_port=sess.ibsrv_port,
+        ibsrv_name="mcp",
+        server_data_dir=sess.server_data_dir,
+    )
+    rt.log_dir = log_dir
+    sess.runtime = rt
+    try:
+        if sess.ibsrv_port:
+            ws_url = runtime.build_thin_client_ws_url("127.0.0.1", sess.ibsrv_port)
+            manager_proc = runtime.start_thin_test_manager(
+                onec_path=sess.onec_thin,
+                ws_url=ws_url,
+                websocket_url=sess.bridge.url,
+                log_dir=log_dir,
+                display=sess.display,
+            )
+        else:
+            manager_proc = runtime.start_thin_test_manager_file_direct(
+                onec_path=sess.onec_thin,
+                db_path=sess.db_path,
+                websocket_url=sess.bridge.url,
+                log_dir=log_dir,
+                display=sess.display,
+            )
+        rt.manager_process = manager_proc
+        sess.manager_pid = manager_proc.pid
+        await _wait_for_bridge_connected(sess, timeout=60.0)
+        params = {
+            "base_url": sess.base_url,
+            "username": sess.username,
+            "password": sess.password,
+            "port": sess.testclient_port,
+            "host": "localhost",
+            "client_pid": sess.test_client_pid,
+            "connection_mode": "reconnect",
+            "connection_value": sess.base_url,
+            "target_connection_mode": "reconnect",
+            "expected_manager_protocol_version": MANAGER_PROTOCOL_VERSION,
+        }
+        await sess.bridge.call("attach_test_client", params)
+        _SESSIONS[sess.session_id] = sess
+        logging.info("Reconnected scoped Answer42 session %s", sess.session_id)
+        return True
+    except Exception as exc:
+        logging.warning("Could not reconnect scoped Answer42 session %s: %s", sess.session_id, exc)
+        try:
+            await sess.bridge.stop()
+        except Exception:
+            pass
+        _kill_persisted_session_processes(sess, "scoped reconnect failed", include_test_client=True)
+        return False
+
+
+async def _recover_scoped_sessions_if_needed(stale_lock_existed: bool) -> None:
+    if not SESSION_SCOPE_ID:
+        return
+    persisted = _load_persisted_sessions()
+    if not persisted:
+        return
+    if not stale_lock_existed:
+        # Normal fresh start in scoped mode: do not attach to old sessions unless
+        # we know the previous scoped MCP process died while owning the folder.
+        return
+    recovered: dict[str, SessionState] = {}
+    for sid, sess in persisted.items():
+        if await _reconnect_persisted_session(sess):
+            recovered[sid] = sess
+        else:
+            shutil.rmtree(sess.data_dir, ignore_errors=True)
+    _SESSIONS.update(recovered)
+    _persist_sessions()
+
+
+async def _global_orphan_reaper_loop(interval_seconds: float = 60.0) -> None:
+    while True:
+        try:
+            _reap_global_orphan_sessions()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logging.warning("Answer42 global orphan reaper failed: %s", exc)
+        await asyncio.sleep(interval_seconds)
+
+
 async def _cleanup_failed_start_session(sess: SessionState, reason: str) -> None:
     logging.info("Cleaning failed start_session %s: %s", sess.session_id, reason)
     try:
@@ -826,6 +1181,7 @@ async def _cleanup_failed_start_session(sess: SessionState, reason: str) -> None
     if sess.data_dir.exists():
         shutil.rmtree(sess.data_dir, ignore_errors=True)
     _SESSIONS.pop(sess.session_id, None)
+    _remove_global_session_registry(sess)
     _persist_sessions()
 
 
@@ -1627,9 +1983,10 @@ def sessions_list() -> dict[str, Any]:
             "client_display": sess.client_display,
             "ws_port": sess.ws_port,
             "bridge_connected": bool(bridge_status.get("connected")),
-            "manager_alive": bool(rt and rt.manager_process and rt.manager_process.poll() is None),
-            "ibsrv_alive": bool(rt and rt.server_process and rt.server_process.poll() is None),
+            "manager_alive": bool((rt and rt.manager_process and rt.manager_process.poll() is None) or _pid_is_running(sess.manager_pid)),
+            "ibsrv_alive": bool((rt and rt.server_process and rt.server_process.poll() is None) or _pid_is_running(sess.ibsrv_pid)),
             "testclient_port": sess.testclient_port,
+            "testclient_alive": bool((sess.test_client_process and sess.test_client_process.poll() is None) or _pid_is_running(sess.test_client_pid)),
             "client_ibsrv_port": sess.client_ibsrv_port,
             "client_ibsrv_alive": bool(client_rt and (
                 (client_rt.server_process and client_rt.server_process.poll() is None)
@@ -1682,15 +2039,17 @@ def session_status(*,
         "client_display": sess.client_display,
         "bridge": bridge,
         "manager": None if rt is None else {
-            "pid": rt.manager_process.pid if rt.manager_process else None,
-            "alive": rt.manager_process.poll() is None if rt.manager_process else False,
-            "server_pid": rt.server_process.pid if rt.server_process else None,
-            "server_alive": rt.server_process.poll() is None if rt.server_process else False,
+            "pid": rt.manager_process.pid if rt.manager_process else (sess.manager_pid or None),
+            "alive": (rt.manager_process.poll() is None if rt.manager_process else _pid_is_running(sess.manager_pid)),
+            "server_pid": rt.server_process.pid if rt.server_process else (sess.ibsrv_pid or None),
+            "server_alive": (rt.server_process.poll() is None if rt.server_process else _pid_is_running(sess.ibsrv_pid)),
             "port": rt.server.port,
             "log_dir": str(rt.log_dir),
         },
         "test_client": {
             "port": sess.testclient_port,
+            "pid": sess.test_client_process.pid if sess.test_client_process else (sess.test_client_pid or None),
+            "alive": (sess.test_client_process.poll() is None if sess.test_client_process else _pid_is_running(sess.test_client_pid)),
             "base_url": sess.base_url,
             "client_ibsrv_port": sess.client_ibsrv_port,
             "server_alive": client_server_alive,
@@ -1781,11 +2140,13 @@ async def start_session(
                 sess.rag_snapshot = bound_snapshot
         if display:
             sess.xvfb_process = runtime.start_xvfb(display)
+            sess.xvfb_pid = sess.xvfb_process.pid
         # Separate display for the test client so screenshots capture only the client window
         client_display = "" if os_support.IS_WINDOWS else runtime.find_free_display(runtime.DEFAULT_DISPLAY_START + display_offset + 1)
         sess.client_display = client_display
         if client_display:
             sess.client_xvfb_process = runtime.start_xvfb(client_display)
+            sess.client_xvfb_pid = sess.client_xvfb_process.pid
         await sess.bridge.start()
     _SESSIONS[sid] = sess
     _persist_sessions()
@@ -1829,6 +2190,7 @@ async def start_session(
                 direct_range=_direct_range_from_regport(ibsrv_direct_regport),
             )
             runtime_state.server_process = server_proc
+            sess.ibsrv_pid = server_proc.pid
             ws_url = runtime.build_thin_client_ws_url(ibsrv_address, ibsrv_port)
             manager_proc = runtime.start_thin_test_manager(
                 onec_path=sess.onec_thin, ws_url=ws_url,
@@ -1846,6 +2208,7 @@ async def start_session(
                 display=display,
             )
         runtime_state.manager_process = manager_proc
+        sess.manager_pid = manager_proc.pid
         await _wait_for_bridge_connected(sess, timeout=60.0)
     except Exception as exc:
         diagnostic_error = _manager_failure_diagnostics(sess, exc)
@@ -2662,6 +3025,7 @@ async def _connect_test_client_impl(
         display=sess.client_display or sess.display,
         log_name=client_stdout_log,
     )
+    sess.test_client_pid = sess.test_client_process.pid
     params = {"base_url": r_base, "username": r_user, "password": r_pass,
               "port": r_port, "host": host, "client_pid": sess.test_client_process.pid,
               "client_log": str(client_out_log), "client_stdout_log": str(sess.client_log_dir / client_stdout_log),
@@ -4637,11 +5001,27 @@ def screenshot(
     return result
 
 
-async def _run() -> None:
+async def _run(stale_scope_lock_existed: bool = False) -> None:
+    reaper_task: asyncio.Task[Any] | None = None
     try:
+        await _recover_scoped_sessions_if_needed(stale_scope_lock_existed)
+        reaper_task = asyncio.create_task(_global_orphan_reaper_loop())
         await mcp.run_stdio_async()
     finally:
+        if reaper_task is not None:
+            reaper_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await reaper_task
         for sid, sess in list(_SESSIONS.items()):
+            if SESSION_SCOPE_ID:
+                if sess.runtime is not None:
+                    runtime.kill_process(sess.runtime.manager_process, "test-manager")
+                    sess.manager_pid = 0
+                try:
+                    await sess.bridge.stop()
+                except Exception:
+                    pass
+                continue
             if sess.runtime is not None:
                 runtime.kill_process(sess.runtime.manager_process, "test-manager")
                 runtime.kill_process(sess.runtime.server_process, "ibsrv")
@@ -4661,7 +5041,14 @@ async def _run() -> None:
                 pass
             runtime.stop_xvfb(sess.client_xvfb_process)
             runtime.stop_xvfb(sess.xvfb_process)
+        if SESSION_SCOPE_ID:
+            _persist_sessions()
+            _mark_global_sessions_orphaned_for_owner()
+        else:
+            for sess in list(_SESSIONS.values()):
+                _remove_global_session_registry(sess)
         _SESSIONS.clear()
+        _release_scope_lock()
 
 
 def _register_dev_tools(enabled: bool) -> None:
@@ -4742,6 +5129,11 @@ def main(argv: list[str] | None = None) -> None:
         default=float(os.getenv("ONEC_MCP_DEV_RESTART_TIMEOUT", "30")),
         help="seconds of no file changes before the OpenClaw MCP autoreload watchdog triggers reload",
     )
+    parser.add_argument(
+        "--session-scope",
+        default=os.getenv("ONEC_MCP_SESSION_SCOPE_ID") or os.getenv("ONEC_MCP_SESSION_SCOPE") or "",
+        help="enable scoped lock/reconnect mode for the given session scope id; without this flag Answer42 uses legacy no-lock global state",
+    )
     args = parser.parse_args(argv)
 
     _RAG_ENABLED = not args.disable_rag
@@ -4754,7 +5146,13 @@ def main(argv: list[str] | None = None) -> None:
     else:
         logging.info("Built-in Answer42 RAG is disabled")
     _start_autoreload_watcher(args.dev, args.dev_restart_timeout)
-    asyncio.run(_run())
+    if args.session_scope:
+        _configure_session_scope(args.session_scope)
+        stale = _acquire_scope_lock_if_configured()
+    else:
+        stale = False
+    _reap_global_orphan_sessions()
+    asyncio.run(_run(stale))
 
 
 if __name__ == "__main__":
