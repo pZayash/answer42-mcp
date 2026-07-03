@@ -82,6 +82,7 @@ EXPECTED_NEW_TOOLS = {
     "rag_available_configurations",
     "rag_session_autoconfigure",
     "tabular_document_state_display",
+    "search_objects",
 }
 
 
@@ -200,6 +201,46 @@ def test_selected_new_tool_schemas():
     assert tools["credentials_remove"].inputSchema["required"] == ["url"]
     assert tools["tabular_document_save"].inputSchema["properties"]["format"]["default"] == "pdf"
     assert tools["tabular_document_state_display"].inputSchema["properties"]["max_depth"]["default"] == 8
+    assert tools["search_objects"].inputSchema["properties"]["limit"]["default"] == 50
+    assert tools["search_objects"].inputSchema["properties"]["max_depth"]["default"] == 8
+
+
+def test_ui_tree_summary_reports_truncation_and_hidden_children():
+    from mcp_1c.server import _summarize_ui_tree
+    tree = {
+        "type": "ТестируемоеОкноКлиентскогоПриложения",
+        "name": "MainWindow",
+        "title": "1С:Предприятие",
+        "visible": True,
+        "hidden_children_count": 3,
+        "children": [
+            {
+                "type": "ТестируемаяФорма",
+                "name": "Список",
+                "title": "Версии подсистем",
+                "visible": True,
+                "hidden_children_count": 5,
+                "children": [
+                    {"truncated": True, "truncated_reason": "max_depth", "type": "ТестируемаяКнопкаФормы", "name": "Button1", "title": "Кнопка"},
+                    {"truncated": True, "truncated_reason": "max_depth", "type": "ТестируемоеПолеФормы", "name": "Field1", "title": "Поле"},
+                ],
+            },
+            {
+                "type": "ТестируемаяФорма",
+                "name": "СкрытаяФорма",
+                "title": "Скрытая",
+                "visible": False,
+                "children": [],
+            },
+        ],
+    }
+    summary = _summarize_ui_tree(tree, max_depth=4, include_hidden=False)
+    assert summary["max_depth"] == 4
+    assert summary["include_hidden"] is False
+    assert summary["truncated"] is True
+    assert summary["truncated_nodes_count"] == 2
+    assert summary["hidden_children_count"] == 8
+    assert summary["hidden_nodes_count"] == 1
 
 
 def test_configuration_name_version_reads_main_configuration_from_list_output(monkeypatch):
