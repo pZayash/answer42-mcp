@@ -20,7 +20,9 @@ from mcp_1c.server import (
     _decode_log_bytes,
     _load_global_registry_unlocked,
     _metadata_objects_catalog_self_entry,
+    _metadata_catalog_rows_from_tabular_cells,
     _match_metadata_object,
+    _format_navigation_suggestions,
     _ensure_restored_session,
     _extract_error_lines,
     _test_client_startup_error_from_logs,
@@ -380,6 +382,31 @@ def test_metadata_objects_catalog_self_entry_is_searchable():
     assert item["is_group"] == "Нет"
     assert _match_metadata_object(item, "ИдентификаторыОбъектовМетаданных")
     assert _match_metadata_object(item, "metadata") is False
+
+
+def test_metadata_catalog_rows_from_tabular_cells_with_headers():
+    rows = _metadata_catalog_rows_from_tabular_cells([
+        ["Идентификаторы объектов метаданных"],
+        ["Ссылка", "Синоним", "Полное имя"],
+        ["? Справочник.PL_СервисыМаркета", "Сервисы", "Справочник.PL_СервисыМаркета"],
+    ])
+    assert rows == [{"Ссылка": "? Справочник.PL_СервисыМаркета", "Синоним": "Сервисы", "Полное имя": "Справочник.PL_СервисыМаркета"}]
+
+
+def test_metadata_catalog_rows_from_tabular_cells_without_headers():
+    rows = _metadata_catalog_rows_from_tabular_cells([
+        ["? Константа.Test"],
+        ["", "? Справочник.Items"],
+    ])
+    assert rows == [{"Ссылка": "? Константа.Test"}, {"Ссылка": "? Справочник.Items"}]
+
+
+def test_format_navigation_suggestions():
+    text = _format_navigation_suggestions([
+        {"full_name": "Справочник.PL_СервисыМаркета", "navigation_link": "e1cib/list/Справочник.PL_СервисыМаркета", "source": "rag_lookup_object"}
+    ])
+    assert "Возможно, вы имели в виду" in text
+    assert "e1cib/list/Справочник.PL_СервисыМаркета" in text
 
 
 def test_ui_tree_summary_reports_truncation_and_hidden_children():
