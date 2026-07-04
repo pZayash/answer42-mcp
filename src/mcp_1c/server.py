@@ -4734,23 +4734,23 @@ async def dynamic_list_open_settings(
 
 
 @mcp.tool()
-async def dynamic_list_filter_by_current_value(
+async def dynamic_list_find(
+    text: Annotated[str, "Text/pattern to enter in the standard 'Найти' dialog"],
+    field: Annotated[str, "Optional visible field name in 'Где искать', for example 'Наименование в программе' or 'ИНН'; empty uses dialog default"] = "",
+    compare_type: Annotated[str, "Optional visible compare mode in 'Как искать'; empty uses dialog default"] = "",
     name: Annotated[str, "Dynamic list/table technical name"] = "Список",
     title: Annotated[str, "Dynamic list/table visible title"] = "",
-    cell: Annotated[str, "Column/cell technical name to make current before filtering; empty uses current cell"] = "",
-    text: Annotated[str, "Optional substring: first move to a row containing this text, then filter by the current value"] = "",
-    limit: Annotated[int, "Max rows to scan when text is set"] = 200,
     max_depth: Annotated[int, "Maximum UI search depth"] = 8,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
-    """Quickly filter a dynamic list via context menu 'Найти по текущему значению'."""
-    return await _bridge_call_recorded(session_id, "dynamic_list_filter_by_current_value", {
+    """Search a dynamic list through context menu 'Расширенный поиск' and the standard modal 'Найти' dialog."""
+    return await _bridge_call_recorded(session_id, "dynamic_list_find", {
         "name": name,
         "title": title,
-        "cell": cell,
+        "field": field,
         "text": text,
-        "limit": limit,
+        "compare_type": compare_type,
         "max_depth": max_depth,
     })
 
