@@ -84,7 +84,7 @@ class SessionState:
 - жизненный цикл: `start_session`, `stop_session`, `session_status`, `credentials_check`;
 - автоматизация UI: `active_window`, `windows_list`, `activate_window`, `goto_start_page`, `goto_previous_window`, `goto_next_window`, `ui_tree`, `find_object`, `activate_object`, `open_navigation_link`, `click_button`, `set_field_value`, `save_form`, `close_form`, `screenshot`;
 - таблицы: `table_rows`, `table_find_row`, `table_goto_row`, `table_current_row`, `table_set_field`, `table_choose_field_from_list`, `table_move_row`;
-- динамические списки: `dynamic_list_available_fields`, `dynamic_list_apply_settings`, `dynamic_list_set_order`, `dynamic_list_output`, `dynamic_list_open_settings`, `dynamic_list_clear_settings`, `dynamic_list_open_form_settings`;
+- динамические списки: `dynamic_list_metadata_available_fields`, `dynamic_list_settings_available_fields`, `dynamic_list_set_settings`, `dynamic_list_sort_by_column`, `dynamic_list_output`, `dynamic_list_open_settings`, `dynamic_list_clear_settings`, `form_open_settings`;
 - табличные документы: `tabular_documents`, `tabular_document_text`, `tabular_document_save`;
 - доказательная запись: `recording_start`, `recording_capture`, `recording_stop`;
 - RAG: `rag_source_add`, `rag_sources_add_from_directory`, `rag_source_roots_list`, `rag_sources_list`, `rag_available_configurations`, `rag_snapshot_create`, `rag_snapshots_list`, `rag_index_build`, `rag_lookup_object`, `rag_query`.

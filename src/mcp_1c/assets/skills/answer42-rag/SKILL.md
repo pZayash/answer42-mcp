@@ -32,7 +32,7 @@ rag_query(query="резервные копии длительность", snapsh
 ```
 
 Если `rag_lookup_object`, `rag_query`, `ui_tree(include_rag_types=true)` или
-`dynamic_list_available_fields` возвращают `rag_diagnostic.diagnostics[]`, сначала
+`dynamic_list_metadata_available_fields` возвращают `rag_diagnostic.diagnostics[]`, сначала
 обработай его: snapshot может быть не указан для сессии или индекс выбранного
 snapshot может быть пустым. Не делай вид, что RAG подтвердил отсутствие объекта,
 если диагностика говорит, что данных нет.
