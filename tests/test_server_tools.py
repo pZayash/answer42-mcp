@@ -89,6 +89,7 @@ EXPECTED_NEW_TOOLS = {
     "dynamic_list_metadata_available_fields",
     "dynamic_list_settings_available_fields",
     "dynamic_list_set_settings",
+    "dynamic_list_current_settings",
     "dynamic_list_sort_by_column",
     "form_open_settings",
     "dynamic_list_find",
