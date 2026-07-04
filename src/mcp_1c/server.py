@@ -3858,11 +3858,103 @@ async def open_navigation_link(navigation_link: Annotated[str, "Explicit 1C navi
     actions, table navigation, search/settings, and dynamic-list operations.
     """
     if not navigation_link.startswith("e1cib/"):
+        suggestions = await _navigation_link_suggestions(session_id, navigation_link)
         raise ValueError(
             f"open_navigation_link accepts only explicit e1cib/... navigation links; rejected: {navigation_link}\n"
             "Use rag_lookup_object/rag_query or metadata_objects_from_catalog to find correct metadata names."
+            + _format_navigation_suggestions(suggestions)
         )
-    return await _bridge_call_recorded(session_id, "open_navigation_link", {"navigation_link": navigation_link})
+    try:
+        return await _bridge_call_recorded(session_id, "open_navigation_link", {"navigation_link": navigation_link})
+    except Exception as exc:
+        suggestions = await _navigation_link_suggestions(session_id, navigation_link)
+        raise RuntimeError(str(exc) + _format_navigation_suggestions(suggestions)) from exc
+
+
+def _query_from_navigation_link(value: str) -> str:
+    text = str(value or "").strip()
+    if text.startswith("e1cib/"):
+        text = text.split("?", 1)[0].rstrip("/")
+        if "/" in text:
+            text = text.rsplit("/", 1)[-1]
+    return text
+
+
+def _format_navigation_suggestions(suggestions: list[dict[str, str]]) -> str:
+    if not suggestions:
+        return ""
+    lines = ["", "Возможно, вы имели в виду:"]
+    for item in suggestions[:5]:
+        full_name = item.get("full_name") or item.get("object_full_name") or item.get("presentation") or ""
+        navigation = item.get("navigation_link") or (f"e1cib/list/{full_name}" if full_name else "")
+        source = item.get("source", "")
+        suffix = f" ({source})" if source else ""
+        if navigation:
+            lines.append(f"- {full_name} → {navigation}{suffix}")
+        else:
+            lines.append(f"- {full_name}{suffix}")
+    return "\n" + "\n".join(lines)
+
+
+async def _navigation_link_suggestions(session_id: str, navigation_link: str, limit: int = 5) -> list[dict[str, str]]:
+    query = _query_from_navigation_link(navigation_link)
+    if not query:
+        return []
+    suggestions: list[dict[str, str]] = []
+    seen: set[str] = set()
+
+    def add(full_name: str, source: str, navigation: str = "", presentation: str = "") -> None:
+        full_name = str(full_name or "").strip()
+        if not full_name or full_name in seen:
+            return
+        seen.add(full_name)
+        suggestions.append({
+            "full_name": full_name,
+            "presentation": presentation or full_name,
+            "navigation_link": navigation or f"e1cib/list/{full_name}",
+            "source": source,
+        })
+
+    sess = _session(session_id)
+    if sess.rag_enabled:
+        try:
+            effective_snapshot = sess.rag_snapshot or None
+            lookup = _RAG.lookup_object(object=query, snapshot=effective_snapshot)
+            for item in lookup.get("matches", [])[:limit]:
+                nav_items = item.get("navigation") or []
+                nav = ""
+                if nav_items:
+                    nav = str(nav_items[0].get("url") or "")
+                add(str(item.get("full_name") or ""), "rag_lookup_object", nav)
+        except Exception:
+            pass
+        if len(suggestions) < limit:
+            try:
+                result = _RAG.query(text=query, snapshot=sess.rag_snapshot or None, limit=limit)
+                for item in (result.get("terms") or []) + (result.get("fts") or []):
+                    add(str(item.get("full_name") or item.get("object_full_name") or ""), "rag_query")
+                    if len(suggestions) >= limit:
+                        break
+            except Exception:
+                pass
+
+    if len(suggestions) < limit:
+        try:
+            cache_key = _metadata_cache_key(session_id)
+            catalog_data = _METADATA_OBJECTS_CACHE.get(cache_key)
+            if catalog_data is None:
+                catalog_data = await _load_metadata_objects_from_catalog(session_id, 5000)
+                _METADATA_OBJECTS_CACHE[cache_key] = catalog_data
+            for item in catalog_data.get("objects", []):
+                if item.get("is_group") == "Да":
+                    continue
+                if _match_metadata_object(item, query):
+                    add(str(item.get("full_name") or ""), "metadata_objects_from_catalog", presentation=str(item.get("presentation") or ""))
+                    if len(suggestions) >= limit:
+                        break
+        except Exception:
+            pass
+    return suggestions[:limit]
 
 
 @mcp.tool()
@@ -4467,10 +4559,76 @@ def _metadata_objects_catalog_self_entry() -> dict[str, str]:
     }
 
 
+async def _metadata_catalog_rows_from_output(session_id: str, max_rows: int) -> tuple[list[dict[str, str]], list[str]]:
+    """Try to read the metadata catalog via the standard dynamic-list output command.
+
+    Many dynamic lists can be exported to a tabular document with all visible
+    rows/columns.  That path is preferable to UI row navigation when available;
+    if the current form does not expose "Вывести список", callers fall back to
+    table navigation.
+    """
+    warnings: list[str] = []
+    try:
+        output = await _bridge_call_recorded(session_id, "dynamic_list_output", {
+            "button": "",
+            "wait_seconds": 3,
+            "max_depth": 8,
+        })
+        tabular_docs = output.get("tabular_documents", {}) if isinstance(output, dict) else {}
+        items = tabular_docs.get("items", []) if isinstance(tabular_docs, dict) else []
+        if not items:
+            return [], ["dynamic_list_output did not return tabular documents"]
+        doc_name = items[0].get("name", "")
+        text_result = await _bridge_call_recorded(session_id, "tabular_document_text", {
+            "name": doc_name,
+            "max_rows": max_rows,
+            "max_columns": 20,
+        })
+        cells = text_result.get("cells", []) if isinstance(text_result, dict) else []
+        return _metadata_catalog_rows_from_tabular_cells(cells), warnings
+    except Exception as exc:
+        return [], [f"dynamic_list_output metadata read failed: {exc}"]
+
+
+def _metadata_catalog_rows_from_tabular_cells(cells: list[list[Any]]) -> list[dict[str, str]]:
+    if not cells:
+        return []
+    header_idx = -1
+    headers: list[str] = []
+    known_headers = {"ссылка", "синоним", "полное имя", "полноеимя", "пометка удаления", "пометкаудаления"}
+    for i, row in enumerate(cells[:10]):
+        normalized = [str(cell).strip() for cell in row]
+        if any(cell.casefold() in known_headers for cell in normalized):
+            header_idx = i
+            headers = normalized
+            break
+    if header_idx < 0:
+        # Common list-output layout: the first non-empty column is the list
+        # presentation.  Treat every non-empty row as a Ссылка-only row.
+        rows: list[dict[str, str]] = []
+        for row in cells:
+            value = next((str(cell).strip() for cell in row if str(cell).strip()), "")
+            if value:
+                rows.append({"Ссылка": value})
+        return rows
+    rows = []
+    for row in cells[header_idx + 1:]:
+        item: dict[str, str] = {}
+        for idx, header in enumerate(headers):
+            if not header:
+                continue
+            value = str(row[idx]).strip() if idx < len(row) else ""
+            if value:
+                item[header] = value
+        if item:
+            rows.append(item)
+    return rows
+
+
 async def _load_metadata_objects_from_catalog(session_id: str, limit: int) -> dict[str, Any]:
     navigation_link = "e1cib/list/Справочник.ИдентификаторыОбъектовМетаданных"
     await _bridge_call_recorded(session_id, "open_navigation_link", {"navigation_link": navigation_link})
-    list_mode_warning = ""
+    warnings: list[str] = []
     try:
         await _bridge_call_recorded(session_id, "click_button", {"name": "ФормаСписок", "search_by_title": False})
     except Exception as exc:
@@ -4478,10 +4636,15 @@ async def _load_metadata_objects_from_catalog(session_id: str, limit: int) -> di
         # (or are already in list mode).  The catalog reader is used in error
         # hints, so absence of this convenience command must not make the whole
         # tool unusable; continue with the currently displayed list.
-        list_mode_warning = f"Could not switch catalog to flat list via ФормаСписок: {exc}"
-    rows_result = await _bridge_call_recorded(session_id, "table_rows", {"name": "Список", "title": "", "limit": limit, "max_depth": 8})
-    rows = rows_result.get("rows", []) if isinstance(rows_result, dict) else []
-    parsed_rows = [_table_row_pairs(row) for row in rows]
+        warnings.append(f"Could not switch catalog to flat list via ФормаСписок: {exc}")
+    parsed_rows, output_warnings = await _metadata_catalog_rows_from_output(session_id, limit)
+    source_method = "dynamic_list_output"
+    warnings.extend(output_warnings)
+    if not parsed_rows:
+        rows_result = await _bridge_call_recorded(session_id, "table_rows", {"name": "Список", "title": "", "limit": limit, "max_depth": 8})
+        rows = rows_result.get("rows", []) if isinstance(rows_result, dict) else []
+        parsed_rows = [_table_row_pairs(row) for row in rows]
+        source_method = "table_rows"
     actual_rows = [row for row in parsed_rows if _is_not_deleted_catalog_row(row)]
     objects = [_metadata_object_from_row(row) for row in actual_rows]
     self_entry = _metadata_objects_catalog_self_entry()
@@ -4508,9 +4671,10 @@ async def _load_metadata_objects_from_catalog(session_id: str, limit: int) -> di
         "metadata_objects_count": len(metadata_items),
         "navigation_link": navigation_link,
         "source": "Справочник.ИдентификаторыОбъектовМетаданных",
+        "source_method": source_method,
         "loaded_at": datetime.now().isoformat(timespec="seconds"),
         "limit": limit,
-        "warnings": [list_mode_warning] if list_mode_warning else [],
+        "warnings": warnings,
     }
 
 
@@ -4560,6 +4724,7 @@ async def metadata_objects_from_catalog(
         "metadata_objects_count": catalog_data["metadata_objects_count"],
         "navigation_link": catalog_data["navigation_link"],
         "source": catalog_data["source"],
+        "source_method": catalog_data.get("source_method", ""),
         "loaded_at": catalog_data["loaded_at"],
         "warnings": warnings,
     }
