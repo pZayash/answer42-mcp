@@ -87,7 +87,9 @@ class SessionState:
 - динамические списки: `dynamic_list_metadata_available_fields`, `dynamic_list_settings_available_fields`, `dynamic_list_set_settings`, `dynamic_list_sort_by_column`, `dynamic_list_output`, `dynamic_list_open_settings`, `dynamic_list_clear_settings`, `form_open_settings`;
 - табличные документы: `tabular_documents`, `tabular_document_text`, `tabular_document_save`;
 - доказательная запись: `recording_start`, `recording_capture`, `recording_stop`;
-- RAG: `rag_source_add`, `rag_sources_add_from_directory`, `rag_source_roots_list`, `rag_sources_list`, `rag_available_configurations`, `rag_snapshot_create`, `rag_snapshots_list`, `rag_index_build`, `rag_lookup_object`, `rag_query`.
+- RAG: `rag_source_add`, `rag_sources_add_from_directory`, `rag_source_roots_list`, `rag_sources_list`, `rag_available_configurations`, `rag_snapshot_create`, `rag_snapshots_list`, `rag_index_build`, `rag_lookup_object`, `rag_query`, `rag_session_autoconfigure`.
+
+`rag_session_autoconfigure` умеет fallback-выгрузку конфигурации и расширений через Designer `DumpConfigToFiles`, если подходящий RAG-источник не найден. Для веб-сессий можно передать `dump_connection_value` (прямой сервер/файловая база) или `cf_files`/`cfe_files` (загружаются во временную базу, выгружаются в XML, временная база удаляется).
 
 ### `mcp_1c.bridge`
 

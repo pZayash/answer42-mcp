@@ -35,6 +35,7 @@ from . import release_helper
 from .bridge import OneCBridgeServer
 from .credentials import get_store as _credentials_store
 from .rag import RagService
+from .rag.dump import dump_cf_to_xml, dump_infobase_to_xml
 from .window_control import active_1c_window_geometry as _active_windows_1c_window_geometry
 from .window_control import maximize_test_client_window as _maximize_external_window
 from .recorder import RecordingSession
@@ -399,6 +400,8 @@ class SessionState:
         self.test_client_pid: int = 0
         self.xvfb_pid: int = 0
         self.client_xvfb_pid: int = 0
+        self.target_connection_mode: str = ""
+        self.target_connection_value: str = ""
         self.bridge = OneCBridgeServer(
             host="127.0.0.1",
             port=ws_port,
@@ -430,6 +433,8 @@ class SessionState:
             "rag_snapshot": self.rag_snapshot,
             "rag_enabled": self.rag_enabled,
             "idle_timeout_seconds": self.idle_timeout_seconds,
+            "target_connection_mode": self.target_connection_mode,
+            "target_connection_value": self.target_connection_value,
             "manager_pid": self.runtime.manager_process.pid if self.runtime and self.runtime.manager_process and self.runtime.manager_process.poll() is None else self.manager_pid,
             "ibsrv_pid": self.runtime.server_process.pid if self.runtime and self.runtime.server_process and self.runtime.server_process.poll() is None else self.ibsrv_pid,
             "test_client_pid": self.test_client_process.pid if self.test_client_process and self.test_client_process.poll() is None else self.test_client_pid,
@@ -458,6 +463,8 @@ class SessionState:
         sess.client_display = str(data.get("client_display", ""))
         sess.rag_enabled = bool(data.get("rag_enabled", True))
         sess.idle_timeout_seconds = int(data.get("idle_timeout_seconds") or 60 * 60)
+        sess.target_connection_mode = str(data.get("target_connection_mode") or "")
+        sess.target_connection_value = str(data.get("target_connection_value") or "")
         sess.manager_pid = int(data.get("manager_pid") or 0)
         sess.ibsrv_pid = int(data.get("ibsrv_pid") or 0)
         sess.test_client_pid = int(data.get("test_client_pid") or 0)
@@ -1684,6 +1691,93 @@ def _resolve_runtime(
     )
 
 
+def _json_list(value: str) -> list[str]:
+    text = str(value or "").strip()
+    if not text:
+        return []
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, list):
+            return [str(item) for item in parsed if str(item).strip()]
+    except Exception:
+        pass
+    return [part.strip() for part in re.split(r"[,;\n]", text) if part.strip()]
+
+
+def _effective_dump_connection(
+    sess: SessionState,
+    connection_mode: str,
+    connection_value: str,
+    file_infobase_path: str,
+) -> tuple[str, str]:
+    """Return Designer-compatible dump connection mode/value.
+
+    DumpConfigToFiles cannot work through a web /WS publication.  The caller may
+    therefore pass a direct server ref (server/ib) or a file infobase path.  For
+    sessions that were started directly, we reuse the stored target connection.
+    """
+    mode = (connection_mode or "auto").strip().lower()
+    value = (connection_value or file_infobase_path or "").strip()
+    if mode == "auto" and value:
+        mode = _normalize_connection_mode("auto", value, value)
+    if mode == "auto" and sess.target_connection_mode:
+        mode = sess.target_connection_mode
+        value = sess.target_connection_value
+    if mode == "auto" and sess.base_url and _normalize_connection_mode("auto", sess.base_url, sess.base_url) != "ws":
+        mode = _normalize_connection_mode("auto", sess.base_url, sess.base_url)
+        value = sess.base_url
+    if mode in {"file", "file-direct", "direct-file", "file_direct", "direct_file"}:
+        return "file-direct", str(Path(value).expanduser())
+    if mode == "server":
+        return "server", value
+    if value and _normalize_connection_mode("auto", value, value) in {"server", "file-direct"}:
+        normalized = _normalize_connection_mode("auto", value, value)
+        return ("file-direct" if normalized == "file-direct" else "server"), value
+    raise ValueError(
+        "RAG source dump requires a direct infobase connection: server/infobase (/S) "
+        "or file infobase path (/F). Web /WS URLs cannot be dumped by Designer; pass "
+        "dump_connection_value='server/ib', file_infobase_path, or cf_files/cfe_files."
+    )
+
+
+def _rag_dump_root(session_id: str, root: str = "") -> Path:
+    base = Path(root).expanduser() if root else os_support.default_data_dir() / "rag-dumps"
+    digest = hashlib.sha1(f"{session_id}:{time.time()}".encode("utf-8")).hexdigest()[:10]
+    return base / f"{_safe_snapshot_part(session_id)}-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{digest}"
+
+
+def _register_dumped_source(name: str, path: Path, kind: str) -> dict[str, Any]:
+    detected = _RAG.detect_source(str(path))
+    effective_format = str(detected.get("format") or "auto")
+    result = _RAG.add_source(name=name, path=str(path), kind=kind, format=effective_format)
+    result["detected"] = detected
+    result["generated"] = True
+    return result
+
+
+def _dump_source_name(prefix: str, runtime_name: str, runtime_version: str, used: set[str]) -> str:
+    base = _safe_snapshot_part("_".join(part for part in ["dump", prefix, runtime_name, runtime_version] if part))
+    name = base[:120] or "dump_source"
+    original = name
+    index = 2
+    while name in used:
+        name = f"{original}_{index}"
+        index += 1
+    used.add(name)
+    return name
+
+
+def _rag_match_needs_dump(match: dict[str, Any], target_version: str) -> bool:
+    if not match.get("matched"):
+        return True
+    # A nearest-version match is useful as a fallback for read-only setups, but
+    # if we are allowed to dump the live infobase then the live source is a
+    # better/suitable version and should replace the nearest available one.
+    if target_version and not _rag_match_public(match).get("exact_version"):
+        return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # 1C configuration RAG / metadata index tools
 # ---------------------------------------------------------------------------
@@ -1770,6 +1864,14 @@ async def rag_session_autoconfigure(
     snapshot_name: Annotated[str, "Optional snapshot name; defaults to runtime configuration plus matched extensions"] = "",
     build_index: Annotated[bool, "Build/rebuild RAG index for the created snapshot"] = True,
     sync_sources: Annotated[bool, "Discover new sources from watched roots before matching"] = True,
+    dump_if_missing: Annotated[bool, "Dump live/configuration sources when an exact RAG source is missing"] = True,
+    dump_connection_mode: Annotated[str, "auto | server | file-direct; required for dumping when current session uses a web URL"] = "auto",
+    dump_connection_value: Annotated[str, "Direct server/infobase (/S) or file infobase path (/F) used only for source dumping"] = "",
+    file_infobase_path: Annotated[str, "Alias for dump_connection_value when dumping from a file infobase"] = "",
+    cf_files: Annotated[str, "Optional JSON/comma list of .cf files to load into temporary file IBs and dump"] = "",
+    cfe_files: Annotated[str, "Optional JSON/comma list of .cfe files to load into temporary file IBs and dump as extensions"] = "",
+    dump_root: Annotated[str, "Optional persistent directory for generated RAG source dumps"] = "",
+    cleanup_tmp_infobases: Annotated[bool, "Remove temporary file infobases created while loading CF/CFE files"] = True,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> dict[str, Any]:
@@ -1777,14 +1879,35 @@ async def rag_session_autoconfigure(
 
     The tool reads the live main configuration/version from `ВерсииПодсистем`, reads
     installed extensions from `ВерсииРасширений`, matches them against registered
-    RAG sources by metadata name and version, falls back to the nearest available
-    version with warnings, creates a snapshot, attaches it to the session, and
-    optionally builds its index.
+    RAG sources by metadata name and version, and creates/binds a snapshot.
+
+    When no exact/suitable source exists and `dump_if_missing=true`, Answer42 can
+    create RAG sources by dumping the configuration and extensions to Designer XML.
+    Dumping requires a direct Designer connection: server infobase (`server/ib`) or
+    file infobase path.  Web `/WS` URLs cannot be dumped; for web sessions pass
+    `dump_connection_value`, `file_infobase_path`, or `cf_files`/`cfe_files`.
+    Temporary infobases created from CF/CFE files are deleted after dumping by
+    default; generated XML source directories are kept under `dump_root` (or the
+    Answer42 temp rag-dumps directory) because the RAG index references them.
     """
-    params = {"snapshot_name": snapshot_name, "build_index": build_index, "sync_sources": sync_sources}
+    params = {
+        "snapshot_name": snapshot_name,
+        "build_index": build_index,
+        "sync_sources": sync_sources,
+        "dump_if_missing": dump_if_missing,
+        "dump_connection_mode": dump_connection_mode,
+        "dump_connection_value": dump_connection_value,
+        "file_infobase_path": file_infobase_path,
+        "cf_files": cf_files,
+        "cfe_files": cfe_files,
+        "dump_root": dump_root,
+        "cleanup_tmp_infobases": cleanup_tmp_infobases,
+    }
     disabled = _rag_require_enabled(session_id, "rag_session_autoconfigure", params)
     if disabled is not None:
         return disabled
+
+    sess = _session(session_id)
 
     available = _RAG.available_configurations(sync=sync_sources)
     sources = [*available.get("configurations", []), *available.get("extensions", []), *available.get("other_sources", [])]
@@ -1798,9 +1921,90 @@ async def rag_session_autoconfigure(
     installed_extensions = extensions_info.get("extensions", []) if isinstance(extensions_info, dict) else []
 
     warnings: list[str] = []
+    dumps: list[dict[str, Any]] = []
+    generated_sources: list[dict[str, Any]] = []
+    used_generated_names = {str(src.get("name") or "") for src in sources}
+    dump_base_dir: Path | None = None
+
+    cf_paths = [Path(item).expanduser() for item in _json_list(cf_files)]
+    cfe_paths = [Path(item).expanduser() for item in _json_list(cfe_files)]
+
+    if dump_if_missing and cf_paths:
+        dump_base_dir = dump_base_dir or _rag_dump_root(session_id, dump_root)
+        for cf_path in cf_paths:
+            source_name = _dump_source_name("cf", cf_path.stem, "", used_generated_names)
+            out_dir = dump_base_dir / source_name
+            dump_info = await asyncio.to_thread(
+                dump_cf_to_xml,
+                sess.platform_dir,
+                cf_path,
+                out_dir,
+                sess.username,
+                sess.password,
+                None,
+                sess.display,
+                cleanup_tmp_infobases,
+            )
+            dumps.append(dump_info | {"source_name": source_name, "source_kind": "configuration"})
+            generated = _register_dumped_source(source_name, out_dir, "configuration")
+            generated_sources.append(generated)
+            sources.append(generated)
+            base_sources.append(generated)
+
+    if dump_if_missing and cfe_paths:
+        dump_base_dir = dump_base_dir or _rag_dump_root(session_id, dump_root)
+        for cfe_path in cfe_paths:
+            source_name = _dump_source_name("cfe", cfe_path.stem, "", used_generated_names)
+            out_dir = dump_base_dir / source_name
+            dump_info = await asyncio.to_thread(
+                dump_cf_to_xml,
+                sess.platform_dir,
+                cfe_path,
+                out_dir,
+                sess.username,
+                sess.password,
+                cfe_path.stem,
+                sess.display,
+                cleanup_tmp_infobases,
+            )
+            dumps.append(dump_info | {"source_name": source_name, "source_kind": "extension"})
+            generated = _register_dumped_source(source_name, out_dir, "extension")
+            generated_sources.append(generated)
+            sources.append(generated)
+            extension_sources.append(generated)
+
     base_match = _best_rag_source_match(config_name, config_version, base_sources, None)
-    if not base_match.get("matched"):
-        raise ValueError(f"RAG source for runtime configuration {config_name!r} {config_version!r} not found")
+    if _rag_match_needs_dump(base_match, config_version):
+        if not dump_if_missing:
+            if not base_match.get("matched"):
+                raise ValueError(f"RAG source for runtime configuration {config_name!r} {config_version!r} not found")
+            warnings.append(str(base_match.get("warning") or ""))
+        else:
+            dump_mode, dump_value = _effective_dump_connection(sess, dump_connection_mode, dump_connection_value, file_infobase_path)
+            dump_base_dir = dump_base_dir or _rag_dump_root(session_id, dump_root)
+            source_name = _dump_source_name("base", config_name, config_version, used_generated_names)
+            out_dir = dump_base_dir / source_name
+            dump_info = await asyncio.to_thread(
+                dump_infobase_to_xml,
+                sess.platform_dir,
+                dump_mode,
+                dump_value,
+                out_dir,
+                sess.username,
+                sess.password,
+                None,
+                sess.display,
+            )
+            dumps.append(dump_info | {"source_name": source_name, "source_kind": "configuration"})
+            generated = _register_dumped_source(source_name, out_dir, "configuration")
+            generated_sources.append(generated)
+            sources.append(generated)
+            base_sources.append(generated)
+            base_match = _best_rag_source_match(config_name, config_version, base_sources, None)
+            if not base_match.get("matched"):
+                # The dumped source is still the only available representation; use it
+                # even if metadata matching cannot extract the exact name/version.
+                base_match = {"matched": True, "warning": "Using freshly dumped base configuration source; exact metadata match was not detected.", "candidate": {"source": generated, "metadata": _source_metadata(str(out_dir)), "similarity": 1.0, "source_version": config_version, "exact_version": False}}
     if base_match.get("warning"):
         warnings.append(str(base_match["warning"]))
     base_candidate = base_match["candidate"]
@@ -1814,10 +2018,38 @@ async def rag_session_autoconfigure(
         ext_version = str(extension.get("version") or "")
         match = _best_rag_source_match(ext_name, ext_version, extension_sources, None)
         public_match = _rag_match_public(match) | {"runtime_name": ext_name, "runtime_version": ext_version}
+        if _rag_match_needs_dump(match, ext_version):
+            if dump_if_missing:
+                dump_mode, dump_value = _effective_dump_connection(sess, dump_connection_mode, dump_connection_value, file_infobase_path)
+                dump_base_dir = dump_base_dir or _rag_dump_root(session_id, dump_root)
+                source_name = _dump_source_name("ext", ext_name, ext_version, used_generated_names)
+                out_dir = dump_base_dir / source_name
+                dump_info = await asyncio.to_thread(
+                    dump_infobase_to_xml,
+                    sess.platform_dir,
+                    dump_mode,
+                    dump_value,
+                    out_dir,
+                    sess.username,
+                    sess.password,
+                    ext_name,
+                    sess.display,
+                )
+                dumps.append(dump_info | {"source_name": source_name, "source_kind": "extension", "runtime_name": ext_name, "runtime_version": ext_version})
+                generated = _register_dumped_source(source_name, out_dir, "extension")
+                generated_sources.append(generated)
+                sources.append(generated)
+                extension_sources.append(generated)
+                match = _best_rag_source_match(ext_name, ext_version, extension_sources, None)
+                if not match.get("matched"):
+                    match = {"matched": True, "warning": "Using freshly dumped extension source; exact metadata match was not detected.", "candidate": {"source": generated, "metadata": _source_metadata(str(out_dir)), "similarity": 1.0, "source_version": ext_version, "exact_version": False}}
+                public_match = _rag_match_public(match) | {"runtime_name": ext_name, "runtime_version": ext_version}
+            else:
+                extension_matches.append(public_match)
+                if not match.get("matched"):
+                    warnings.append(f"RAG source for extension {ext_name!r} {ext_version!r} not found; extension was not added to snapshot.")
+                    continue
         extension_matches.append(public_match)
-        if not match.get("matched"):
-            warnings.append(f"RAG source for extension {ext_name!r} {ext_version!r} not found; extension was not added to snapshot.")
-            continue
         if match.get("warning"):
             warnings.append(str(match["warning"]))
         source_name = str(match["candidate"]["source"].get("name") or "")
@@ -1831,7 +2063,6 @@ async def rag_session_autoconfigure(
         effective_snapshot_name = f"{_safe_snapshot_part(config_name)}+extensions-{digest}"
 
     snapshot = _RAG.create_snapshot(name=effective_snapshot_name, base=base_source_name, extensions=extension_source_names)
-    sess = _session(session_id)
     sess.rag_snapshot = str(snapshot.get("name") or effective_snapshot_name)
     if sess.base_url:
         _save_rag_binding(sess.base_url, sess.rag_snapshot)
@@ -1846,6 +2077,9 @@ async def rag_session_autoconfigure(
         "runtime_configuration": {"name": config_name, "version": config_version, "match": _rag_match_public(base_match)},
         "runtime_extensions": installed_extensions,
         "extension_matches": extension_matches,
+        "dumps": dumps,
+        "generated_sources": generated_sources,
+        "dump_root": str(dump_base_dir) if dump_base_dir else "",
         "available_sources_count": len(sources),
         "session_snapshot": sess.rag_snapshot,
     }
@@ -2034,6 +2268,8 @@ def session_status(*,
         "running": True,
         "session_id": session_id,
         "base_url": sess.base_url,
+        "target_connection_mode": sess.target_connection_mode,
+        "target_connection_value": sess.target_connection_value,
         "version": _platform.platform_version_from_dir(sess.platform_dir),
         "display": sess.display,
         "client_display": sess.client_display,
@@ -2051,6 +2287,8 @@ def session_status(*,
             "pid": sess.test_client_process.pid if sess.test_client_process else (sess.test_client_pid or None),
             "alive": (sess.test_client_process.poll() is None if sess.test_client_process else _pid_is_running(sess.test_client_pid)),
             "base_url": sess.base_url,
+            "target_connection_mode": sess.target_connection_mode,
+            "target_connection_value": sess.target_connection_value,
             "client_ibsrv_port": sess.client_ibsrv_port,
             "server_alive": client_server_alive,
             "shared_client_key": sess.shared_client_key,
@@ -2997,6 +3235,8 @@ async def _connect_test_client_impl(
     sess.base_url = r_base
     sess.username = r_user
     sess.password = r_pass
+    sess.target_connection_mode = str(target_connection_mode)
+    sess.target_connection_value = str(r_base if target_connection_mode == "server" else (db_path if target_connection_mode in {"file", "file-direct"} else r_value))
     if sess.rag_snapshot and r_base:
         _save_rag_binding(r_base, sess.rag_snapshot)
     else:
