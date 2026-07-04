@@ -3307,7 +3307,11 @@ async def field_dropdown_items(
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
-    """Open a form field dropdown and return its visible choice items when exposed by the 1C test-client API."""
+    """Open a form field dropdown and return visible choice items when exposed by the 1C test-client API.
+
+    This is a convenience action for the common "open dropdown and read choices" scenario.
+    For non-mutating diagnostics of an already-open dropdown use field_dropdown_state.
+    """
     return await _bridge_call_recorded(
         session_id,
         "field_dropdown_items",
@@ -3524,7 +3528,11 @@ async def ui_tree(max_depth: Annotated[int, "Maximum UI tree depth"] = 4,
 async def command_bar(*,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
-    """Return command interface/panel information for the active window/form when available."""
+    """Low-level diagnostic: return active window/form command-bar data when available.
+
+    Prefer command_interface_sections/commands/search for application navigation commands,
+    and object_command_panel/object_context_menu for commands of a specific UI object.
+    """
     return await _bridge_call_recorded(session_id, "command_bar", {})
 
 
@@ -3577,7 +3585,11 @@ async def get_object(
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
-    """Call TestedApplication.GetObject with optional wildcard name/title."""
+    """Low-level escape hatch: call TestedApplication.GetObject with optional wildcard name/title.
+
+    Prefer find_object/search_objects for structured diagnostics and activate_object for actions.
+    Keep this tool for platform/test-client edge cases where direct GetObject semantics matter.
+    """
     return await _bridge_call_recorded(session_id, "get_object", {"name": name, "title": title, "type": type, "timeout": timeout, "max_depth": max_depth})
 
 

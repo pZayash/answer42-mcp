@@ -101,7 +101,7 @@ start_session(
 
 - Открывай формы/списки через `execute_window_command` с `e1cib/list/...` или `e1cib/app/...`, когда доступно.
 - Для поиска объектов используй `find_object`, `activate_object`, `ui_tree`. `ui_tree` по умолчанию показывает только видимые/активные для пользователя элементы и всегда добавляет `visible/available/enabled/read_only`; для полной диагностики скрытых страниц/элементов передавай `include_hidden=true`.
-- Для команд формы используй специализированные MCP tools (`table_move_row`, `dynamic_list_*`, `click_button`, `activate_object` и т.п.). `command_bar` можно использовать для диагностики доступных команд, но не прокидывай имена команд в `execute_window_command`.
+- Для команд формы используй специализированные MCP tools (`table_move_row`, `dynamic_list_*`, `click_button`, `activate_object` и т.п.). Для навигационных команд предпочитай `command_interface_search/commands`, для команд конкретного объекта — `object_command_panel/object_context_menu`; `command_bar` — низкоуровневая диагностика. Не прокидывай имена команд в `execute_window_command`.
 - `dynamic_list_output`, `dynamic_list_open_settings`, `dynamic_list_clear_settings`, `form_open_settings` нажимают кнопки формы через test-client API (`НайтиКнопку` + `Нажать()`), а не выполняют имена команд через `ВыполнитьКоманду()`. Если авто-кандидат не подходит, передавай `button` — техническое имя или заголовок кнопки.
 
 ## Динамические списки: добавление вложенных полей через «Изменить форму»
