@@ -4651,6 +4651,57 @@ async def dynamic_list_available_fields(
 
 
 @mcp.tool()
+async def dynamic_list_settings_available_fields(
+    section: Annotated[str, "Settings section: 'filter' (Отбор), 'order' (Сортировка), 'conditional' (Условное оформление), 'group' (Группировка)"] = "filter",
+    expand_tree: Annotated[bool, "Expand tree rows to discover nested fields"] = True,
+    limit: Annotated[int, "Max fields to return"] = 500,
+    close: Annotated[bool, "Close the settings form after reading"] = False,
+    max_depth: Annotated[int, "Maximum UI search depth"] = 30,
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Open the dynamic-list settings form, switch to the requested section tab, and read the 'Доступные поля' table.
+
+    Returns the live list of fields available for filtering/ordering/conditional-formatting/grouping
+    in the current dynamic list.  This is the authoritative source — it reflects the actual form,
+    not RAG metadata.
+    """
+    return await _bridge_call_recorded(session_id, "dynamic_list_settings_available_fields", {
+        "section": section,
+        "expand_tree": expand_tree,
+        "limit": limit,
+        "close": close,
+        "max_depth": max_depth,
+    })
+
+
+@mcp.tool()
+async def dynamic_list_set_settings(
+    filters: Annotated[str, "JSON array of filter objects [{field, value, comparison?}] or empty string"] = "",
+    orders: Annotated[str, "JSON array of order objects [{field, direction?}] or empty string"] = "",
+    close: Annotated[bool, "Close the settings form after applying"] = True,
+    max_depth: Annotated[int, "Maximum UI search depth"] = 30,
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Open the dynamic-list settings form and add filter/order elements through the standard dialog.
+
+    Filters: [{field, value, comparison?}] — comparison defaults to 'Равно'.
+    Orders:  [{field, direction?}] — direction defaults to empty (uses dialog default).
+
+    This is the preferred way to apply settings; it uses the same dialog the user sees.
+    """
+    filter_list = json.loads(filters) if filters else []
+    order_list = json.loads(orders) if orders else []
+    return await _bridge_call_recorded(session_id, "dynamic_list_set_settings", {
+        "filters": filter_list,
+        "orders": order_list,
+        "close": close,
+        "max_depth": max_depth,
+    })
+
+
+@mcp.tool()
 async def dynamic_list_apply_settings(
     filters: Annotated[str, "JSON array of filter objects [{field, value, comparison?}] or empty string"] = "",
     orders: Annotated[str, "JSON array of order objects [{field, direction?}] or empty string"] = "",
