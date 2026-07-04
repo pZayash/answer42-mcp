@@ -3860,7 +3860,7 @@ async def open_navigation_link(navigation_link: Annotated[str, "Explicit 1C navi
     if not navigation_link.startswith("e1cib/"):
         raise ValueError(
             f"open_navigation_link accepts only explicit e1cib/... navigation links; rejected: {navigation_link}\n"
-            "Use rag_lookup_object/rag_query or Справочник.ИдентификаторыОбъектовМетаданных to find correct metadata names."
+            "Use rag_lookup_object/rag_query or metadata_objects_from_catalog to find correct metadata names."
         )
     return await _bridge_call_recorded(session_id, "open_navigation_link", {"navigation_link": navigation_link})
 
