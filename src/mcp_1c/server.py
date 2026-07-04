@@ -4456,6 +4456,17 @@ def _match_metadata_object(item: dict[str, str], query: str) -> bool:
     return any(needle in str(item.get(field, "")).casefold() for field in ("presentation", "full_name", "type", "name", "synonym"))
 
 
+def _metadata_objects_catalog_self_entry() -> dict[str, str]:
+    return {
+        "presentation": "Справочник.ИдентификаторыОбъектовМетаданных",
+        "full_name": "Справочник.ИдентификаторыОбъектовМетаданных",
+        "type": "Справочник",
+        "name": "ИдентификаторыОбъектовМетаданных",
+        "synonym": "Идентификаторы объектов метаданных",
+        "is_group": "Нет",
+    }
+
+
 async def _load_metadata_objects_from_catalog(session_id: str, limit: int) -> dict[str, Any]:
     navigation_link = "e1cib/list/Справочник.ИдентификаторыОбъектовМетаданных"
     await _bridge_call_recorded(session_id, "open_navigation_link", {"navigation_link": navigation_link})
@@ -4473,6 +4484,13 @@ async def _load_metadata_objects_from_catalog(session_id: str, limit: int) -> di
     parsed_rows = [_table_row_pairs(row) for row in rows]
     actual_rows = [row for row in parsed_rows if _is_not_deleted_catalog_row(row)]
     objects = [_metadata_object_from_row(row) for row in actual_rows]
+    self_entry = _metadata_objects_catalog_self_entry()
+    if not any(item.get("full_name") == self_entry["full_name"] for item in objects):
+        # Some configurations do not store a row for the metadata-identifiers
+        # catalog itself in that same catalog.  Expose the currently opened
+        # metadata object explicitly so the lookup tool remains useful for
+        # navigation-link diagnostics and self-checks.
+        objects.append(self_entry)
     groups = [item for item in objects if item["is_group"] == "Да"]
     metadata_items = [item for item in objects if item["is_group"] != "Да"]
     type_counts: dict[str, int] = {}
@@ -4525,21 +4543,6 @@ async def metadata_objects_from_catalog(
     searchable = all_objects if include_groups else [item for item in all_objects if item["is_group"] != "Да"]
     matches = [item for item in searchable if _match_metadata_object(item, query)]
     warnings = list(catalog_data.get("warnings", []))
-    fallback_search_used = False
-    if not matches and query:
-        # If the form cannot be switched to flat-list mode, the initial read may
-        # see only top-level groups.  Try the live list search before returning an
-        # empty result; this keeps the tool useful for navigation-error hints.
-        try:
-            await _bridge_call_recorded(session_id, "dynamic_list_find", {"text": query, "name": "Список", "title": "", "max_depth": 8})
-            current = await _bridge_call_recorded(session_id, "table_current_row", {"name": "Список", "title": "", "max_depth": 8})
-            row = _table_row_pairs(current.get("row", current) if isinstance(current, dict) else current)
-            item = _metadata_object_from_row(row)
-            if item and _match_metadata_object(item, query) and (include_groups or item.get("is_group") != "Да"):
-                matches = [item]
-                fallback_search_used = True
-        except Exception as exc:
-            warnings.append(f"Live catalog search fallback failed: {exc}")
     return {
         "found": bool(matches),
         "cache_hit": cache_hit,
@@ -4548,7 +4551,7 @@ async def metadata_objects_from_catalog(
         "matched_count": len(matches),
         "returned_count": min(len(matches), max_results),
         "truncated": len(matches) > max_results,
-        "fallback_search_used": fallback_search_used,
+        "fallback_search_used": False,
         "type_counts": catalog_data["type_counts"],
         "rows_count": catalog_data["rows_count"],
         "non_deleted_rows_count": catalog_data["non_deleted_rows_count"],
