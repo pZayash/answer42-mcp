@@ -19,6 +19,31 @@ description: "RAG-индекс 1С metadata через Answer42"
 
 ## Типовой workflow
 
+### Быстрый старт (live-сессия)
+
+```text
+rag_session_autoconfigure()
+```
+
+Автоматически читает живую конфигурацию и расширения из `ВерсииПодсистем`/`ВерсииРасширений`, матчит с зарегистрированными RAG-источниками, создаёт снапшот и строит индекс.
+
+### Если подходящего источника нет — fallback-выгрузка
+
+`rag_session_autoconfigure(dump_if_missing=true)` при отсутствии точного совпадения:
+- Для прямого подключения (`/S` или `/F`) — выгружает конфигурацию и расширения через Designer `DumpConfigToFiles`.
+- Для веб-сессий (`/WS`) — нужно передать `dump_connection_value="server/ib"` или `file_infobase_path="/path/to/ib"`.
+- Можно передать `cf_files`/`cfe_files` — они загружаются во временную файловую базу, выгружаются в XML, временная база удаляется.
+
+```text
+# Прямое серверное подключение
+rag_session_autoconfigure(dump_if_missing=true, dump_connection_value="dev-area-01.42clouds.com/ms")
+
+# Из CF/CFE файлов
+rag_session_autoconfigure(dump_if_missing=true, cf_files="config.cf", cfe_files="ext1.cfe,ext2.cfe")
+```
+
+### Ручная регистрация источников
+
 ```text
 rag_source_detect(path)
 rag_source_add(name="MS", path="/path/to/MS/src", kind="base", format="auto")

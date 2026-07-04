@@ -29,6 +29,8 @@ from mcp_1c.server import (
     credentials_list,
     _is_placeholder_password,
     _normalize_connection_mode,
+    _effective_dump_connection,
+    _json_list,
     _parse_users_plain_text,
     _rag_diagnostic,
     configuration_name_version_from_subsystems,
@@ -762,6 +764,27 @@ def test_connection_mode_normalization(tmp_path):
     assert _normalize_connection_mode("auto", str(file_ib), "") == "file"
     assert _normalize_connection_mode("server", "cluster/ib", "") == "server"
     assert _normalize_connection_mode("auto", "cluster/ib", "") == "server"
+
+
+def test_json_list_accepts_json_and_delimited_strings():
+    assert _json_list('["a.cf", "b.cfe"]') == ["a.cf", "b.cfe"]
+    assert _json_list("a.cf,b.cfe\nc.cf") == ["a.cf", "b.cfe", "c.cf"]
+    assert _json_list("") == []
+
+
+def test_effective_dump_connection_uses_direct_session_target(tmp_path):
+    sess = SessionState("s", ":99", Path("/opt/1cv8/x86_64/8.5.1.1150"), 8765, 8314, 1538, tmp_path)
+    sess.target_connection_mode = "server"
+    sess.target_connection_value = "dev-area-01.42clouds.com/ms"
+
+    assert _effective_dump_connection(sess, "auto", "", "") == ("server", "dev-area-01.42clouds.com/ms")
+
+
+def test_effective_dump_connection_rejects_web_without_direct_target(tmp_path):
+    sess = SessionState("s", ":99", Path("/opt/1cv8/x86_64/8.5.1.1150"), 8765, 8314, 1538, tmp_path, base_url="https://example.invalid/ib/")
+
+    with pytest.raises(ValueError, match="Web /WS URLs cannot be dumped"):
+        _effective_dump_connection(sess, "auto", "", "")
 
 
 def test_tabular_document_file_selection_reports_format_mismatch(tmp_path):
