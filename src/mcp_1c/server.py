@@ -4628,15 +4628,15 @@ async def table_editing_state(
 
 
 @mcp.tool()
-async def dynamic_list_available_fields(
+async def dynamic_list_metadata_available_fields(
     object: Annotated[str, "1C metadata object full name, e.g. Catalog.ПС_Справочник1; empty = derive from active window"] = "",
     rag_snapshot: Annotated[str, "Optional RAG snapshot name/id"] = "",
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
-    """Return RAG-known fields available for dynamic-list filtering and ordering."""
+    """Return RAG/metadata-known fields for a metadata object; this does not inspect the live UI settings form."""
     sess = _session(session_id)
-    disabled = _rag_require_enabled(session_id, "dynamic_list_available_fields", {"object": object, "rag_snapshot": rag_snapshot})
+    disabled = _rag_require_enabled(session_id, "dynamic_list_metadata_available_fields", {"object": object, "rag_snapshot": rag_snapshot})
     if disabled is not None:
         return disabled
     if not object:
@@ -4679,6 +4679,7 @@ async def dynamic_list_settings_available_fields(
 async def dynamic_list_set_settings(
     filters: Annotated[str, "JSON array of filter objects [{field, value, comparison?}] or empty string"] = "",
     orders: Annotated[str, "JSON array of order objects [{field, direction?}] or empty string"] = "",
+    clear_first: Annotated[bool, "Reset list settings before applying new filters/orders"] = False,
     close: Annotated[bool, "Close the settings form after applying"] = True,
     max_depth: Annotated[int, "Maximum UI search depth"] = 30,
     *,
@@ -4696,61 +4697,14 @@ async def dynamic_list_set_settings(
     return await _bridge_call_recorded(session_id, "dynamic_list_set_settings", {
         "filters": filter_list,
         "orders": order_list,
+        "clear_first": clear_first,
         "close": close,
         "max_depth": max_depth,
     })
 
 
 @mcp.tool()
-async def dynamic_list_apply_settings(
-    filters: Annotated[str, "JSON array of filter objects [{field, value, comparison?}] or empty string"] = "",
-    orders: Annotated[str, "JSON array of order objects [{field, direction?}] or empty string"] = "",
-    clear_first: Annotated[bool, "Reset settings to defaults before applying new ones"] = False,
-    name: Annotated[str, "Dynamic list/table technical name"] = "Список",
-    title: Annotated[str, "Dynamic list/table visible title"] = "",
-    max_depth: Annotated[int, "Maximum search depth"] = 8,
-    *,
-    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
-) -> Any:
-    """Apply dynamic-list filters/orders and optionally clear settings first.
-
-    `orders` are applied with the stable test-client API `УстановитьПорядок`.
-    `filters` are applied through the standard "Настроить список" dialog using
-    best-effort field/value filling; if a configuration renders the settings
-    form differently, the returned step contains the exact diagnostic/error.
-    """
-    steps: list[dict[str, Any]] = []
-    if clear_first:
-        cleared = await _bridge_call_recorded(session_id, "dynamic_list_clear_settings", {"button": ""})
-        steps.append({"action": "clear", "result": cleared})
-    filter_list = json.loads(filters) if filters else []
-    order_list = json.loads(orders) if orders else []
-    if filter_list:
-        opened = await _bridge_call_recorded(session_id, "dynamic_list_open_settings", {"button": ""})
-        steps.append({"action": "open_settings", "result": opened})
-        for spec in filter_list:
-            applied = await _bridge_call_recorded(session_id, "dynamic_list_apply_filter", {
-                "field": spec.get("field", ""),
-                "value": spec.get("value", ""),
-                "comparison": spec.get("comparison", "Equal"),
-                "name": name,
-                "title": title,
-                "max_depth": max_depth,
-            })
-            steps.append({"action": "filter", "spec": spec, "result": applied})
-        closed = await _bridge_call_recorded(session_id, "close_form", {})
-        steps.append({"action": "close_settings", "result": closed})
-    for spec in order_list:
-        field = spec.get("field", "")
-        ordered = await _bridge_call_recorded(session_id, "dynamic_list_set_order", {
-            "name": name, "title": title, "column_title": field, "max_depth": max_depth,
-        })
-        steps.append({"action": "order", "spec": spec, "result": ordered})
-    return {"applied": True, "filters": len(filter_list), "orders": len(order_list), "steps": steps}
-
-
-@mcp.tool()
-async def dynamic_list_set_order(
+async def dynamic_list_sort_by_column(
     column_title: Annotated[str, "Visible column title to sort by using 1C УстановитьПорядок(<ЗаголовокКолонки>)"],
     name: Annotated[str, "Dynamic list/table technical name"] = "Список",
     title: Annotated[str, "Dynamic list/table visible title"] = "",
@@ -4758,8 +4712,8 @@ async def dynamic_list_set_order(
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
-    """Sort a dynamic list by visible column title via the 1C test-client API."""
-    return await _bridge_call_recorded(session_id, "dynamic_list_set_order", {"name": name, "title": title, "column_title": column_title, "max_depth": max_depth})
+    """Quickly sort the active dynamic list by a visible column title via the 1C test-client API УстановитьПорядок; this is not the settings-form Sort tab."""
+    return await _bridge_call_recorded(session_id, "dynamic_list_sort_by_column", {"name": name, "title": title, "column_title": column_title, "max_depth": max_depth})
 
 
 @mcp.tool()
@@ -4839,13 +4793,13 @@ async def dynamic_list_clear_settings(
 
 
 @mcp.tool()
-async def dynamic_list_open_form_settings(
+async def form_open_settings(
     button: Annotated[str, "Optional exact 1C button name/title; empty tries Изменить форму buttons"] = "",
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
-    """Open form customization via 'Изменить форму'."""
-    return await _bridge_call_recorded(session_id, "dynamic_list_open_form_settings", {"button": button})
+    """Open the current form customization dialog via 'Изменить форму'."""
+    return await _bridge_call_recorded(session_id, "form_open_settings", {"button": button})
 
 
 @mcp.tool()
