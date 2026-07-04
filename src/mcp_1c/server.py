@@ -4716,6 +4716,26 @@ async def dynamic_list_set_settings(
 
 
 @mcp.tool()
+async def dynamic_list_current_settings(
+    section: Annotated[str, "Settings section to read: 'filter' (Отбор), 'order' (Сортировка), 'conditional' (Условное оформление), 'group' (Группировка)"] = "filter",
+    close: Annotated[bool, "Close the settings form after reading"] = False,
+    max_depth: Annotated[int, "Maximum UI search depth"] = 30,
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Open the dynamic-list settings form and read currently configured filter/order/etc. items.
+
+    This reads the selected section's configured elements table, not the 'Доступные поля' table.
+    Use dynamic_list_settings_available_fields when you need fields that can be added.
+    """
+    return await _bridge_call_recorded(session_id, "dynamic_list_current_settings", {
+        "section": section,
+        "close": close,
+        "max_depth": max_depth,
+    })
+
+
+@mcp.tool()
 async def dynamic_list_sort_by_column(
     column_title: Annotated[str, "Visible column title to sort by using 1C УстановитьПорядок(<ЗаголовокКолонки>)"],
     name: Annotated[str, "Dynamic list/table technical name"] = "Список",
