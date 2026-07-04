@@ -4459,7 +4459,15 @@ def _match_metadata_object(item: dict[str, str], query: str) -> bool:
 async def _load_metadata_objects_from_catalog(session_id: str, limit: int) -> dict[str, Any]:
     navigation_link = "e1cib/list/Справочник.ИдентификаторыОбъектовМетаданных"
     await _bridge_call_recorded(session_id, "open_navigation_link", {"navigation_link": navigation_link})
-    await _bridge_call_recorded(session_id, "click_button", {"name": "ФормаСписок", "search_by_title": False})
+    list_mode_warning = ""
+    try:
+        await _bridge_call_recorded(session_id, "click_button", {"name": "ФормаСписок", "search_by_title": False})
+    except Exception as exc:
+        # Some configurations/forms do not expose the standard flat-list button
+        # (or are already in list mode).  The catalog reader is used in error
+        # hints, so absence of this convenience command must not make the whole
+        # tool unusable; continue with the currently displayed list.
+        list_mode_warning = f"Could not switch catalog to flat list via ФормаСписок: {exc}"
     rows_result = await _bridge_call_recorded(session_id, "table_rows", {"name": "Список", "title": "", "limit": limit, "max_depth": 8})
     rows = rows_result.get("rows", []) if isinstance(rows_result, dict) else []
     parsed_rows = [_table_row_pairs(row) for row in rows]
@@ -4484,6 +4492,7 @@ async def _load_metadata_objects_from_catalog(session_id: str, limit: int) -> di
         "source": "Справочник.ИдентификаторыОбъектовМетаданных",
         "loaded_at": datetime.now().isoformat(timespec="seconds"),
         "limit": limit,
+        "warnings": [list_mode_warning] if list_mode_warning else [],
     }
 
 
@@ -4515,6 +4524,22 @@ async def metadata_objects_from_catalog(
     all_objects = catalog_data["objects"]
     searchable = all_objects if include_groups else [item for item in all_objects if item["is_group"] != "Да"]
     matches = [item for item in searchable if _match_metadata_object(item, query)]
+    warnings = list(catalog_data.get("warnings", []))
+    fallback_search_used = False
+    if not matches and query:
+        # If the form cannot be switched to flat-list mode, the initial read may
+        # see only top-level groups.  Try the live list search before returning an
+        # empty result; this keeps the tool useful for navigation-error hints.
+        try:
+            await _bridge_call_recorded(session_id, "dynamic_list_find", {"text": query, "name": "Список", "title": "", "max_depth": 8})
+            current = await _bridge_call_recorded(session_id, "table_current_row", {"name": "Список", "title": "", "max_depth": 8})
+            row = _table_row_pairs(current.get("row", current) if isinstance(current, dict) else current)
+            item = _metadata_object_from_row(row)
+            if item and _match_metadata_object(item, query) and (include_groups or item.get("is_group") != "Да"):
+                matches = [item]
+                fallback_search_used = True
+        except Exception as exc:
+            warnings.append(f"Live catalog search fallback failed: {exc}")
     return {
         "found": bool(matches),
         "cache_hit": cache_hit,
@@ -4523,6 +4548,7 @@ async def metadata_objects_from_catalog(
         "matched_count": len(matches),
         "returned_count": min(len(matches), max_results),
         "truncated": len(matches) > max_results,
+        "fallback_search_used": fallback_search_used,
         "type_counts": catalog_data["type_counts"],
         "rows_count": catalog_data["rows_count"],
         "non_deleted_rows_count": catalog_data["non_deleted_rows_count"],
@@ -4532,6 +4558,7 @@ async def metadata_objects_from_catalog(
         "navigation_link": catalog_data["navigation_link"],
         "source": catalog_data["source"],
         "loaded_at": catalog_data["loaded_at"],
+        "warnings": warnings,
     }
 
 
