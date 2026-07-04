@@ -86,7 +86,7 @@ EXPECTED_NEW_TOOLS = {
     "table_begin_edit",
     "table_end_edit",
     "table_editing_state",
-    "dynamic_list_filter_by_current_value",
+    "dynamic_list_find",
     "rag_sources_add_from_directory",
     "rag_source_roots_list",
     "rag_available_configurations",
