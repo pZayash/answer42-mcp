@@ -19,6 +19,8 @@ from mcp_1c.server import (
     _cf_marker_matches,
     _decode_log_bytes,
     _load_global_registry_unlocked,
+    _metadata_objects_catalog_self_entry,
+    _match_metadata_object,
     _ensure_restored_session,
     _extract_error_lines,
     _test_client_startup_error_from_logs,
@@ -368,6 +370,16 @@ def test_selected_new_tool_schemas():
     assert tools["tabular_document_state_display"].inputSchema["properties"]["max_depth"]["default"] == 8
     assert tools["search_objects"].inputSchema["properties"]["limit"]["default"] == 50
     assert tools["search_objects"].inputSchema["properties"]["max_depth"]["default"] == 8
+
+
+def test_metadata_objects_catalog_self_entry_is_searchable():
+    item = _metadata_objects_catalog_self_entry()
+    assert item["full_name"] == "Справочник.ИдентификаторыОбъектовМетаданных"
+    assert item["type"] == "Справочник"
+    assert item["name"] == "ИдентификаторыОбъектовМетаданных"
+    assert item["is_group"] == "Нет"
+    assert _match_metadata_object(item, "ИдентификаторыОбъектовМетаданных")
+    assert _match_metadata_object(item, "metadata") is False
 
 
 def test_ui_tree_summary_reports_truncation_and_hidden_children():
