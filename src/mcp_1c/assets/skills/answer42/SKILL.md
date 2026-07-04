@@ -49,7 +49,7 @@ description: "Работа с MCP Answer42 для 1С UI automation"
 - Linux: X11/Xvfb использовать только для скриншотов и окна 1С, не для ввода/кликов/автоматизации.
 - Windows: Answer42 должен запускаться в интерактивной desktop-сессии пользователя; Windows service/headless/заблокированный RDP-сеанс для UI automation и screenshot ненадёжен.
 - Для ссылочных полей предпочитай стандартную форму выбора 1С (`choose_field_from_list`, `choose_field_first_row`, `choose_current_row`), а не ввод строки.
-- `execute_window_command` — только для явных навигационных ссылок `e1cib/...`. Не передавай туда псевдокоманды/команды формы вроде `ФормаНайти`, `СледующаяСтрока`, `СписокВывестиСписок`; для них нужны отдельные first-class MCP tools.
+- `open_navigation_link` — только для явных навигационных ссылок `e1cib/...`. Не передавай туда псевдокоманды/команды формы вроде `ФормаНайти`, `СледующаяСтрока`, `СписокВывестиСписок`; для них нужны отдельные first-class MCP tools. Если навигационная ссылка некорректна, tool сам попробует подсказать похожие объекты через `rag_lookup_object`, `rag_query` и `metadata_objects_from_catalog`.
 - После каждого действия проверяй диагностику результата: `client_diagnostics.user_messages`, `error_info`, `modal_title`, `modal_buttons`, `modal_text`, `modal_texts`, `modal_is_error_window`.
 - Не закрывай автоматически сложные диалоги с несколькими кнопками (`OK`, `Restart`, `Finish`, `Yes/No/Cancel`). Допустимо автозакрытие только простых предупреждений/ошибок с одной кнопкой закрытия.
 - Для динамических списков предпочитай `table_move_row`, `table_current_row`, `table_selected_rows`, `table_cell_text`; `table_rows` использует навигационный fallback, но на больших списках может быть дорогим.
@@ -99,10 +99,12 @@ start_session(
 
 ## Навигация
 
-- Открывай формы/списки через `execute_window_command` с `e1cib/list/...` или `e1cib/app/...`, когда доступно.
+- Открывай формы/списки через `open_navigation_link` с `e1cib/list/...` или `e1cib/app/...`, когда доступно.
 - Для поиска объектов используй `find_object`, `activate_object`, `ui_tree`. `ui_tree` по умолчанию показывает только видимые/активные для пользователя элементы и всегда добавляет `visible/available/enabled/read_only`; для полной диагностики скрытых страниц/элементов передавай `include_hidden=true`.
-- Для команд формы используй специализированные MCP tools (`table_move_row`, `dynamic_list_*`, `click_button`, `activate_object` и т.п.). Для навигационных команд предпочитай `command_interface_search/commands`, для команд конкретного объекта — `object_command_panel/object_context_menu`; `command_bar` — низкоуровневая диагностика. Не прокидывай имена команд в `execute_window_command`.
+- Для команд формы используй специализированные MCP tools (`table_move_row`, `dynamic_list_*`, `click_button`, `activate_object` и т.п.). Для навигационных команд предпочитай `command_interface_search/commands`, для команд конкретного объекта — `object_command_panel/object_context_menu`; `command_bar` — низкоуровневая диагностика. Не прокидывай имена команд в `open_navigation_link`.
 - `dynamic_list_output`, `dynamic_list_open_settings`, `dynamic_list_clear_settings`, `form_open_settings` нажимают кнопки формы через test-client API (`НайтиКнопку` + `Нажать()`), а не выполняют имена команд через `ВыполнитьКоманду()`. Если авто-кандидат не подходит, передавай `button` — техническое имя или заголовок кнопки.
+- Для поиска правильных имён метаданных используй `metadata_objects_from_catalog(query=...)` как live fallback к RAG. Он сначала пробует `dynamic_list_output` и парсинг табличного документа (`source_method="dynamic_list_output"`), а если команда вывода недоступна — читает список через навигацию (`source_method="table_rows"`). На больших динамических списках это может быть заметно дороже, но устойчивее к виртуальной подгрузке строк.
+- Если `open_navigation_link` вернул блок `Возможно, вы имели в виду:`, используй предложенную `e1cib/list/...`/`e1cib/app/...` ссылку вместо повторной ручной догадки.
 
 ## Динамические списки: добавление вложенных полей через «Изменить форму»
 
