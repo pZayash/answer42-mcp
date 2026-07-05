@@ -5,7 +5,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 class RagStore:
@@ -25,7 +25,7 @@ class RagStore:
                 """
                 CREATE TABLE IF NOT EXISTS schema_info(version INTEGER NOT NULL);
                 DELETE FROM schema_info;
-                INSERT INTO schema_info(version) VALUES (3);
+                INSERT INTO schema_info(version) VALUES (4);
 
                 CREATE TABLE IF NOT EXISTS sources(
                   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -195,6 +195,15 @@ class RagStore:
                   chunk_id UNINDEXED
                 );
 
+                CREATE TABLE IF NOT EXISTS rag_embeddings(
+                  chunk_id INTEGER PRIMARY KEY,
+                  model TEXT NOT NULL,
+                  dim INTEGER NOT NULL,
+                  vector_json TEXT NOT NULL,
+                  text_hash TEXT NOT NULL,
+                  FOREIGN KEY(chunk_id) REFERENCES rag_chunks(id) ON DELETE CASCADE
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_objects_source_name ON metadata_objects(source_id, full_name);
                 CREATE INDEX IF NOT EXISTS idx_objects_kind ON metadata_objects(kind);
                 CREATE INDEX IF NOT EXISTS idx_attrs_object ON attributes(object_id);
@@ -210,6 +219,17 @@ class RagStore:
                 con.execute("ALTER TABLE attributes ADD COLUMN role TEXT NOT NULL DEFAULT 'attribute'")
 
     def clear_index_for_source(self, con: sqlite3.Connection, source_id: int) -> None:
+        con.execute(
+            """
+            DELETE FROM rag_embeddings
+            WHERE chunk_id IN (
+              SELECT rc.id
+              FROM rag_chunks rc JOIN metadata_objects mo ON mo.id=rc.object_id
+              WHERE mo.source_id=?
+            )
+            """,
+            (source_id,),
+        )
         con.execute(
             """
             DELETE FROM search_fts

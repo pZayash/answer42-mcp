@@ -76,6 +76,91 @@ def test_index_help_html_pages(tmp_path: Path):
     assert any(row["kind"] == "Справка" and row["object_full_name"] == "Обработка.PL_ИзменениеВремениБекапирования" for row in found["fts"])
 
 
+def test_index_designer_ext_help_html_pages(tmp_path: Path):
+    root = tmp_path / "src"
+    (root / "Configuration").mkdir(parents=True)
+    (root / "Configuration" / "Configuration.xml").write_text(
+        "<MetaDataObject><Configuration><name>Test</name></Configuration></MetaDataObject>",
+        encoding="utf-8",
+    )
+    report_dir = root / "Reports" / "ОборотноСальдоваяВедомостьПоСчету"
+    (report_dir / "Ext" / "Help").mkdir(parents=True)
+    (root / "Reports" / "ОборотноСальдоваяВедомостьПоСчету.xml").write_text(
+        "<MetaDataObject><Report><name>ОборотноСальдоваяВедомостьПоСчету</name></Report></MetaDataObject>",
+        encoding="utf-8",
+    )
+    (report_dir / "Ext" / "Help" / "ru.html").write_text(
+        dedent(
+            """
+            <html><body><h1>Отчет &quot;Оборотно-сальдовая ведомость по счету&quot;</h1>
+            <p>Отчет предназначен для формирования оборотно-сальдовой ведомости по выбранному счету.</p></body></html>
+            """
+        ).strip(),
+        encoding="utf-8",
+    )
+
+    svc = RagService(tmp_path / "rag.sqlite")
+    svc.add_source("SRC", str(root), kind="configuration", format="designer_xml")
+    svc.create_snapshot("SRC-only", sources=["SRC"])
+    result = svc.build_index(snapshot="SRC-only")
+    assert result["help_pages"] == 1
+
+    found = svc.query("оборотно сальдовая ведомость по счету справка", snapshot="SRC-only")
+    assert any(row["kind"] == "Справка" and row["object_full_name"] == "Отчет.ОборотноСальдоваяВедомостьПоСчету" for row in found["fts"])
+
+
+def test_split_1c_identifier_variants_are_indexed(tmp_path: Path):
+    root = tmp_path / "src"
+    (root / "Configuration").mkdir(parents=True)
+    (root / "Configuration" / "Configuration.mdo").write_text(
+        "<MetaDataObject><Configuration><name>Test</name></Configuration></MetaDataObject>",
+        encoding="utf-8",
+    )
+    (root / "Reports").mkdir(parents=True)
+    (root / "Reports" / "ОборотноСальдоваяВедомостьПоСчету.xml").write_text(
+        "<MetaDataObject><Report><name>ОборотноСальдоваяВедомостьПоСчету</name></Report></MetaDataObject>",
+        encoding="utf-8",
+    )
+
+    svc = RagService(tmp_path / "rag.sqlite")
+    svc.add_source("SRC", str(root), kind="configuration", format="designer_xml")
+    svc.create_snapshot("SRC-only", sources=["SRC"])
+    svc.build_index(snapshot="SRC-only")
+
+    found = svc.query("Оборотно Сальдовая Ведомость По Счету", snapshot="SRC-only")
+    assert any(row["object_full_name"] == "Отчет.ОборотноСальдоваяВедомостьПоСчету" for row in found["fts"])
+    assert any(row["object_full_name"] == "Отчет.ОборотноСальдоваяВедомостьПоСчету" for row in found["semantic"])
+
+
+def test_rag_query_returns_semantic_results(tmp_path: Path):
+    root = tmp_path / "src"
+    (root / "Configuration").mkdir(parents=True)
+    (root / "Configuration" / "Configuration.mdo").write_text(
+        "<MetaDataObject><Configuration><name>Test</name></Configuration></MetaDataObject>",
+        encoding="utf-8",
+    )
+    report_dir = root / "Reports" / "РасчетыСПоставщиками"
+    (report_dir / "Help").mkdir(parents=True)
+    (report_dir / "РасчетыСПоставщиками.mdo").write_text(
+        "<MetaDataObject><Report><name>РасчетыСПоставщиками</name></Report></MetaDataObject>",
+        encoding="utf-8",
+    )
+    (report_dir / "Help" / "ru.html").write_text(
+        "<html><body>Задолженность перед поставщиками и подрядчиками.</body></html>",
+        encoding="utf-8",
+    )
+
+    svc = RagService(tmp_path / "rag.sqlite")
+    svc.add_source("SRC", str(root), kind="configuration")
+    svc.create_snapshot("SRC-only", sources=["SRC"])
+    result = svc.build_index(snapshot="SRC-only")
+    assert result["chunks"] >= 2
+
+    found = svc.query("поставщики задолженность", snapshot="SRC-only")
+    assert found["semantic"]
+    assert any(row["object_full_name"] == "Отчет.РасчетыСПоставщиками" for row in found["semantic"])
+
+
 def test_index_register_roles_and_dcs_fields(tmp_path: Path):
     root = tmp_path / "src"
     (root / "Configuration").mkdir(parents=True)
