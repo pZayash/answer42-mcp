@@ -34,6 +34,7 @@ from mcp_1c.server import (
     _is_placeholder_password,
     _normalize_connection_mode,
     _effective_dump_connection,
+    _is_ignored_runtime_extension_name,
     _json_list,
     _parse_users_plain_text,
     _rag_diagnostic,
@@ -364,6 +365,9 @@ def test_selected_new_tool_schemas():
     assert tools["rag_session_autoconfigure"].inputSchema["properties"]["snapshot_name"]["default"] == ""
     assert tools["rag_session_autoconfigure"].inputSchema["properties"]["build_index"]["default"] is True
     assert tools["rag_session_autoconfigure"].inputSchema["properties"]["sync_sources"]["default"] is True
+    assert tools["rag_session_autoconfigure"].inputSchema["properties"]["dump_username"]["default"] == ""
+    assert tools["rag_session_autoconfigure"].inputSchema["properties"]["dump_password"]["default"] == ""
+    assert tools["rag_session_autoconfigure"].inputSchema["properties"]["dump_all_extensions"]["default"] is True
     assert "connection_mode" not in tools["start_session"].inputSchema["properties"]
     assert "connection_value" not in tools["start_session"].inputSchema["properties"]
     assert tools["credentials_save"].inputSchema["required"] == ["url", "username", "password"]
@@ -803,6 +807,57 @@ def test_connection_mode_normalization(tmp_path):
     assert _normalize_connection_mode("auto", str(file_ib), "") == "file"
     assert _normalize_connection_mode("server", "cluster/ib", "") == "server"
     assert _normalize_connection_mode("auto", "cluster/ib", "") == "server"
+
+
+
+
+
+
+def test_ignored_runtime_extension_names_skip_ef_prefix():
+    assert _is_ignored_runtime_extension_name("EF_60033159")
+    assert _is_ignored_runtime_extension_name("ef_00_00843470")
+    assert not _is_ignored_runtime_extension_name("MCP")
+    assert not _is_ignored_runtime_extension_name("ConnectionToSM")
+
+
+def test_dump_all_extensions_to_xml_uses_designer_all_extensions(monkeypatch, tmp_path):
+    from mcp_1c.rag import dump as rag_dump
+
+    platform_dir = tmp_path / "platform"
+    platform_dir.mkdir()
+    (platform_dir / "1cv8").write_text("", encoding="utf-8")
+    output_dir = tmp_path / "extensions"
+
+    captured = {}
+
+    def fake_run(argv, *, timeout=600, display=""):
+        captured["argv"] = argv
+        captured["display"] = display
+        ext_dir = output_dir / "TestExt"
+        ext_dir.mkdir(parents=True)
+        (ext_dir / "Configuration.xml").write_text("<MetaDataObject/>", encoding="utf-8")
+        (ext_dir / "CommonModules.xml").write_text("<x/>", encoding="utf-8")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(rag_dump, "_run_designer", fake_run)
+    monkeypatch.setattr(rag_dump, "_find_free_display", lambda: ":77")
+
+    result = rag_dump.dump_all_extensions_to_xml(
+        platform_dir,
+        "server",
+        "cluster/ib",
+        output_dir,
+        "Admin",
+        "secret",
+    )
+
+    assert "/S" in captured["argv"]
+    assert "cluster/ib" in captured["argv"]
+    assert "-AllExtensions" in captured["argv"]
+    assert captured["display"] == ":77"
+    assert result["extensions_count"] == 1
+    assert result["extensions"][0]["name"] == "TestExt"
+    assert result["extensions"][0]["files_count"] == 2
 
 
 def test_json_list_accepts_json_and_delimited_strings():
