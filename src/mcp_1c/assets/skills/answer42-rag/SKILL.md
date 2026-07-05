@@ -30,13 +30,16 @@ rag_session_autoconfigure()
 ### Если подходящего источника нет — fallback-выгрузка
 
 `rag_session_autoconfigure(dump_if_missing=true)` при отсутствии точного совпадения:
-- Для прямого подключения (`/S` или `/F`) — выгружает конфигурацию и расширения через Designer `DumpConfigToFiles`.
+- Для прямого подключения (`/S` или `/F`) — выгружает конфигурацию через Designer `DumpConfigToFiles`, а все установленные расширения одним Designer-вызовом `DumpConfigToFiles -AllExtensions` (по умолчанию `dump_all_extensions=true`).
 - Для веб-сессий (`/WS`) — нужно передать `dump_connection_value="server/ib"` или `file_infobase_path="/path/to/ib"`.
+- Если direct-подключение использует другие креды, чем web-публикация (например multitenant/separated-data база), передай `dump_username`/`dump_password`; иначе будут переиспользованы креды live-сессии.
 - Можно передать `cf_files`/`cfe_files` — они загружаются во временную файловую базу, выгружаются в XML, временная база удаляется.
+- Расширения с именами `EF_*` считаются служебными/fresh patch и не регистрируются в RAG snapshot.
+- Если нужно не выгружать все live-расширения (например, их слишком много), передай `dump_all_extensions=false`.
 
 ```text
 # Прямое серверное подключение
-rag_session_autoconfigure(dump_if_missing=true, dump_connection_value="<DIRECT_SERVER_INFOBASE>")
+rag_session_autoconfigure(dump_if_missing=true, dump_connection_value="<DIRECT_SERVER_INFOBASE>", dump_username="<DUMP_USERNAME>", dump_password="<DUMP_PASSWORD>")
 
 # Из CF/CFE файлов
 rag_session_autoconfigure(dump_if_missing=true, cf_files="config.cf", cfe_files="ext1.cfe,ext2.cfe")

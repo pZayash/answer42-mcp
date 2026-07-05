@@ -35,7 +35,7 @@ from . import release_helper
 from .bridge import OneCBridgeServer
 from .credentials import get_store as _credentials_store
 from .rag import RagService
-from .rag.dump import dump_cf_to_xml, dump_infobase_to_xml
+from .rag.dump import dump_all_extensions_to_xml, dump_cf_to_xml, dump_infobase_to_xml
 from .window_control import active_1c_window_geometry as _active_windows_1c_window_geometry
 from .window_control import maximize_test_client_window as _maximize_external_window
 from .recorder import RecordingSession
@@ -1767,6 +1767,11 @@ def _dump_source_name(prefix: str, runtime_name: str, runtime_version: str, used
     return name
 
 
+def _is_ignored_runtime_extension_name(name: str) -> bool:
+    """Return True for service/fresh patch extensions that should not be added to RAG snapshots."""
+    return str(name or "").casefold().startswith("ef_")
+
+
 def _rag_match_needs_dump(match: dict[str, Any], target_version: str) -> bool:
     if not match.get("matched"):
         return True
@@ -1868,6 +1873,9 @@ async def rag_session_autoconfigure(
     dump_connection_mode: Annotated[str, "auto | server | file-direct; required for dumping when current session uses a web URL"] = "auto",
     dump_connection_value: Annotated[str, "Direct server/infobase (/S) or file infobase path (/F) used only for source dumping"] = "",
     file_infobase_path: Annotated[str, "Alias for dump_connection_value when dumping from a file infobase"] = "",
+    dump_username: Annotated[str, "Optional infobase username for direct Designer dump; defaults to session username"] = "",
+    dump_password: Annotated[str, "Optional infobase password for direct Designer dump; defaults to session password"] = "",
+    dump_all_extensions: Annotated[bool, "Dump all installed extensions via Designer -AllExtensions when dump_if_missing is enabled"] = True,
     cf_files: Annotated[str, "Optional JSON/comma list of .cf files to load into temporary file IBs and dump"] = "",
     cfe_files: Annotated[str, "Optional JSON/comma list of .cfe files to load into temporary file IBs and dump as extensions"] = "",
     dump_root: Annotated[str, "Optional persistent directory for generated RAG source dumps"] = "",
@@ -1886,6 +1894,9 @@ async def rag_session_autoconfigure(
     Dumping requires a direct Designer connection: server infobase (`server/ib`) or
     file infobase path.  Web `/WS` URLs cannot be dumped; for web sessions pass
     `dump_connection_value`, `file_infobase_path`, or `cf_files`/`cfe_files`.
+    If the direct dump connection has different users than the web publication
+    (for example multitenant/separated-data infobases), pass `dump_username` and
+    `dump_password`; otherwise the current session credentials are reused.
     Temporary infobases created from CF/CFE files are deleted after dumping by
     default; generated XML source directories are kept under `dump_root` (or the
     Answer42 temp rag-dumps directory) because the RAG index references them.
@@ -1898,6 +1909,9 @@ async def rag_session_autoconfigure(
         "dump_connection_mode": dump_connection_mode,
         "dump_connection_value": dump_connection_value,
         "file_infobase_path": file_infobase_path,
+        "dump_username": dump_username,
+        "dump_password": "***" if dump_password else "",
+        "dump_all_extensions": dump_all_extensions,
         "cf_files": cf_files,
         "cfe_files": cfe_files,
         "dump_root": dump_root,
@@ -1919,6 +1933,7 @@ async def rag_session_autoconfigure(
     config_name = str(config.get("configuration_name") or "")
     config_version = str(config.get("configuration_version") or "")
     installed_extensions = extensions_info.get("extensions", []) if isinstance(extensions_info, dict) else []
+    extensions_from_designer = False
 
     warnings: list[str] = []
     dumps: list[dict[str, Any]] = []
@@ -1928,6 +1943,8 @@ async def rag_session_autoconfigure(
 
     cf_paths = [Path(item).expanduser() for item in _json_list(cf_files)]
     cfe_paths = [Path(item).expanduser() for item in _json_list(cfe_files)]
+    effective_dump_username = dump_username if dump_username else sess.username
+    effective_dump_password = dump_password if dump_password else sess.password
 
     if dump_if_missing and cf_paths:
         dump_base_dir = dump_base_dir or _rag_dump_root(session_id, dump_root)
@@ -1973,6 +1990,56 @@ async def rag_session_autoconfigure(
             sources.append(generated)
             extension_sources.append(generated)
 
+    if dump_if_missing and dump_all_extensions:
+        dump_mode, dump_value = _effective_dump_connection(sess, dump_connection_mode, dump_connection_value, file_infobase_path)
+        dump_base_dir = dump_base_dir or _rag_dump_root(session_id, dump_root)
+        all_ext_dir = dump_base_dir / "dump_all_extensions"
+        all_ext_dump_info = await asyncio.to_thread(
+            dump_all_extensions_to_xml,
+            sess.platform_dir,
+            dump_mode,
+            dump_value,
+            all_ext_dir,
+            effective_dump_username,
+            effective_dump_password,
+            sess.display,
+        )
+        dumps.append(all_ext_dump_info | {"source_name": "dump_all_extensions", "source_kind": "extensions_container"})
+        ignored_extensions: list[str] = []
+        for ext_dump in all_ext_dump_info.get("extensions", []) or []:
+            out_dir = Path(str(ext_dump.get("output_dir") or ""))
+            ext_meta = _source_metadata(str(out_dir))
+            ext_name = ext_meta.get("name") or str(ext_dump.get("name") or out_dir.name)
+            ext_version = ext_meta.get("version") or ""
+            if _is_ignored_runtime_extension_name(ext_name):
+                ignored_extensions.append(ext_name)
+                dumps.append(ext_dump | {
+                    "source_kind": "extension",
+                    "runtime_name": ext_name,
+                    "runtime_version": ext_version,
+                    "ignored": True,
+                    "ignore_reason": "EF_* service/fresh patch extension",
+                })
+                continue
+            source_name = _dump_source_name("ext", ext_name, ext_version, used_generated_names)
+            generated = _register_dumped_source(source_name, out_dir, "extension")
+            generated["runtime_name"] = ext_name
+            generated["runtime_version"] = ext_version
+            generated_sources.append(generated)
+            sources.append(generated)
+            extension_sources.append(generated)
+            dumps.append(ext_dump | {
+                "source_name": source_name,
+                "source_kind": "extension",
+                "runtime_name": ext_name,
+                "runtime_version": ext_version,
+            })
+            if not any(str(ext.get("name") or "") == ext_name for ext in installed_extensions):
+                installed_extensions.append({"name": ext_name, "version": ext_version, "source": "designer_all_extensions"})
+        if ignored_extensions:
+            warnings.append(f"Ignored {len(ignored_extensions)} EF_* service/fresh patch extensions from Designer dump.")
+        extensions_from_designer = bool(all_ext_dump_info.get("extensions_count"))
+
     base_match = _best_rag_source_match(config_name, config_version, base_sources, None)
     if _rag_match_needs_dump(base_match, config_version):
         if not dump_if_missing:
@@ -1990,8 +2057,8 @@ async def rag_session_autoconfigure(
                 dump_mode,
                 dump_value,
                 out_dir,
-                sess.username,
-                sess.password,
+                effective_dump_username,
+                effective_dump_password,
                 None,
                 sess.display,
             )
@@ -2013,6 +2080,15 @@ async def rag_session_autoconfigure(
     extension_source_names: list[str] = []
     extension_matches: list[dict[str, Any]] = []
     used_extension_sources: set[str] = set()
+    filtered_installed_extensions = []
+    for extension in installed_extensions:
+        ext_name = str(extension.get("name") or "")
+        if _is_ignored_runtime_extension_name(ext_name):
+            warnings.append(f"Ignored EF_* service/fresh patch extension {ext_name!r} from runtime extensions list.")
+            continue
+        filtered_installed_extensions.append(extension)
+
+    installed_extensions = filtered_installed_extensions
     for extension in installed_extensions:
         ext_name = str(extension.get("name") or "")
         ext_version = str(extension.get("version") or "")
@@ -2030,8 +2106,8 @@ async def rag_session_autoconfigure(
                     dump_mode,
                     dump_value,
                     out_dir,
-                    sess.username,
-                    sess.password,
+                    effective_dump_username,
+                    effective_dump_password,
                     ext_name,
                     sess.display,
                 )
@@ -2057,8 +2133,8 @@ async def rag_session_autoconfigure(
             extension_source_names.append(source_name)
             used_extension_sources.add(source_name)
 
-    effective_snapshot_name = snapshot_name or "+".join([_safe_snapshot_part(config_name), *(_safe_snapshot_part(ext.get("name", "")) for ext in installed_extensions)])
-    if len(effective_snapshot_name) > 180:
+    effective_snapshot_name = snapshot_name or "+".join([_safe_snapshot_part(config_name), *(_safe_snapshot_part(ext.get("name", "")) for ext in installed_extensions[:20])])
+    if len(effective_snapshot_name) > 180 or len(installed_extensions) > 20:
         digest = hashlib.sha1(effective_snapshot_name.encode("utf-8")).hexdigest()[:10]
         effective_snapshot_name = f"{_safe_snapshot_part(config_name)}+extensions-{digest}"
 
@@ -2076,6 +2152,7 @@ async def rag_session_autoconfigure(
         "warnings": warnings,
         "runtime_configuration": {"name": config_name, "version": config_version, "match": _rag_match_public(base_match)},
         "runtime_extensions": installed_extensions,
+        "extensions_from_designer": extensions_from_designer,
         "extension_matches": extension_matches,
         "dumps": dumps,
         "generated_sources": generated_sources,

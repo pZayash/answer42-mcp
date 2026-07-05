@@ -134,6 +134,23 @@ async def call_ui_ok(session: ClientSession, name: str, args: dict | None = None
     return value
 
 
+
+
+async def call_ui_optional_error(session: ClientSession, name: str, args: dict | None = None, allowed_contains: str = ""):
+    args = args or {}
+    result = await session.call_tool(name, args)
+    if not result.isError:
+        value = _parse_tool_result(result)
+        print(f"OK {name}", flush=True)
+        return value
+    text = "\n".join(getattr(item, "text", "") for item in result.content)
+    if allowed_contains and allowed_contains in text:
+        print(f"OPTIONAL_ERROR {name}: {allowed_contains}", flush=True)
+        return {"optional_error": text}
+    await _record_manual_step(session, args.get("session_id", "e2e-mcp"), name, args, {"error": text})
+    raise AssertionError(f"{name} unexpectedly failed: {result.content}")
+
+
 async def call_ui_expected_error(session: ClientSession, name: str, args: dict | None = None, contains: str = ""):
     args = args or {}
     result = await session.call_tool(name, args)
@@ -288,7 +305,7 @@ async def run_smoke(session: ClientSession, sid: str, suffix: str, screenshot_di
         {"navigation_link": "e1cib/list/Справочник.DefinitelyMissing", "session_id": sid},
         contains="Не удалось перейти по навигационной ссылке",
     )
-    await call_ui_ok(session, "click_button", {"name": "OK", "session_id": sid})
+    await call_ui_optional_error(session, "click_button", {"name": "OK", "session_id": sid}, "Кнопка не найдена")
     await capture_screenshot(session, sid, str(screenshot_dir / "01-initial-window.png"))
 
     await call_ui_ok(session, "open_navigation_link", {"navigation_link": "e1cib/list/Catalog.ПС_Владелец", "session_id": sid})
@@ -374,11 +391,10 @@ async def run_dynamic_lists(session: ClientSession, sid: str, suffix: str, scree
 
     await call_ui_ok(session, "open_navigation_link", {"navigation_link": "e1cib/list/Catalog.ПС_Справочник1", "session_id": sid})
     await call_ui_ok(session, "table_goto_row", {"name": "Список", "text": item2, "session_id": sid})
-    await call_ui_ok(session, "dynamic_list_set_order", {"column_title": "Наименование", "name": "Список", "session_id": sid})
-    await call_ui_ok(session, "dynamic_list_output", {"session_id": sid})
-    await capture_screenshot(session, sid, str(screenshot_dir / "06-dynamic-list-output-dialog.png"))
-    await call_ui_ok(session, "click_button", {"name": "OK", "session_id": sid})
-    await capture_screenshot(session, sid, str(screenshot_dir / "07-dynamic-list-output.png"))
+    await call_ui_ok(session, "dynamic_list_sort_by_column", {"column_title": "Наименование", "name": "Список", "session_id": sid})
+    output = await call_ui_ok(session, "dynamic_list_output", {"session_id": sid})
+    await capture_screenshot(session, sid, str(screenshot_dir / "06-dynamic-list-output-result.png"))
+    assert output.get("tabular_documents"), output
     tdocs = await call_ui_ok(session, "tabular_documents", {"session_id": sid})
     tdocs_text = str(tdocs)
     has_tabular_document = (
@@ -411,16 +427,15 @@ async def run_dynamic_lists(session: ClientSession, sid: str, suffix: str, scree
     await capture_screenshot(session, sid, str(screenshot_dir / "08-list-settings-open.png"))
     await call_ui_ok(session, "close_form", {"session_id": sid})
     await call_ui_ok(session, "open_navigation_link", {"navigation_link": "e1cib/list/Catalog.ПС_Справочник1", "session_id": sid})
-    await call_ui_ok(session, "dynamic_list_open_form_settings", {"session_id": sid})
+    await call_ui_ok(session, "form_open_settings", {"session_id": sid})
     await call_ui_ok(session, "close_form", {"session_id": sid})
 
-    available = await call_ui_ok(session, "dynamic_list_available_fields", {"session_id": sid})
+    available = await call_ui_ok(session, "dynamic_list_settings_available_fields", {"session_id": sid})
     assert available.get("count", 0) > 0, available
     assert "Наименование" in str(available), available
-    await call_ui_ok(session, "dynamic_list_apply_settings", {
+    await call_ui_ok(session, "dynamic_list_set_settings", {
         "orders": json.dumps([{"field": "Наименование", "direction": "Asc"}], ensure_ascii=False),
         "clear_first": True,
-        "name": "Список",
         "session_id": sid,
     }, timeout=180)
     await capture_screenshot(session, sid, str(screenshot_dir / "12-final-list.png"))

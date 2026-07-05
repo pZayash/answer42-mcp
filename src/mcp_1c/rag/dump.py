@@ -102,6 +102,76 @@ def dump_infobase_to_xml(
     }
 
 
+def dump_all_extensions_to_xml(
+    platform_dir: Path,
+    connection_mode: str,
+    connection_value: str,
+    output_dir: Path,
+    username: str = "",
+    password: str = "",
+    display: str = "",
+) -> dict[str, Any]:
+    """Dump all live infobase extensions to XML source subdirectories via Designer.
+
+    1C Designer supports the ``DumpConfigToFiles ... -AllExtensions`` switch.
+    Unlike dumping the main configuration, the output directory becomes a
+    container with one child directory per extension; each child is a normal
+    Designer XML source tree with its own ``Configuration.xml``.
+    """
+    onec = str(platform_dir / os_support.executable_name("1cv8"))
+    if not Path(onec).exists():
+        raise FileNotFoundError(f"1cv8 (Designer/thick client) not found: {onec}")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    effective_display = display or _find_free_display()
+
+    argv = [onec, "DESIGNER"]
+    if connection_mode == "server":
+        argv.extend(["/S", connection_value])
+    elif connection_mode in ("file-direct", "file"):
+        argv.extend(["/F", connection_value])
+    else:
+        raise ValueError(f"Unsupported connection mode for dump: {connection_mode!r}")
+
+    if username:
+        argv.extend(["/N", username])
+    if password:
+        argv.extend(["/P", password])
+
+    argv.extend(["/DumpConfigToFiles", str(output_dir)])
+    argv.extend(["-Format", "Hierarchical", "-AllExtensions"])
+    argv.extend(["/DisableStartupDialogs", "/DisableStartupMessages"])
+
+    completed = _run_designer(argv, display=effective_display)
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"Designer DumpConfigToFiles all extensions failed (rc={completed.returncode}): "
+            f"stdout={completed.stdout!r} stderr={completed.stderr!r}"
+        )
+
+    extensions: list[dict[str, Any]] = []
+    for child in sorted((item for item in output_dir.iterdir() if item.is_dir()), key=lambda item: item.name.casefold()):
+        if not (child / "Configuration.xml").exists():
+            continue
+        extensions.append({
+            "name": child.name,
+            "output_dir": str(child),
+            "files_count": sum(1 for item in child.rglob("*") if item.is_file()),
+        })
+
+    file_count = sum(1 for item in output_dir.rglob("*") if item.is_file())
+    LOGGER.info("Dumped %d extension files (%d extensions) to %s", file_count, len(extensions), output_dir)
+    return {
+        "output_dir": str(output_dir),
+        "connection_mode": connection_mode,
+        "connection_value": connection_value,
+        "all_extensions": True,
+        "extensions_count": len(extensions),
+        "extensions": extensions,
+        "files_count": file_count,
+    }
+
+
 def dump_cf_to_xml(
     platform_dir: Path,
     cf_path: Path,
