@@ -1,16 +1,22 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import math
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
 
 from .detect import detect_source_format, discover_source_roots
 from .model import SourceInfo
-from .parsers import navigation_for_object, normalize_query, parse_source
+from .parsers import navigation_for_object, normalize_query, parse_source, search_text_variants
 from .store import RagStore, json_dumps, row_to_dict
 
 DEFAULT_RAG_DB = Path(os.environ.get("MCP_1C_RAG_DB", "build/rag/onec-rag.sqlite"))
+EMBEDDING_MODEL = "answer42-local-hash-v1"
+EMBEDDING_DIM = 256
 
 
 class RagService:
@@ -246,9 +252,11 @@ class RagService:
                     nav = navigation_for_object(obj.full_name, obj.kind)
                     if nav:
                         con.execute("INSERT INTO navigation_links(object_id, kind, url) VALUES(?,?,?)", (oid, nav[0], nav[1]))
-                    chunk_text = f"{obj.full_name} {obj.synonym or ''} {obj.kind} navigation {nav[1] if nav else ''}"
+                    object_terms = search_text_variants(obj.full_name, obj.name, obj.synonym)
+                    chunk_text = f"{obj.full_name} {object_terms} {obj.synonym or ''} {obj.kind} navigation {nav[1] if nav else ''}"
                     cid = _insert_chunk(con, snapshot_id, oid, "object", chunk_text, obj.source_path, {"source": src["name"]})
                     con.execute("INSERT INTO search_fts(text, object_full_name, kind, source_path, chunk_id) VALUES(?,?,?,?,?)", (chunk_text, obj.full_name, obj.kind, obj.source_path, cid))
+                    _insert_embedding(con, cid, chunk_text)
                     counts["chunks"] += 1
                     if obj.synonym:
                         _insert_business_term(con, snapshot_id, obj.synonym, oid, 0.7, "object synonym")
@@ -295,15 +303,23 @@ class RagService:
                     chunk_text = " ".join(part for part in text_parts if part)
                     cid = _insert_chunk(con, snapshot_id, oid, "dcs_field", chunk_text, dcs_field.source_path, {"source": src["name"], "schema": dcs_field.schema_name})
                     con.execute("INSERT INTO search_fts(text, object_full_name, kind, source_path, chunk_id) VALUES(?,?,?,?,?)", (chunk_text, dcs_field.object_full_name, "СКД", dcs_field.source_path, cid))
+                    _insert_embedding(con, cid, chunk_text)
                     counts["chunks"] += 1
                 for help_page in parsed.help_pages:
                     oid = object_ids.get(help_page.object_full_name)
                     if not oid:
                         continue
-                    text_parts = [help_page.object_full_name, "справка", help_page.language, help_page.title or "", help_page.text or ""]
+                    object_row = con.execute("SELECT name, synonym FROM metadata_objects WHERE id=?", (oid,)).fetchone()
+                    object_terms = search_text_variants(
+                        help_page.object_full_name,
+                        object_row["name"] if object_row else None,
+                        object_row["synonym"] if object_row else None,
+                    )
+                    text_parts = [help_page.object_full_name, object_terms, "справка", help_page.language, help_page.title or "", help_page.text or ""]
                     chunk_text = "\n".join(part for part in text_parts if part)
                     cid = _insert_chunk(con, snapshot_id, oid, "help", chunk_text, help_page.source_path, {"source": src["name"], "language": help_page.language, "title": help_page.title})
                     con.execute("INSERT INTO search_fts(text, object_full_name, kind, source_path, chunk_id) VALUES(?,?,?,?,?)", (chunk_text, help_page.object_full_name, "Справка", help_page.source_path, cid))
+                    _insert_embedding(con, cid, chunk_text)
                     counts["help_pages"] += 1
                     counts["chunks"] += 1
         return {"db_path": self.db_path, **counts}
@@ -497,7 +513,45 @@ class RagService:
                         seen.add(key)
                     if len(fts_rows) >= limit:
                         break
-        return {"query": text, "snapshot": snapshot, "terms": term_rows, "fts": fts_rows}
+            semantic_rows = self._semantic_query(con, q, snapshot_id, limit)
+        return {"query": text, "snapshot": snapshot, "terms": term_rows, "fts": fts_rows, "semantic": semantic_rows}
+
+    def _semantic_query(self, con, query: str, snapshot_id: int | None, limit: int) -> list[dict[str, Any]]:
+        query_vector = _embedding_vector(query)
+        params: list[Any] = [EMBEDDING_MODEL]
+        snapshot_filter = ""
+        if snapshot_id is not None:
+            snapshot_filter = "AND rc.snapshot_id=?"
+            params.append(snapshot_id)
+        rows = con.execute(
+            f"""
+            SELECT rc.text, rc.source_path, mo.full_name AS object_full_name, mo.kind,
+                   re.vector_json
+            FROM rag_embeddings re
+            JOIN rag_chunks rc ON rc.id=re.chunk_id
+            LEFT JOIN metadata_objects mo ON mo.id=rc.object_id
+            WHERE re.model=? {snapshot_filter}
+            """,
+            params,
+        )
+        scored: list[dict[str, Any]] = []
+        for row in rows:
+            vector = json.loads(row["vector_json"])
+            score = _cosine(query_vector, vector)
+            if score <= 0:
+                continue
+            scored.append(
+                {
+                    "text": row["text"],
+                    "object_full_name": row["object_full_name"],
+                    "kind": row["kind"],
+                    "source_path": row["source_path"],
+                    "score": score,
+                    "model": EMBEDDING_MODEL,
+                }
+            )
+        scored.sort(key=lambda item: item["score"], reverse=True)
+        return scored[:limit]
 
 
 def _git_commit(path: Path) -> str | None:
@@ -528,6 +582,48 @@ def _snapshot_row(con, snapshot: str | int):
 def _insert_chunk(con, snapshot_id, object_id, chunk_type, text, source_path, metadata) -> int:
     cur = con.execute("INSERT INTO rag_chunks(snapshot_id,object_id,chunk_type,text,source_path,metadata_json) VALUES(?,?,?,?,?,?)", (snapshot_id, object_id, chunk_type, text, source_path, json_dumps(metadata)))
     return cur.lastrowid
+
+
+def _insert_embedding(con, chunk_id: int, text: str) -> None:
+    con.execute(
+        """
+        INSERT INTO rag_embeddings(chunk_id,model,dim,vector_json,text_hash)
+        VALUES(?,?,?,?,?)
+        """,
+        (
+            chunk_id,
+            EMBEDDING_MODEL,
+            EMBEDDING_DIM,
+            json.dumps(_embedding_vector(text), separators=(",", ":")),
+            hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest(),
+        ),
+    )
+
+
+def _embedding_vector(text: str) -> list[float]:
+    vector = [0.0] * EMBEDDING_DIM
+    normalized = normalize_query(text)
+    tokens = re.findall(r"[\w]+", normalized, flags=re.UNICODE)
+    features: list[str] = []
+    for token in tokens:
+        if len(token) <= 2:
+            features.append("tok:" + token)
+            continue
+        features.append("tok:" + token)
+        for size in (3, 4):
+            if len(token) >= size:
+                features.extend(f"ng{size}:" + token[pos : pos + size] for pos in range(len(token) - size + 1))
+    for feature in features:
+        digest = hashlib.blake2b(feature.encode("utf-8"), digest_size=8).digest()
+        bucket = int.from_bytes(digest[:4], "little") % EMBEDDING_DIM
+        sign = 1.0 if digest[4] & 1 else -1.0
+        vector[bucket] += sign
+    norm = math.sqrt(sum(value * value for value in vector)) or 1.0
+    return [round(value / norm, 6) for value in vector]
+
+
+def _cosine(left: list[float], right: list[float]) -> float:
+    return sum(a * b for a, b in zip(left, right, strict=False))
 
 
 def _insert_business_term(con, snapshot_id, term, object_id, confidence, evidence) -> None:

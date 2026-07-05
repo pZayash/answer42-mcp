@@ -341,17 +341,20 @@ def _extract_embedded_data_composition_fields(parsed: ParsedSource, root: ET.Ele
 
 
 def _extract_help_pages(parsed: ParsedSource, object_dir: Path, full: str) -> None:
-    help_dir = object_dir / "Help"
-    if not help_dir.exists():
-        return
-    for page in sorted(help_dir.glob("*.html")):
-        raw = page.read_text(encoding="utf-8", errors="ignore")
-        title_match = re.search(r"<title[^>]*>(.*?)</title>", raw, flags=re.IGNORECASE | re.DOTALL)
-        h1_match = re.search(r"<h1[^>]*>(.*?)</h1>", raw, flags=re.IGNORECASE | re.DOTALL)
-        title = _html_to_text((title_match or h1_match).group(1)) if (title_match or h1_match) else None
-        text = _html_to_text(raw)
-        if text:
-            parsed.help_pages.append(HelpPage(full, page.stem, title, text, str(page), {"file": page.name}))
+    # EDT exports usually keep help as <Object>/Help/*.html, while Designer
+    # hierarchical dumps keep it under <Object>/Ext/Help/*.html with
+    # <Object>/Ext/Help.xml next to the language-specific pages.
+    for help_dir in (object_dir / "Help", object_dir / "Ext" / "Help"):
+        if not help_dir.exists():
+            continue
+        for page in sorted(help_dir.glob("*.html")):
+            raw = page.read_text(encoding="utf-8-sig", errors="ignore")
+            title_match = re.search(r"<title[^>]*>(.*?)</title>", raw, flags=re.IGNORECASE | re.DOTALL)
+            h1_match = re.search(r"<h1[^>]*>(.*?)</h1>", raw, flags=re.IGNORECASE | re.DOTALL)
+            title = _html_to_text((title_match or h1_match).group(1)) if (title_match or h1_match) else None
+            text = _html_to_text(raw)
+            if text:
+                parsed.help_pages.append(HelpPage(full, page.stem, title, text, str(page), {"file": page.name}))
 
 
 def _html_to_text(raw: str) -> str:
@@ -410,5 +413,38 @@ def navigation_for_object(full_name: str, kind: str) -> tuple[str, str] | None:
     return None
 
 
+def split_1c_identifier(text: str | None) -> str:
+    """Return a human-readable variant of 1C metadata identifiers.
+
+    1C metadata names are commonly written as CamelCase identifiers, e.g.
+    ``ОборотноСальдоваяВедомостьПоСчету``.  FTS tokenizers do not split those
+    words automatically, so business queries like ``оборотно сальдовая`` miss
+    chunks that contain only the technical identifier.  Keep this helper small
+    and deterministic: it does not add domain synonyms, it only exposes words
+    already present in the metadata name.
+    """
+    if not text:
+        return ""
+    value = re.sub(r"[._/\\:-]+", " ", text)
+    value = re.sub(r"(?<=[а-яёa-z0-9])(?=[А-ЯЁA-Z])", " ", value)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def search_text_variants(*values: str | None) -> str:
+    parts: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if not value:
+            continue
+        for part in (value, split_1c_identifier(value)):
+            normalized = normalize_query(part)
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                parts.append(part)
+    return " ".join(parts)
+
+
 def normalize_query(text: str) -> str:
-    return re.sub(r"\s+", " ", text.strip().lower().replace("ё", "е"))
+    text = text.replace("ё", "е")
+    text = re.sub(r"[\u2010-\u2015–—−-]+", " ", text)
+    return re.sub(r"\s+", " ", text.strip().lower())
