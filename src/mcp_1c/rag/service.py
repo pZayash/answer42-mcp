@@ -266,6 +266,12 @@ class RagService:
                         continue
                     con.execute("INSERT INTO attributes(object_id,name,type_name,synonym,required,source_path,role,raw_json) VALUES(?,?,?,?,?,?,?,?)", (oid, attr.name, attr.type_name, attr.synonym, attr.required, attr.source_path, attr.role, json_dumps(attr.raw)))
                     counts["attributes"] += 1
+                    text_parts = [attr.object_full_name, attr.role, attr.name, search_text_variants(attr.name, attr.synonym), attr.synonym or "", attr.type_name or ""]
+                    chunk_text = " ".join(part for part in text_parts if part)
+                    cid = _insert_chunk(con, snapshot_id, oid, "attribute", chunk_text, attr.source_path, {"source": src["name"], "role": attr.role})
+                    con.execute("INSERT INTO search_fts(text, object_full_name, kind, source_path, chunk_id) VALUES(?,?,?,?,?)", (chunk_text, attr.object_full_name, "Реквизит", attr.source_path, cid))
+                    _insert_embedding(con, cid, chunk_text)
+                    counts["chunks"] += 1
                 for tp in parsed.table_parts:
                     oid = object_ids.get(tp.object_full_name)
                     if not oid:
@@ -284,12 +290,25 @@ class RagService:
                     cur = con.execute("INSERT INTO forms(object_id,name,kind,source_path,raw_json) VALUES(?,?,?,?,?)", (oid, form.name, form.kind, form.source_path, json_dumps(form.raw)))
                     form_ids[(form.object_full_name, form.name)] = cur.lastrowid
                     counts["forms"] += 1
+                    text_parts = [form.object_full_name, "форма", form.name, search_text_variants(form.name), form.kind or ""]
+                    chunk_text = " ".join(part for part in text_parts if part)
+                    cid = _insert_chunk(con, snapshot_id, oid, "form", chunk_text, form.source_path, {"source": src["name"], "form": form.name})
+                    con.execute("INSERT INTO search_fts(text, object_full_name, kind, source_path, chunk_id) VALUES(?,?,?,?,?)", (chunk_text, form.object_full_name, "Форма", form.source_path, cid))
+                    _insert_embedding(con, cid, chunk_text)
+                    counts["chunks"] += 1
                 for elem in parsed.form_elements:
                     fid = form_ids.get((elem.object_full_name, elem.form_name))
                     if not fid:
                         continue
                     con.execute("INSERT INTO form_elements(form_id,name,element_type,title,data_path,command_name,parent_name,source_path,raw_json) VALUES(?,?,?,?,?,?,?,?,?)", (fid, elem.name, elem.element_type, elem.title, elem.data_path, elem.command_name, elem.parent_name, elem.source_path, json_dumps(elem.raw)))
                     counts["form_elements"] += 1
+                    oid = object_ids.get(elem.object_full_name)
+                    text_parts = [elem.object_full_name, "элемент формы", elem.form_name, elem.name, search_text_variants(elem.name, elem.title, elem.data_path), elem.title or "", elem.data_path or "", elem.command_name or "", elem.element_type or ""]
+                    chunk_text = " ".join(part for part in text_parts if part)
+                    cid = _insert_chunk(con, snapshot_id, oid, "form_element", chunk_text, elem.source_path, {"source": src["name"], "form": elem.form_name, "element": elem.name})
+                    con.execute("INSERT INTO search_fts(text, object_full_name, kind, source_path, chunk_id) VALUES(?,?,?,?,?)", (chunk_text, elem.object_full_name, "ЭлементФормы", elem.source_path, cid))
+                    _insert_embedding(con, cid, chunk_text)
+                    counts["chunks"] += 1
                 for dcs_field in parsed.data_composition_fields:
                     oid = object_ids.get(dcs_field.object_full_name)
                     if not oid:

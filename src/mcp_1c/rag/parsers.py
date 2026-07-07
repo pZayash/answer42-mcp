@@ -21,6 +21,8 @@ from .model import (
 )
 
 KIND_DIRS = {
+    "Constants": "Константа",
+    "CommonForms": "ОбщаяФорма",
     "Catalogs": "Справочник",
     "Documents": "Документ",
     "DataProcessors": "Обработка",
@@ -32,6 +34,8 @@ KIND_DIRS = {
     "AccountingRegisters": "РегистрБухгалтерии",
     "CalculationRegisters": "РегистрРасчета",
 }
+
+FORM_FILE_NAMES = {"Form.form", "Form.xml"}
 
 
 def _strip_ns(tag: str) -> str:
@@ -199,7 +203,10 @@ def parse_edt_source(source: SourceInfo) -> ParsedSource:
             parsed.objects.append(MetadataObject(full, ru_kind, obj_name, synonym, str(mdo), source.format, hierarchical, [o for o in owners if o]))
             if root is not None:
                 _extract_metadata_children(parsed, root, full, mdo)
-            _extract_forms(parsed, mdo.parent, full)
+            if ru_kind == "ОбщаяФорма":
+                _extract_common_form(parsed, mdo.parent, full)
+            else:
+                _extract_forms(parsed, mdo.parent, full)
             _extract_data_composition_schemas(parsed, mdo.parent, full)
             _extract_help_pages(parsed, mdo.parent, full)
     return parsed
@@ -231,10 +238,24 @@ def parse_designer_xml_source(source: SourceInfo) -> ParsedSource:
             if root is not None:
                 _extract_metadata_children(parsed, root, full, xml)
             object_dir = xml.parent if xml.parent != base else base / xml.stem
-            _extract_forms(parsed, object_dir, full)
+            if ru_kind == "ОбщаяФорма":
+                _extract_common_form(parsed, object_dir, full)
+            else:
+                _extract_forms(parsed, object_dir, full)
             _extract_data_composition_schemas(parsed, object_dir, full)
             _extract_help_pages(parsed, object_dir, full)
     return parsed
+
+
+def _extract_common_form(parsed: ParsedSource, object_dir: Path, full: str) -> None:
+    form_xml = _find_form_file(object_dir)
+    parsed.forms.append(Form(full, "Форма", "CommonForm", str(form_xml) if form_xml.exists() else str(object_dir)))
+    if not form_xml.exists():
+        return
+    root = _xml_root(form_xml)
+    if root is not None:
+        _extract_form_elements(parsed, root, full, "Форма", form_xml)
+        _extract_embedded_data_composition_fields(parsed, root, full, "Форма", form_xml)
 
 
 def _extract_metadata_children(parsed: ParsedSource, root: ET.Element, full: str, source_path: Path) -> None:
@@ -273,9 +294,7 @@ def _extract_forms(parsed: ParsedSource, object_dir: Path, full: str) -> None:
         return
     for form_dir in sorted([p for p in forms_dir.iterdir() if p.is_dir()]):
         form_name = form_dir.name
-        form_xml = form_dir / "Ext" / "Form.xml"
-        if not form_xml.exists():
-            form_xml = form_dir / "Form.xml"
+        form_xml = _find_form_file(form_dir)
         parsed.forms.append(Form(full, form_name, None, str(form_xml) if form_xml.exists() else str(form_dir)))
         if form_xml.exists():
             root = _xml_root(form_xml)
@@ -284,28 +303,53 @@ def _extract_forms(parsed: ParsedSource, object_dir: Path, full: str) -> None:
                 _extract_embedded_data_composition_fields(parsed, root, full, form_name, form_xml)
 
 
+def _find_form_file(form_dir: Path) -> Path:
+    for candidate_dir in (form_dir / "Ext", form_dir):
+        for name in FORM_FILE_NAMES:
+            form_file = candidate_dir / name
+            if form_file.exists():
+                return form_file
+    return form_dir / "Ext" / "Form.xml"
+
+
 def _extract_form_elements(parsed: ParsedSource, root: ET.Element, full: str, form_name: str, source_path: Path) -> None:
     for elem in root.iter():
         tag = _strip_ns(elem.tag)
         low = tag.lower()
-        if low not in {"element", "item", "items", "button", "command", "field", "table", "group"}:
+        if low not in {"element", "item", "items", "button", "command", "field", "table", "group", "extendedtooltip", "contextmenu"}:
             continue
         name = elem.attrib.get("name") or elem.attrib.get("Name") or _first_text(elem, ["name", "Name"])
         if not name:
             continue
+        title = elem.attrib.get("title") or elem.attrib.get("Title") or _first_text(elem, ["title", "Title", "caption", "Caption"])
+        data_path = _form_data_path(elem)
         parsed.form_elements.append(
             FormElement(
                 full,
                 form_name,
                 name,
                 tag,
-                elem.attrib.get("title") or elem.attrib.get("Title") or _first_text(elem, ["title", "Title", "caption", "Caption"]),
-                elem.attrib.get("dataPath") or elem.attrib.get("path") or _first_text(elem, ["dataPath", "path", "DataPath"]),
+                title,
+                data_path,
                 elem.attrib.get("commandName") or _first_text(elem, ["commandName", "CommandName"]),
                 None,
                 str(source_path),
             )
         )
+
+
+def _form_data_path(elem: ET.Element) -> str | None:
+    direct = elem.attrib.get("dataPath") or elem.attrib.get("path") or _direct_text(elem, ["dataPath", "path", "DataPath"])
+    if direct:
+        return direct
+    for child in list(elem):
+        if _strip_ns(child.tag).lower() == "datapath":
+            segments = [_text(segment) for segment in child.iter() if _strip_ns(segment.tag).lower() in {"segments", "segment"}]
+            values = [value for value in segments if value]
+            if values:
+                return ".".join(values)
+            return _text(child)
+    return None
 
 
 def _extract_embedded_data_composition_fields(parsed: ParsedSource, root: ET.Element, full: str, form_name: str, source_path: Path) -> None:
