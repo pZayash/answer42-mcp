@@ -353,6 +353,115 @@ def test_lookup_form_element_types_for_auto_generated_forms(tmp_path: Path):
     assert item["object_full_name"] == "Справочник.Пользователи"
 
 
+def test_index_constants_common_forms_and_form_elements(tmp_path: Path):
+    root = tmp_path / "src"
+    (root / "Configuration").mkdir(parents=True)
+    (root / "Configuration" / "Configuration.mdo").write_text(
+        "<MetaDataObject><Configuration><name>Test</name></Configuration></MetaDataObject>",
+        encoding="utf-8",
+    )
+    const_dir = root / "Constants" / "PL_ДатаОкончанияИспользованияРезервногоOpenid"
+    const_dir.mkdir(parents=True)
+    (const_dir / "PL_ДатаОкончанияИспользованияРезервногоOpenid.mdo").write_text(
+        dedent(
+            """
+            <mdclass:Constant xmlns:mdclass="http://g5.1c.ru/v8/dt/metadata/mdclass">
+              <name>PL_ДатаОкончанияИспользованияРезервногоOpenid</name>
+              <synonym><key>ru</key><value>Дата окончания использования резервного openid</value></synonym>
+              <type><types>Date</types></type>
+            </mdclass:Constant>
+            """
+        ).strip(),
+        encoding="utf-8",
+    )
+    form_dir = root / "CommonForms" / "PL_Настройки"
+    form_dir.mkdir(parents=True)
+    (form_dir / "PL_Настройки.mdo").write_text(
+        "<mdclass:CommonForm xmlns:mdclass=\"http://g5.1c.ru/v8/dt/metadata/mdclass\"><name>PL_Настройки</name><synonym><key>ru</key><value>Настройки Platform42</value></synonym></mdclass:CommonForm>",
+        encoding="utf-8",
+    )
+    (form_dir / "Form.form").write_text(
+        dedent(
+            """
+            <form:Form xmlns:form="http://g5.1c.ru/v8/dt/form" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+              <items xsi:type="form:FormField">
+                <name>PL_ДатаОкончанияИспользованияРезервногоOpenid</name>
+                <dataPath xsi:type="form:DataPath">
+                  <segments>НаборКонстант.PL_ДатаОкончанияИспользованияРезервногоOpenid</segments>
+                </dataPath>
+                <type>InputField</type>
+              </items>
+            </form:Form>
+            """
+        ).strip(),
+        encoding="utf-8",
+    )
+
+    svc = RagService(tmp_path / "rag.sqlite")
+    svc.add_source("SRC", str(root), kind="configuration")
+    svc.create_snapshot("SRC-only", sources=["SRC"])
+    result = svc.build_index(snapshot="SRC-only")
+    assert result["objects"] >= 2
+    assert result["forms"] == 1
+    assert result["form_elements"] == 1
+
+    constant = svc.lookup_object("Константа.PL_ДатаОкончанияИспользованияРезервногоOpenid", snapshot="SRC-only")
+    assert constant["matches"]
+    assert constant["matches"][0]["synonym"] == "Дата окончания использования резервного openid"
+
+    found_by_synonym = svc.query("Дата окончания использования резервного openid", snapshot="SRC-only")
+    assert any(row["object_full_name"] == "Константа.PL_ДатаОкончанияИспользованияРезервногоOpenid" for row in found_by_synonym["fts"])
+
+    found_form_element = svc.query("НаборКонстант PL_ДатаОкончанияИспользованияРезервногоOpenid", snapshot="SRC-only")
+    assert any(row["kind"] == "ЭлементФормы" and row["object_full_name"] == "ОбщаяФорма.PL_Настройки" for row in found_form_element["fts"])
+
+
+
+def test_designer_xml_common_form_ext_form_elements(tmp_path: Path):
+    root = tmp_path / "src"
+    (root / "Configuration").mkdir(parents=True)
+    (root / "Configuration" / "Configuration.xml").write_text(
+        "<MetaDataObject><Configuration><Name>Test</Name></Configuration></MetaDataObject>",
+        encoding="utf-8",
+    )
+    (root / "CommonForms" / "PL_Настройки" / "Ext").mkdir(parents=True)
+    (root / "CommonForms" / "PL_Настройки.xml").write_text(
+        dedent(
+            """
+            <MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses">
+              <CommonForm>
+                <Properties><Name>PL_Настройки</Name><Synonym><v8:item xmlns:v8="http://v8.1c.ru/8.1/data/core"><v8:lang>ru</v8:lang><v8:content>Настройки Platform42</v8:content></v8:item></Synonym></Properties>
+              </CommonForm>
+            </MetaDataObject>
+            """
+        ).strip(),
+        encoding="utf-8",
+    )
+    (root / "CommonForms" / "PL_Настройки" / "Ext" / "Form.xml").write_text(
+        dedent(
+            """
+            <Form xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+              <items xsi:type="InputField">
+                <name>PL_ДатаОкончанияИспользованияРезервногоOpenid</name>
+                <title>Дата окончания использования резервного openid</title>
+                <dataPath>НаборКонстант.PL_ДатаОкончанияИспользованияРезервногоOpenid</dataPath>
+              </items>
+            </Form>
+            """
+        ).strip(),
+        encoding="utf-8",
+    )
+
+    svc = RagService(tmp_path / "rag.sqlite")
+    svc.add_source("SRC", str(root), kind="configuration", format="designer_xml")
+    svc.create_snapshot("SRC-only", sources=["SRC"])
+    result = svc.build_index(snapshot="SRC-only")
+    assert result["forms"] == 1
+    assert result["form_elements"] == 1
+
+    found = svc.query("НаборКонстант PL_ДатаОкончанияИспользованияРезервногоOpenid", snapshot="SRC-only")
+    assert any(row["kind"] == "ЭлементФормы" and row["object_full_name"] == "ОбщаяФорма.PL_Настройки" for row in found["fts"])
+
 
 def test_designer_xml_catalog_children_from_configurator_dump(tmp_path: Path):
     src = Path("src/client_cf").resolve()
