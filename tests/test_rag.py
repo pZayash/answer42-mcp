@@ -531,3 +531,28 @@ def test_query_respects_snapshot_filter_and_reports_index_state(tmp_path: Path):
     assert svc.snapshot_has_index("S1")
     assert svc.query("Партнеры", snapshot="S1")["fts"]
     assert not svc.query("Партнеры", snapshot="S2")["fts"]
+
+
+def test_cleanup_generated_source_files_under_removes_dump_dir_but_keeps_index(tmp_path: Path):
+    dump_root = tmp_path / "answer42-rag-dumps" / "session-20260708"
+    src_dir = dump_root / "dump_base"
+    src_dir.mkdir(parents=True)
+    (src_dir / "Configuration.xml").write_text("<MetaDataObject/>\n", encoding="utf-8")
+
+    svc = RagService(tmp_path / "rag.sqlite")
+    src = svc.add_source("dump_base", str(src_dir), kind="configuration", format="designer_xml")
+    with svc.store.connect() as con:
+        con.execute(
+            "INSERT INTO metadata_objects(source_id, full_name, kind, name, source_format) VALUES(?,?,?,?,?)",
+            (src["id"], "Справочник.Тест", "Справочник", "Тест", "designer_xml"),
+        )
+
+    result = svc.cleanup_generated_source_files_under(dump_root)
+
+    assert result["removed_paths"] == [str(dump_root.resolve())]
+    assert not dump_root.exists()
+    sources = svc.list_sources()
+    assert sources[0]["name"] == "dump_base"
+    with svc.store.connect() as con:
+        row = con.execute("SELECT full_name FROM metadata_objects WHERE source_id=?", (src["id"],)).fetchone()
+    assert row["full_name"] == "Справочник.Тест"

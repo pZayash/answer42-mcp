@@ -5,6 +5,7 @@ import json
 import math
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -55,6 +56,46 @@ class RagService:
     def list_sources(self) -> list[dict[str, Any]]:
         with self.store.connect() as con:
             return [dict(r) for r in con.execute("SELECT * FROM sources ORDER BY id")]
+
+    def cleanup_generated_source_files_under(self, root: str | Path, *, remove_files: bool = True) -> dict[str, Any]:
+        """Delete generated dump files under *root* while preserving indexed RAG rows.
+
+        The SQLite RAG index is self-contained after ``build_index`` succeeds, so
+        dumped Designer XML source files can be removed to save disk space.  The
+        source registry rows are intentionally kept: they document which source
+        produced the indexed metadata and keep existing snapshots/index rows
+        intact via foreign keys.
+        """
+        root_path = Path(root).expanduser().resolve()
+        referenced_sources: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        with self.store.connect() as con:
+            rows = [dict(r) for r in con.execute("SELECT * FROM sources ORDER BY id")]
+            for row in rows:
+                source_path = Path(str(row.get("path") or "")).expanduser()
+                try:
+                    resolved_source = source_path.resolve()
+                    resolved_source.relative_to(root_path)
+                except (OSError, ValueError):
+                    continue
+                branch = str(row.get("branch") or "")
+                commit_hash = str(row.get("commit_hash") or "")
+                if branch or commit_hash:
+                    skipped.append(row | {"reason": "source looks like a VCS checkout"})
+                    continue
+                referenced_sources.append(row)
+
+        removed_paths: list[str] = []
+        if remove_files and root_path.exists() and referenced_sources:
+            shutil.rmtree(root_path)
+            removed_paths.append(str(root_path))
+        return {
+            "root": str(root_path),
+            "referenced_sources_count": len(referenced_sources),
+            "referenced_sources": referenced_sources,
+            "skipped": skipped,
+            "removed_paths": removed_paths,
+        }
 
     def add_sources_from_directory(self, root: str, prefix: str = "", recursive: bool = True, max_depth: int = 4, watch: bool = False) -> dict[str, Any]:
         discovered = self.discover_sources(root, recursive=recursive, max_depth=max_depth)
