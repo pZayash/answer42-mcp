@@ -1880,6 +1880,7 @@ async def rag_session_autoconfigure(
     cfe_files: Annotated[str, "Optional JSON/comma list of .cfe files to load into temporary file IBs and dump as extensions"] = "",
     dump_root: Annotated[str, "Optional persistent directory for generated RAG source dumps"] = "",
     cleanup_tmp_infobases: Annotated[bool, "Remove temporary file infobases created while loading CF/CFE files"] = True,
+    cleanup_generated_sources: Annotated[bool, "Remove generated XML source dumps after a successful RAG index build"] = True,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> dict[str, Any]:
@@ -1898,8 +1899,10 @@ async def rag_session_autoconfigure(
     (for example multitenant/separated-data infobases), pass `dump_username` and
     `dump_password`; otherwise the current session credentials are reused.
     Temporary infobases created from CF/CFE files are deleted after dumping by
-    default; generated XML source directories are kept under `dump_root` (or the
-    Answer42 temp rag-dumps directory) because the RAG index references them.
+    default.  Generated XML source directories are removed after a successful
+    index build by default, because the SQLite RAG index is self-contained; pass
+    `cleanup_generated_sources=false` when the dumped XML source tree should be
+    kept under `dump_root` for inspection or reuse.
     """
     params = {
         "snapshot_name": snapshot_name,
@@ -1916,6 +1919,7 @@ async def rag_session_autoconfigure(
         "cfe_files": cfe_files,
         "dump_root": dump_root,
         "cleanup_tmp_infobases": cleanup_tmp_infobases,
+        "cleanup_generated_sources": cleanup_generated_sources,
     }
     disabled = _rag_require_enabled(session_id, "rag_session_autoconfigure", params)
     if disabled is not None:
@@ -2145,6 +2149,9 @@ async def rag_session_autoconfigure(
     _persist_sessions()
 
     index_result = _RAG.build_index(snapshot=sess.rag_snapshot) if build_index else None
+    cleanup_generated_sources_result = None
+    if cleanup_generated_sources and index_result is not None and dump_base_dir is not None:
+        cleanup_generated_sources_result = _RAG.cleanup_generated_source_files_under(dump_base_dir)
     result = {
         "snapshot": sess.rag_snapshot,
         "snapshot_result": snapshot,
@@ -2157,6 +2164,7 @@ async def rag_session_autoconfigure(
         "dumps": dumps,
         "generated_sources": generated_sources,
         "dump_root": str(dump_base_dir) if dump_base_dir else "",
+        "cleanup_generated_sources": cleanup_generated_sources_result,
         "available_sources_count": len(sources),
         "session_snapshot": sess.rag_snapshot,
     }
