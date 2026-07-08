@@ -44,6 +44,7 @@ from mcp_1c.server import (
     _state_file_for_scope,
     _update_global_session_registry,
     _users_url_for_base_url,
+    _tool_names_for_profile,
     main as mcp_main,
     mcp,
     screenshot,
@@ -909,3 +910,25 @@ def test_tabular_document_file_selection_accepts_requested_format(tmp_path):
     assert selected["saved"] is True
     assert selected["selected"]["copied_to"] == str(requested_pdf)
     assert requested_pdf.read_bytes().startswith(b"%PDF")
+
+
+def test_tool_profile_core_is_compact_and_keeps_common_ui_tools():
+    core = _tool_names_for_profile("core")
+    assert core is not None
+    assert "start_session" in core
+    assert "click_button" in core
+    assert "table_set_field" in core
+    assert "screenshot" in core
+    assert "rag_session_autoconfigure" not in core
+    assert "dynamic_list_output" not in core
+    assert len(core) < 70
+
+
+def test_tool_profile_can_compose_groups():
+    selected = _tool_names_for_profile("core,rag")
+    assert selected is not None
+    assert "start_session" in selected
+    assert "rag_session_autoconfigure" in selected
+    assert "dynamic_list_output" not in selected
+    assert _tool_names_for_profile("full") is None
+    assert _tool_names_for_profile("all") is None

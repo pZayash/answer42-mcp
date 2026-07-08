@@ -63,6 +63,62 @@ _SHARED_FILE_SERVERS_FILE = os_support.runtime_path("ONEC_MCP_SHARED_FILE_SERVER
 _SHARED_FILE_SERVERS_LOCK = os_support.runtime_path("ONEC_MCP_SHARED_FILE_SERVERS_LOCK", "shared-file-servers.lock")
 _METADATA_OBJECTS_CACHE: dict[str, dict[str, Any]] = {}
 
+TOOL_PROFILE_GROUPS: dict[str, set[str]] = {
+    "sessions": {
+        "sessions_list", "session_status", "start_session", "stop_session", "export_eventlog",
+        "credentials_check", "credentials_save", "credentials_remove", "credentials_list", "credentials_titles",
+    },
+    "windows": {"active_window", "windows_list", "activate_window", "goto_start_page", "goto_previous_window", "goto_next_window"},
+    "forms": {
+        "wait_object", "wait_form", "wait_window", "user_messages", "close_user_messages_panel", "current_error_info",
+        "set_file_dialog_result", "clear_file_dialog_result", "field_info", "field_value_text", "field_tooltip",
+        "field_dropdown_items", "form_next_element", "form_previous_element", "form_state", "form_default_button",
+        "wait_form_closed", "object_command_panel", "object_context_menu", "window_command_interface",
+        "command_interface_sections", "command_interface_commands", "command_interface_search", "group_expand", "group_collapse",
+        "group_current_page", "group_activate_page", "group_state", "decoration_links", "decoration_click_link", "decoration_click",
+        "ui_tree", "command_bar", "click_button", "find_object", "search_objects", "get_object", "activate_object",
+        "open_navigation_link", "current_element", "field_dropdown_state", "field_dropdown_close", "toggle_field",
+        "set_field_value", "activate_field", "choose_field_from_list", "choose_field_first_row", "choose_current_row",
+        "set_form_fields", "create_new_item", "save_form", "close_form", "form_open_settings",
+    },
+    "tables": {
+        "table_current_row", "table_selected_rows", "table_cell_text", "table_rows", "table_find_row", "table_goto_row",
+        "table_move_row", "table_add_row", "table_set_field", "table_set_row_values", "table_choose_field_from_list",
+        "table_edit_info", "table_select_all", "table_clear_selection", "table_delete_row", "table_copy_row",
+        "table_toggle_delete_mark", "table_begin_edit", "table_end_edit", "table_editing_state",
+    },
+    "tabular": {"tabular_documents", "tabular_document_text", "tabular_document_save", "tabular_document_state_display"},
+    "dynamic": {
+        "dynamic_list_metadata_available_fields", "dynamic_list_settings_available_fields", "dynamic_list_set_settings",
+        "dynamic_list_current_settings", "dynamic_list_sort_by_column", "dynamic_list_output", "dynamic_list_open_settings",
+        "dynamic_list_find", "dynamic_list_filter_by_current_value", "dynamic_list_clear_settings",
+    },
+    "rag": {
+        "rag_source_add", "rag_sources_add_from_directory", "rag_source_roots_list", "rag_available_configurations",
+        "rag_session_autoconfigure", "rag_sources_list", "rag_snapshot_create", "rag_snapshots_list", "rag_index_build",
+        "rag_lookup_object", "rag_query", "metadata_objects_from_catalog", "metadata_objects_catalog_cache_clear",
+        "configuration_name_version_from_subsystems", "installed_extensions_from_catalog",
+    },
+    "recording": {"recording_start", "recording_capture", "recording_stop", "screenshot"},
+}
+TOOL_PROFILE_CORE: set[str] = TOOL_PROFILE_GROUPS["sessions"] | {
+    "active_window", "windows_list", "activate_window", "goto_start_page", "goto_previous_window", "goto_next_window",
+    "wait_object", "wait_form", "wait_window", "user_messages", "close_user_messages_panel", "current_error_info",
+    "field_info", "field_value_text", "field_dropdown_items", "field_dropdown_state", "field_dropdown_close",
+    "toggle_field", "set_field_value", "activate_field", "choose_field_from_list", "choose_field_first_row", "choose_current_row",
+    "form_state", "form_default_button", "wait_form_closed", "click_button", "find_object", "search_objects", "get_object",
+    "activate_object", "open_navigation_link", "current_element", "table_current_row", "table_selected_rows", "table_cell_text",
+    "table_rows", "table_find_row", "table_goto_row", "table_move_row", "table_add_row", "table_set_field", "table_set_row_values",
+    "table_choose_field_from_list", "table_edit_info", "table_begin_edit", "table_end_edit", "table_editing_state",
+    "tabular_documents", "tabular_document_text", "tabular_document_save", "screenshot",
+}
+TOOL_PROFILE_ALIASES: dict[str, set[str]] = {
+    "core": TOOL_PROFILE_CORE,
+    "ui": TOOL_PROFILE_GROUPS["sessions"] | TOOL_PROFILE_GROUPS["windows"] | TOOL_PROFILE_GROUPS["forms"] | TOOL_PROFILE_GROUPS["tables"] | TOOL_PROFILE_GROUPS["tabular"] | TOOL_PROFILE_GROUPS["recording"],
+    "all": set(),
+    "full": set(),
+}
+
 
 @contextmanager
 def _port_allocation_lock():
@@ -2163,6 +2219,7 @@ async def rag_session_autoconfigure(
         "extension_matches": extension_matches,
         "dumps": dumps,
         "generated_sources": generated_sources,
+        "generated_sources_count": len(generated_sources),
         "dump_root": str(dump_base_dir) if dump_base_dir else "",
         "cleanup_generated_sources": cleanup_generated_sources_result,
         "available_sources_count": len(sources),
@@ -5668,6 +5725,40 @@ def _register_dev_tools(enabled: bool) -> None:
         )
 
 
+def _tool_names_for_profile(profile: str) -> set[str] | None:
+    parts = [part.strip().lower() for part in re.split(r"[,;\s]+", profile or "") if part.strip()]
+    if not parts or any(part in {"all", "full"} for part in parts):
+        return None
+    selected: set[str] = set()
+    unknown: list[str] = []
+    for part in parts:
+        names = TOOL_PROFILE_ALIASES.get(part) or TOOL_PROFILE_GROUPS.get(part)
+        if names is None:
+            unknown.append(part)
+            continue
+        selected.update(names)
+    if unknown:
+        known = sorted({*TOOL_PROFILE_GROUPS, *TOOL_PROFILE_ALIASES})
+        raise ValueError(f"unknown tool profile(s): {', '.join(unknown)}; known profiles: {', '.join(known)}")
+    return selected
+
+
+def _apply_tool_profile(profile: str) -> dict[str, Any]:
+    allowed = _tool_names_for_profile(profile)
+    if allowed is None:
+        return {"profile": profile or "full", "mode": "full", "removed": []}
+    existing = set(getattr(mcp, "_tool_manager")._tools.keys())
+    removed: list[str] = []
+    for name in sorted(existing - allowed):
+        try:
+            mcp.remove_tool(name)
+            removed.append(name)
+        except Exception:
+            pass
+    remaining = sorted(set(getattr(mcp, "_tool_manager")._tools.keys()))
+    return {"profile": profile, "mode": "filtered", "remaining_count": len(remaining), "removed_count": len(removed), "removed": removed}
+
+
 def main(argv: list[str] | None = None) -> None:
     global _RAG_ENABLED, _CREDENTIAL_STORE_ENABLED, _DEV_TOOLS_ENABLED
 
@@ -5738,6 +5829,11 @@ def main(argv: list[str] | None = None) -> None:
         default=os.getenv("ONEC_MCP_SESSION_SCOPE_ID") or os.getenv("ONEC_MCP_SESSION_SCOPE") or "",
         help="enable scoped lock/reconnect mode for the given session scope id; without this flag Answer42 uses legacy no-lock global state",
     )
+    parser.add_argument(
+        "--tool-profile",
+        default=os.getenv("ONEC_MCP_TOOL_PROFILE", "full"),
+        help="comma-separated tool profile groups: core, ui, sessions, windows, forms, tables, tabular, dynamic, rag, recording, full, all",
+    )
     args = parser.parse_args(argv)
 
     _RAG_ENABLED = not args.disable_rag
@@ -5749,6 +5845,8 @@ def main(argv: list[str] | None = None) -> None:
         _register_startup_rag_source_dirs(args.rag_source_dir or [], args.rag_source_prefix, not args.rag_source_no_recursive, args.rag_source_max_depth)
     else:
         logging.info("Built-in Answer42 RAG is disabled")
+    profile_result = _apply_tool_profile(args.tool_profile)
+    logging.info("Tool profile: %s (mode=%s, remaining=%d, removed=%d)", profile_result["profile"], profile_result["mode"], profile_result.get("remaining_count", 0), profile_result.get("removed_count", 0))
     _start_autoreload_watcher(args.dev, args.dev_restart_timeout)
     if args.session_scope:
         _configure_session_scope(args.session_scope)
