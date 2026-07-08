@@ -1397,6 +1397,27 @@ def _walk_ui_tree(node: Any):
         yield from _walk_ui_tree(child)
 
 
+def _tool_result_verbosity() -> str:
+    value = os.getenv("ONEC_MCP_RESULT_VERBOSITY", "compact").strip().lower()
+    if value in {"full", "verbose"}:
+        return "full"
+    return "compact"
+
+
+def _compact_enabled(value: bool | None = None) -> bool:
+    if value is not None:
+        return bool(value)
+    return _tool_result_verbosity() != "full"
+
+
+def _copy_compact_object(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {k: _copy_compact_object(v) for k, v in value.items() if v not in (None, "", [], {})}
+    if isinstance(value, list):
+        return [_copy_compact_object(v) for v in value]
+    return value
+
+
 def _summarize_ui_tree(tree: Any, max_depth: int, include_hidden: bool) -> dict[str, Any]:
     """Return compact diagnostics about omitted/truncated UI tree parts."""
     nodes = list(_walk_ui_tree(tree))
@@ -1418,6 +1439,64 @@ def _summarize_ui_tree(tree: Any, max_depth: int, include_hidden: bool) -> dict[
         "hidden_children_count": hidden_children_total,
         "hidden_nodes_count": len(hidden_nodes),
     }
+
+
+def _compact_ui_node(node: Any, depth: int = 0, max_children: int = 30) -> Any:
+    if not isinstance(node, dict):
+        return node
+    keep_keys = (
+        "type", "name", "title", "text", "value", "presentation", "visible", "available", "enabled", "read_only",
+        "current", "selected", "data_path", "rag_type", "rag", "truncated", "truncated_reason", "hidden_children_count",
+    )
+    result = {key: _copy_compact_object(node[key]) for key in keep_keys if key in node and node.get(key) not in (None, "", [], {})}
+    children = node.get("children") or []
+    if isinstance(children, list) and children:
+        compact_children = [_compact_ui_node(child, depth + 1, max_children=max_children) for child in children[:max_children]]
+        result["children"] = compact_children
+        if len(children) > max_children:
+            result["children_omitted_count"] = len(children) - max_children
+    return result
+
+
+def _compact_rows_result(result: Any, *, include_raw: bool = False) -> Any:
+    if include_raw or not isinstance(result, dict):
+        return result
+    rows = result.get("rows")
+    if not isinstance(rows, list):
+        return result
+    compact_rows = []
+    for row in rows:
+        if not isinstance(row, dict):
+            compact_rows.append(row)
+            continue
+        compact = {key: row[key] for key in ("index", "row", "current", "selected", "expanded", "level") if key in row}
+        pairs = row.get("pairs")
+        if isinstance(pairs, list):
+            compact["values"] = {str(p.get("key", "")): p.get("value", "") for p in pairs if isinstance(p, dict) and p.get("key")}
+        compact_rows.append(compact)
+    out = dict(result)
+    out["rows"] = compact_rows
+    out.setdefault("rows_count", len(compact_rows))
+    return out
+
+
+def _compact_tabular_text_result(result: Any, *, include_raw: bool = False) -> Any:
+    if include_raw or not isinstance(result, dict):
+        return result
+    cells = result.get("cells")
+    if not isinstance(cells, list):
+        return result
+    text_lines: list[str] = []
+    for row in cells:
+        if isinstance(row, list):
+            text_lines.append("\t".join(str(cell) for cell in row))
+        else:
+            text_lines.append(str(row))
+    out = {key: result[key] for key in result if key != "cells"}
+    out["text"] = "\n".join(text_lines)
+    out["rows_count"] = len(cells)
+    out["format"] = "tsv"
+    return out
 
 
 def _metadata_name_from_navigation_url(url: str) -> str:
@@ -3881,6 +3960,7 @@ async def decoration_click(name: Annotated[str, "Decoration technical name"] = "
 async def ui_tree(max_depth: Annotated[int, "Maximum UI tree depth"] = 4,
     include_rag_types: Annotated[bool, "Enrich UI elements with best-effort types from the local RAG index"] = True,
     include_hidden: Annotated[bool, "Include invisible form elements; visible/available flags are always returned"] = False,
+    compact: Annotated[bool | None, "Return compact tree fields; default follows ONEC_MCP_RESULT_VERBOSITY"] = None,
     rag_snapshot: Annotated[str, "Optional RAG snapshot name/id used for type enrichment"] = "",
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
@@ -3903,6 +3983,14 @@ async def ui_tree(max_depth: Annotated[int, "Maximum UI tree depth"] = 4,
                 tree["rag_diagnostic"] = _rag_diagnostic(session_id, rag_snapshot)
         elif isinstance(tree, dict):
             tree["rag_diagnostic"] = _rag_diagnostic(session_id, rag_snapshot)
+    if _compact_enabled(compact) and isinstance(tree, dict):
+        summary = tree.get("tree_summary")
+        compact_tree = _compact_ui_node(tree)
+        if summary:
+            compact_tree["tree_summary"] = summary
+        if tree.get("rag_diagnostic"):
+            compact_tree["rag_diagnostic"] = tree["rag_diagnostic"]
+        return compact_tree
     return tree
 
 
@@ -4209,6 +4297,7 @@ async def tabular_document_text(
     column_end: Annotated[int, "Last column to read; 0 = column_start + max_columns - 1"] = 0,
     max_rows: Annotated[int, "Maximum rows to read when row_end=0; 0 = all rows"] = 50,
     max_columns: Annotated[int, "Maximum columns to read when column_end=0; 0 = all columns"] = 20,
+    compact: Annotated[bool | None, "Return TSV text instead of nested cells; default follows ONEC_MCP_RESULT_VERBOSITY"] = None,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
@@ -4219,7 +4308,8 @@ async def tabular_document_text(
     and analyze the saved PDF/XLSX/TXT/HTML file instead of reading UI cells one
     by one.
     """
-    return await _bridge_call_recorded(session_id, "tabular_document_text", {"name": name, "title": title, "max_depth": max_depth, "row_start": row_start, "row_end": row_end, "column_start": column_start, "column_end": column_end, "max_rows": max_rows, "max_columns": max_columns})
+    result = await _bridge_call_recorded(session_id, "tabular_document_text", {"name": name, "title": title, "max_depth": max_depth, "row_start": row_start, "row_end": row_end, "column_start": column_start, "column_end": column_end, "max_rows": max_rows, "max_columns": max_columns})
+    return _compact_tabular_text_result(result, include_raw=not _compact_enabled(compact))
 
 
 @mcp.tool()
@@ -4412,11 +4502,13 @@ async def table_rows(
     title: Annotated[str, "Table visible title"] = "",
     limit: Annotated[int, "Maximum rows to return"] = 50,
     max_depth: Annotated[int, "Maximum search depth"] = 8,
+    compact: Annotated[bool | None, "Return compact row values; default follows ONEC_MCP_RESULT_VERBOSITY"] = None,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
     """Return rows of a tested table as key/value mappings."""
-    return await _bridge_call_recorded(session_id, "table_rows", {"name": name, "title": title, "limit": limit, "max_depth": max_depth})
+    result = await _bridge_call_recorded(session_id, "table_rows", {"name": name, "title": title, "limit": limit, "max_depth": max_depth})
+    return _compact_rows_result(result, include_raw=not _compact_enabled(compact))
 
 
 def _table_row_pairs(row: Any) -> dict[str, str]:
