@@ -932,3 +932,38 @@ def test_tool_profile_can_compose_groups():
     assert "dynamic_list_output" not in selected
     assert _tool_names_for_profile("full") is None
     assert _tool_names_for_profile("all") is None
+
+
+def test_compact_rows_result_converts_pairs_to_values():
+    from mcp_1c.server import _compact_rows_result
+    result = {
+        "rows": [
+            {"index": 1, "current": True, "pairs": [{"key": "Имя", "value": "Тест"}, {"key": "Код", "value": "001"}], "raw": "big"}
+        ],
+        "more": False,
+    }
+
+    compact = _compact_rows_result(result)
+
+    assert compact["rows"] == [{"index": 1, "current": True, "values": {"Имя": "Тест", "Код": "001"}}]
+    assert compact["rows_count"] == 1
+    assert "raw" not in compact["rows"][0]
+
+
+def test_compact_tabular_text_result_returns_tsv():
+    from mcp_1c.server import _compact_tabular_text_result
+    compact = _compact_tabular_text_result({"cells": [["A", "B"], [1, 2]], "rows": 2})
+
+    assert compact["text"] == "A\tB\n1\t2"
+    assert compact["rows_count"] == 2
+    assert compact["format"] == "tsv"
+    assert "cells" not in compact
+
+
+def test_compact_ui_node_keeps_actionable_fields_and_omits_noise():
+    from mcp_1c.server import _compact_ui_node
+    node = {"type": "button", "name": "Ok", "title": "OK", "debug": "noise", "children": [{"type": "field", "name": "F", "value": "42", "debug": "noise"}]}
+
+    compact = _compact_ui_node(node)
+
+    assert compact == {"type": "button", "name": "Ok", "title": "OK", "children": [{"type": "field", "name": "F", "value": "42"}]}
