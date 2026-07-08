@@ -92,8 +92,7 @@ class RagService:
         return {
             "root": str(root_path),
             "referenced_sources_count": len(referenced_sources),
-            "referenced_sources": referenced_sources,
-            "skipped": skipped,
+            "skipped_count": len(skipped),
             "removed_paths": removed_paths,
         }
 
