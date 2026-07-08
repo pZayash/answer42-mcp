@@ -368,6 +368,7 @@ def test_selected_new_tool_schemas():
     assert tools["rag_session_autoconfigure"].inputSchema["properties"]["dump_username"]["default"] == ""
     assert tools["rag_session_autoconfigure"].inputSchema["properties"]["dump_password"]["default"] == ""
     assert tools["rag_session_autoconfigure"].inputSchema["properties"]["dump_all_extensions"]["default"] is True
+    assert tools["rag_session_autoconfigure"].inputSchema["properties"]["cleanup_generated_sources"]["default"] is True
     assert "connection_mode" not in tools["start_session"].inputSchema["properties"]
     assert "connection_value" not in tools["start_session"].inputSchema["properties"]
     assert tools["credentials_save"].inputSchema["required"] == ["url", "username", "password"]
