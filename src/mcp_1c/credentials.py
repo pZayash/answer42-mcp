@@ -15,6 +15,7 @@ import json
 import logging
 import os
 from pathlib import Path
+
 LOGGER = logging.getLogger(__name__)
 
 DEFAULT_CREDENTIALS_PATH = Path(

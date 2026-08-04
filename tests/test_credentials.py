@@ -1,8 +1,7 @@
 import json
-
 from pathlib import Path
 
-from mcp_1c.credentials import CredentialsStore, DEFAULT_CREDENTIALS_PATH
+from mcp_1c.credentials import DEFAULT_CREDENTIALS_PATH, CredentialsStore
 
 
 def test_default_credentials_path_uses_answer42_name():

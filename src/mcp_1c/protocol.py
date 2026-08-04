@@ -28,7 +28,7 @@ class BridgeResponse:
     error: str | None = None
 
     @classmethod
-    def from_json(cls, data: dict[str, Any]) -> "BridgeResponse":
+    def from_json(cls, data: dict[str, Any]) -> BridgeResponse:
         return cls(
             id=str(data.get("id", "")),
             ok=bool(data.get("ok", False)),

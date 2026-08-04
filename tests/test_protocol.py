@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from mcp_1c.protocol import BridgeRequest, BridgeResponse, MANAGER_PROTOCOL_VERSION
+from mcp_1c.protocol import MANAGER_PROTOCOL_VERSION, BridgeRequest, BridgeResponse
 
 
 def test_manager_protocol_version_is_embedded_in_cf_sources():

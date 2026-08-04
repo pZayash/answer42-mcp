@@ -11,9 +11,9 @@ import logging
 import os
 import subprocess
 import tempfile
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
 
 IS_WINDOWS = os.name == "nt"
 IS_POSIX = os.name == "posix"
@@ -162,22 +162,22 @@ def kill_processes_by_command_substrings(
     log = logger or logging.getLogger(__name__)
     if IS_WINDOWS:
         patterns_json = json.dumps(patterns, ensure_ascii=False)
-        script = r"""
+        script = f"""
 $patterns = ConvertFrom-Json @'
-%s
+{patterns_json}
 '@
-$own = %d
-Get-CimInstance Win32_Process | Where-Object {
-  if ($_.ProcessId -eq $own -or -not $_.CommandLine) { return $false }
+$own = {os.getpid()}
+Get-CimInstance Win32_Process | Where-Object {{
+  if ($_.ProcessId -eq $own -or -not $_.CommandLine) {{ return $false }}
   $cmd = $_.CommandLine
-  foreach ($p in $patterns) {
-    if ($p -and $cmd -like ('*' + $p + '*')) { return $true }
-  }
+  foreach ($p in $patterns) {{
+    if ($p -and $cmd -like ('*' + $p + '*')) {{ return $true }}
+  }}
   return $false
-} | ForEach-Object {
-  try { Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop } catch {}
-}
-""" % (patterns_json, os.getpid())
+}} | ForEach-Object {{
+  try {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop }} catch {{}}
+}}
+"""
         try:
             subprocess.run(
                 ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],

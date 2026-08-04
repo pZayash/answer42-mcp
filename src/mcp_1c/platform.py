@@ -13,7 +13,6 @@ import socket
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Optional
 from urllib.parse import urlsplit, urlunsplit
 
 from . import os_support
@@ -57,7 +56,7 @@ def normalize_infobase_url(url: str) -> str:
     return urlunsplit((parts.scheme, parts.netloc, path, "", ""))
 
 
-def detect_version_from_url(url: str) -> Optional[str]:
+def detect_version_from_url(url: str) -> str | None:
     """Fetch a public base_url and extract VERSION from the HTML.
 
     If the page is behind Basic Auth or simply unavailable, this is not an
@@ -95,7 +94,7 @@ def _platform_component_score(path: Path) -> tuple[int, int]:
     )
 
 
-def find_platform_dir(version: Optional[str] = None) -> Path:
+def find_platform_dir(version: str | None = None) -> Path:
     """Locate the platform directory for a given version.
 
     If `version` is omitted the maximum available version is selected.
