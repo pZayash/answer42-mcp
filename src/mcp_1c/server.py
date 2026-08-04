@@ -1792,6 +1792,131 @@ async def _bridge_call_recorded(
     return _record_tool(session_id, method, params, result)
 
 
+_TOOL_LOG_MAX_VALUE = int(os.getenv("ONEC_MCP_TOOL_LOG_MAX_VALUE", "4096"))
+_TOOL_LOG_REDACT_KEYS = {
+    "password", "token", "api_token", "secret", "api_key", "auth",
+    "authorization", "bearer", "access_token", "refresh_token",
+}
+
+
+def _redact_value(value: Any) -> Any:
+    if isinstance(value, str) and len(value) > 6 and (
+        any(kw in value.lower() for kw in ("password", "token", "secret", "api_key"))
+    ):
+        return "***"
+    if isinstance(value, dict):
+        return {k: "***" if k.lower() in _TOOL_LOG_REDACT_KEYS else _redact_value(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_value(v) for v in value]
+    return value
+
+
+def _truncate_value(value: Any) -> str:
+    try:
+        text = json.dumps(value, ensure_ascii=False, default=str)
+    except Exception:
+        text = str(value)
+    if len(text) > _TOOL_LOG_MAX_VALUE:
+        return text[:_TOOL_LOG_MAX_VALUE] + f"... [truncated, total {len(text)}]"
+    return text
+
+
+def _log_tool_call(
+    session_id: str,
+    method: str,
+    params: dict[str, Any],
+    result: Any,
+    error: str | None,
+    duration: float,
+) -> None:
+    logger = logging.getLogger("mcp_1c.tools")
+    if not logger.isEnabledFor(logging.DEBUG) and not logger.handlers:
+        return
+    status = "error" if error else "ok"
+    message = (
+        f"tool={method} status={status} duration_ms={duration * 1000:.2f} "
+        f"params={_truncate_value(_redact_value(params))} "
+        f"result={_truncate_value(_redact_value(result)) if error is None else '<none>'} "
+        f"error={error or '<none>'}"
+    )
+    logger.debug(message, extra={"session_id": session_id, "tool_name": method})
+
+
+_TOOL_LOGGER_CONFIGURED_PATH: str | None = None
+
+
+def _configure_tool_logging(log_path: str | Path) -> None:
+    """Enable per-call logging of every tool invocation to a rotating file."""
+    global _TOOL_LOGGER_CONFIGURED_PATH
+    if not log_path:
+        return
+    path_str = str(log_path)
+    if _TOOL_LOGGER_CONFIGURED_PATH == path_str:
+        return
+    path = Path(log_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    logger = logging.getLogger("mcp_1c.tools")
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+    for handler in list(logger.handlers):
+        if isinstance(handler, logging.handlers.RotatingFileHandler):
+            logger.removeHandler(handler)
+            handler.close()
+    handler = logging.handlers.RotatingFileHandler(
+        path, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"
+    )
+    handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s [%(levelname)s] [session=%(session_id)s] [tool=%(tool_name)s] %(message)s"
+        )
+    )
+    logger.addHandler(handler)
+    _TOOL_LOGGER_CONFIGURED_PATH = path_str
+    logger.info("Tool call logging enabled: %s", path, extra={"session_id": "-", "tool_name": "-"})
+
+
+_TOOL_CALL_WRAPPER_INSTALLED = False
+
+
+def _install_tool_call_logger() -> None:
+    """Wrap mcp.call_tool so every MCP tool invocation is logged."""
+    global _TOOL_CALL_WRAPPER_INSTALLED
+    if _TOOL_CALL_WRAPPER_INSTALLED:
+        return
+    original = mcp.call_tool
+
+    async def _logged_call_tool(*args: Any, **kwargs: Any) -> Any:
+        # The SDK may call call_tool(name, arguments) or (ctx, name, arguments).
+        # Extract tool name and arguments robustly.
+        name = ""
+        arguments: dict[str, Any] | None = None
+        if len(args) >= 2 and isinstance(args[0], str):
+            name = args[0]
+            arguments = args[1]
+        elif len(args) >= 3:
+            name = args[1]
+            arguments = args[2]
+        else:
+            name = kwargs.get("name", "")
+            arguments = kwargs.get("arguments")
+
+        params = arguments or {}
+        session_id = DEFAULT_SESSION
+        if isinstance(params, dict):
+            session_id = params.get("session_id", DEFAULT_SESSION)
+        start = time.monotonic()
+        try:
+            result = await original(*args, **kwargs)
+            _log_tool_call(session_id, name, params, result, None, time.monotonic() - start)
+            return result
+        except Exception as exc:
+            _log_tool_call(session_id, name, params, None, str(exc), time.monotonic() - start)
+            raise
+
+    mcp.call_tool = _logged_call_tool
+    _TOOL_CALL_WRAPPER_INSTALLED = True
+
+
 def _screenshot_for_recorder(
     path: str,
     window: bool,
@@ -5985,6 +6110,11 @@ def main(argv: list[str] | None = None) -> None:
         help="comma-separated tool profile groups: core, ui, sessions, windows, forms, tables, tabular, dynamic, rag, recording, full, all",
     )
     parser.add_argument(
+        "--tool-log",
+        default=os.getenv("ONEC_MCP_TOOL_LOG", ""),
+        help="path to a rotating log file for every MCP tool call (env: ONEC_MCP_TOOL_LOG).",
+    )
+    parser.add_argument(
         "--http",
         action="store_true",
         default=os.getenv("ONEC_MCP_HTTP", "").strip().lower() in {"1", "true", "yes", "on"},
@@ -6024,6 +6154,8 @@ def main(argv: list[str] | None = None) -> None:
     )
     args = parser.parse_args(argv)
 
+    _configure_tool_logging(args.tool_log)
+
     _RAG_ENABLED = not args.disable_rag
     _CREDENTIAL_STORE_ENABLED = not args.disable_credential_store
     _DEV_TOOLS_ENABLED = bool(args.dev_tools)
@@ -6046,6 +6178,9 @@ def main(argv: list[str] | None = None) -> None:
         asyncio.run(_run_http(args))
     else:
         asyncio.run(_run(stale))
+
+
+_install_tool_call_logger()
 
 
 if __name__ == "__main__":
