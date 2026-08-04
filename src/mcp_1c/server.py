@@ -1886,12 +1886,28 @@ def _install_tool_call_logger() -> None:
         return
     original = mcp.call_tool
 
-    async def _logged_call_tool(name: str, arguments: dict[str, Any]) -> Any:
+    async def _logged_call_tool(*args: Any, **kwargs: Any) -> Any:
+        # The SDK may call call_tool(name, arguments) or (ctx, name, arguments).
+        # Extract tool name and arguments robustly.
+        name = ""
+        arguments: dict[str, Any] | None = None
+        if len(args) >= 2 and isinstance(args[0], str):
+            name = args[0]
+            arguments = args[1]
+        elif len(args) >= 3:
+            name = args[1]
+            arguments = args[2]
+        else:
+            name = kwargs.get("name", "")
+            arguments = kwargs.get("arguments")
+
         params = arguments or {}
-        session_id = params.get("session_id", DEFAULT_SESSION) if isinstance(params, dict) else DEFAULT_SESSION
+        session_id = DEFAULT_SESSION
+        if isinstance(params, dict):
+            session_id = params.get("session_id", DEFAULT_SESSION)
         start = time.monotonic()
         try:
-            result = await original(name, params)
+            result = await original(*args, **kwargs)
             _log_tool_call(session_id, name, params, result, None, time.monotonic() - start)
             return result
         except Exception as exc:
