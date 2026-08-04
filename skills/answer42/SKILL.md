@@ -212,9 +212,10 @@ answer42
 ```
 
 - В HTTP mode каждый запрос должен содержать заголовок `Authorization: Bearer <token>`.
-- `account_id` определяет namespace credentials. Если не задан, вычисляется как стабильный хеш токена.
+- `account_id` определяет namespace credentials. Если не задан, вычисляется как стабильный хеш токена (`token-<16hex>`).
+- В stdio mode `account_id` берется из `ONEC_MCP_ACCOUNT_ID` или `"default"`.
 - Все entries в `~/.answer42-credentials.json` изолируются по `account_id`: `credentials_save`, `credentials_check`, `credentials_list`, `credentials_titles` и автоподбор к `start_session` работают только в рамках текущего аккаунта.
-- Режим по умолчанию **stateless** (`--http-stateless` / `ONEC_MCP_HTTP_STATELESS=1`) — проще для stateless MCP gateway. Для resumable сессий передай `--http-stateless`/`0`.
+- Режим по умолчанию **stateless** (`--http-stateless` / `ONEC_MCP_HTTP_STATELESS` default `1`) — проще для stateless MCP gateway. Для resumable сессий передай `--http-stateless`/`0`.
 - Файл формата v2 (см. `credentials.example.json` в репозитории). Устаревший v1 формат (flat `entries`) при загрузке помещается в аккаунт `legacy` и мигрируется в v2 при следующем сохранении.
 
 ## Разработка bridge

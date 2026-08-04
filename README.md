@@ -92,6 +92,31 @@ answer42 install-skills --dry-run --agent all
 4. зарегистрируйте MCP-сервер в агентском клиенте;
 5. проверьте установку через `credentials_check`, затем smoke-сессию `start_session` → `active_window` → `stop_session`.
 
+## Транспорты: stdio и StreamableHTTP
+
+По умолчанию Answer42 использует stdio MCP transport (запускается MCP-хостом как subprocess). Для удалённого deployment доступен **StreamableHTTP** режим с MCP auth:
+
+```bash
+answer42 --http --http-host 0.0.0.0 --http-port 8080 \
+  --http-token "static-secret-token" \
+  --http-account-id "tenant-42"
+```
+
+Переменные окружения:
+
+```bash
+export ONEC_MCP_HTTP=1
+export ONEC_MCP_HTTP_HOST=0.0.0.0
+export ONEC_MCP_HTTP_PORT=8080
+export ONEC_MCP_HTTP_TOKEN="static-secret-token"
+export ONEC_MCP_ACCOUNT_ID="tenant-42"
+answer42
+```
+
+- Каждый MCP-запрос должен содержать заголовок `Authorization: Bearer <token>`.
+- `account_id` определяет namespace для credentials. Если не задан, вычисляется как стабильный хеш токена (`token-<16hex>`).
+- Режим по умолчанию **stateless** (`--http-stateless`/`ONEC_MCP_HTTP_STATELESS` default `1`); для resumable sessions передай `--http-stateless`/`0`.
+
 ## Безопасное хранение логинов и паролей
 
 Чтобы креды были доступны MCP-серверу, но не попадали в чат и аргументы tool-call, храните их в локальном файле за пределами репозитория и передайте путь в окружение процесса Answer42:
@@ -106,28 +131,39 @@ export ONEC_MCP_CREDENTIALS_FILE=/secure/path/credentials.json
 ~/.answer42-credentials.json
 ```
 
-Формат файла:
+Формат файла v2 (аккаунт-bound):
 
 ```json
 {
-  "entries": [
-    {
-      "url": "https://example.invalid/infobase",
-      "username": "<USERNAME>",
-      "password": "<PASSWORD>"
-    },
-    {
-      "url": "https://*.example.invalid/*",
-      "username": "<WILDCARD_USERNAME>",
-      "password": "<WILDCARD_PASSWORD>"
+  "version": 2,
+  "accounts": {
+    "tenant-42": {
+      "entries": [
+        {
+          "url": "https://example.invalid/infobase",
+          "username": "<USERNAME>",
+          "password": "<PASSWORD>",
+          "title": "dev-example",
+          "aliases": ["dev42"]
+        },
+        {
+          "url": "https://*.example.invalid/*",
+          "username": "<WILDCARD_USERNAME>",
+          "password": "<WILDCARD_PASSWORD>",
+          "title": "wildcard-example",
+          "aliases": ["we"]
+        }
+      ]
     }
-  ]
+  }
 }
 ```
 
+Устаревший v1 формат (flat `entries`) автоматически загружается в account `legacy` и мигрирует в v2 при следующем сохранении. Рекомендуется явно задать `account_id` (через HTTP auth claim или `ONEC_MCP_ACCOUNT_ID` в stdio) и перенести записи в соответствующий account.
+
 Рекомендуемые права на файл: `0600`.
 
-Правила матчинга: сначала точное совпадение `url`, затем wildcard (`*`, `?`) через `fnmatch`; первое совпадение побеждает. Пароли не логируются и не возвращаются наружу.
+Правила матчинга внутри аккаунта: сначала точное совпадение `url`, затем wildcard (`*`, `?`) через `fnmatch`; первое совпадение побеждает. Пароли не логируются и не возвращаются наружу.
 
 Для сохранения или обновления записи можно использовать MCP-tool:
 
