@@ -966,3 +966,49 @@ def test_compact_ui_node_keeps_actionable_fields_and_omits_noise():
     compact = _compact_ui_node(node)
 
     assert compact == {"type": "button", "name": "Ok", "title": "OK", "children": [{"type": "field", "name": "F", "value": "42"}]}
+
+
+def test_redact_value_masks_secrets():
+    from mcp_1c.server import _redact_value
+
+    assert _redact_value({"password": "secret123"}) == {"password": "***"}
+    assert _redact_value({"username": "esdl"}) == {"username": "esdl"}
+    assert _redact_value([{"token": "abc"}, {"api_key": "xyz"}]) == [{"token": "***"}, {"api_key": "***"}]
+    assert _redact_value("my secret token here") == "***"
+
+
+def test_truncate_value_limits_length():
+    from mcp_1c.server import _truncate_value
+
+    short = {"ok": True}
+    assert _truncate_value(short) == '{"ok": true}'
+    long = {"x": "a" * 10000}
+    result = _truncate_value(long)
+    assert result.endswith("... [truncated, total 10009]")
+    assert len(result) < 5000
+
+
+def test_configure_tool_logging_creates_rotating_handler(tmp_path):
+    from mcp_1c.server import _configure_tool_logging
+
+    log_file = tmp_path / "tools.log"
+    logger_name = "mcp_1c.tools"
+    # Clear any pre-existing handlers for a clean test
+    import logging
+
+    logger = logging.getLogger(logger_name)
+    for handler in list(logger.handlers):
+        if isinstance(handler, logging.handlers.RotatingFileHandler):
+            logger.removeHandler(handler)
+            handler.close()
+
+    _configure_tool_logging(log_file)
+    handlers = [h for h in logging.getLogger(logger_name).handlers if isinstance(h, logging.handlers.RotatingFileHandler)]
+    assert len(handlers) == 1
+    assert handlers[0].baseFilename == str(log_file)
+
+
+# ---------------------------------------------------------------------------
+# Form navigation tests (Python-side fallback for form_next_element)
+# ---------------------------------------------------------------------------
+
