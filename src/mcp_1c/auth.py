@@ -125,7 +125,7 @@ def load_static_token_config(
     resolved_account_id = account_id or os.getenv(ENV_ACCOUNT_ID) or _hash_token(resolved_token)
 
     return StaticTokenConfig(
-        token=token,
+        token=resolved_token,
         account_id=resolved_account_id,
         scope=scope or DEFAULT_SCOPE,
         issuer_url=issuer_url or f"http://{resolved_account_id}.answer42.local",
