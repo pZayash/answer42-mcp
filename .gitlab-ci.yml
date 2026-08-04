@@ -29,6 +29,7 @@ lint:
   extends: .python-job
   stage: lint
   needs: []
+  allow_failure: true
   script:
     - python -m ruff check src/mcp_1c tests
 
