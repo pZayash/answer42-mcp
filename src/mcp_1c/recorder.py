@@ -31,6 +31,19 @@ class RecordingSession:
         self.events = []
         self.frames_dir.mkdir(parents=True, exist_ok=True)
         self.slides_dir.mkdir(parents=True, exist_ok=True)
+        # Remove stale frames/slides from previous runs. The same output_dir is
+        # reused by default, and old .png/.svg files would otherwise be picked up
+        # by build_media(), producing a mixed-up PDF.
+        for stale in self.frames_dir.glob("*.png"):
+            try:
+                stale.unlink()
+            except OSError:
+                pass
+        for stale in self.slides_dir.glob("*.svg"):
+            try:
+                stale.unlink()
+            except OSError:
+                pass
         # MP4/GIF generation is intentionally unsupported. Remove stale files
         # from older runs so evidence directories reflect current outputs only.
         for obsolete in ("recording.mp4", "recording.gif"):
