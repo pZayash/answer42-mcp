@@ -35,7 +35,7 @@ description: "Работа с MCP Answer42 для 1С UI automation"
    - `https://...` / `http://...` → web/ws;
    - `server/infobase` → серверная база `/S`;
    - каталог с `1Cv8.1CD` → файловая база через `ibsrv`, а если `ibsrv` недоступен — внутренний `file-direct` (`/F`).
-5. Передавай логин/пароль из защищённого источника, а не из репозитория. Предпочтительно один раз сохранить их через `credentials_save(url, username, password)`, затем вызывать `start_session` без `username`/`password`; окно тест-клиента максимизируется автоматически внутри tool-call.
+5. Передавай логин/пароль из защищённого источника, а не из репозитория. Предпочтительно один раз сохранить их через `credentials_save(url, username, password)`, затем вызывать `start_session` без `username`/`password`; окно тест-клиента максимизируется автоматически внутри tool-call. Креды хранятся в `~/.answer42-credentials.json` и привязаны к MCP-аккаунту (см. раздел "HTTP mode и аккаунты" ниже).
 6. Работай только через tools Answer42; не кликай X11/WinAPI руками.
 7. Скриншоты допускаются системно через `screenshot`/`recording_*`.
 8. При ошибках 1С выгружай журнал через `export_eventlog`; для сетевых ошибок серверной базы отдельно проверяй DNS/доступность портов кластера 1С.
@@ -189,6 +189,33 @@ export_eventlog(...)
 - Включай `recording_start` перед демонстрационным workflow и завершай `recording_stop`.
 - Ожидаемые артефакты: `manifest.json` и `recording.pdf` при наличии Chrome/Chromium/Edge или ImageMagick.
 - MP4/GIF/HTML evidence больше не поддерживаются как публичные артефакты; не обещай и не прикладывай их.
+
+## HTTP mode и аккаунты
+
+По умолчанию Answer42 работает через stdio MCP transport. Для OpenClaw/remote deployment доступен **StreamableHTTP** режим с Bearer-token авторизацией:
+
+```bash
+answer42 --http --http-host 0.0.0.0 --http-port 8080 \
+  --http-token "static-secret-token" \
+  --http-account-id "tenant-42"
+```
+
+Или через env:
+
+```bash
+export ONEC_MCP_HTTP=1
+export ONEC_MCP_HTTP_HOST=0.0.0.0
+export ONEC_MCP_HTTP_PORT=8080
+export ONEC_MCP_HTTP_TOKEN="static-secret-token"
+export ONEC_MCP_ACCOUNT_ID="tenant-42"
+answer42
+```
+
+- В HTTP mode каждый запрос должен содержать заголовок `Authorization: Bearer <token>`.
+- `account_id` определяет namespace credentials. Если не задан, вычисляется как стабильный хеш токена.
+- Все entries в `~/.answer42-credentials.json` изолируются по `account_id`: `credentials_save`, `credentials_check`, `credentials_list`, `credentials_titles` и автоподбор к `start_session` работают только в рамках текущего аккаунта.
+- Режим по умолчанию **stateless** (`--http-stateless` / `ONEC_MCP_HTTP_STATELESS=1`) — проще для stateless MCP gateway. Для resumable сессий передай `--http-stateless`/`0`.
+- Файл формата v2 (см. `credentials.example.json` в репозитории). Устаревший v1 формат (flat `entries`) при загрузке помещается в аккаунт `legacy` и мигрируется в v2 при следующем сохранении.
 
 ## Разработка bridge
 

@@ -28,6 +28,8 @@ from mcp.server import MCPServer
 from . import __version__, os_support, release_helper, runtime, skill_installer
 from . import platform as _platform
 from .bridge import OneCBridgeServer
+from .auth import current_account_id as _current_account_id
+from .auth import load_static_token_config, build_auth_settings, build_token_verifier
 from .credentials import get_store as _credentials_store
 from .protocol import MANAGER_PROTOCOL_VERSION
 from .rag import RagService
@@ -2964,13 +2966,13 @@ def _credential_store_disabled_error() -> RuntimeError:
 def _lookup_credentials(base_url: str) -> dict[str, str] | None:
     if not _CREDENTIAL_STORE_ENABLED:
         return None
-    return _credentials_store().lookup(base_url)
+    return _credentials_store().lookup(base_url, account_id=_current_account_id())
 
 
 def _resolve_credential_reference(value: str) -> dict[str, str] | None:
     if not _CREDENTIAL_STORE_ENABLED or not value:
         return None
-    return _credentials_store().resolve(value)
+    return _credentials_store().resolve(value, account_id=_current_account_id())
 
 
 @mcp.tool()
@@ -2978,7 +2980,7 @@ def credentials_check(base_url: str) -> dict[str, object]:
     """Check whether credentials exist for a base URL or saved title without returning secrets."""
     if not _CREDENTIAL_STORE_ENABLED:
         return {"base_url": base_url, "found": False, "disabled": True}
-    credentials = _credentials_store().resolve(base_url)
+    credentials = _credentials_store().resolve(base_url, account_id=_current_account_id())
     if credentials is None:
         return {"base_url": base_url, "found": False}
     result: dict[str, object] = {"base_url": base_url, "found": True, "url": credentials.get("url", "")}
@@ -2999,13 +3001,17 @@ def credentials_save(
 
     The credentials file is never committed to git.  Use this tool to persist
     login/password pairs so that ``start_session`` can pick them up automatically
-    without exposing secrets in MCP tool-call arguments.
+    without exposing secrets in MCP tool-call arguments.  Entries are scoped to the
+    current MCP account.
     """
     if not _CREDENTIAL_STORE_ENABLED:
         raise _credential_store_disabled_error()
     alias_list = [part.strip() for part in aliases.split(",") if part.strip()]
-    updated = _credentials_store().upsert(url, username, password, title=title, aliases=alias_list)
-    result: dict[str, object] = {"url": url, "saved": True, "updated": updated}
+    account_id = _current_account_id()
+    updated = _credentials_store().upsert(
+        url, username, password, title=title, aliases=alias_list, account_id=account_id
+    )
+    result: dict[str, object] = {"url": url, "saved": True, "updated": updated, "account_id": account_id}
     if title:
         result["title"] = title
     if alias_list:
@@ -3020,8 +3026,9 @@ def credentials_remove(
     """Remove a credential entry from the local store by exact URL match."""
     if not _CREDENTIAL_STORE_ENABLED:
         raise _credential_store_disabled_error()
-    removed = _credentials_store().remove(url)
-    return {"url": url, "removed": removed}
+    account_id = _current_account_id()
+    removed = _credentials_store().remove(url, account_id=account_id)
+    return {"url": url, "removed": removed, "account_id": account_id}
 
 
 @mcp.tool()
@@ -3029,7 +3036,7 @@ def credentials_list() -> list[dict[str, object]]:
     """List configured credential URL patterns/titles (no usernames or passwords)."""
     if not _CREDENTIAL_STORE_ENABLED:
         return []
-    return _credentials_store().list_entries()
+    return _credentials_store().list_entries(account_id=_current_account_id())
 
 
 @mcp.tool()
@@ -3037,7 +3044,7 @@ def credentials_titles() -> list[dict[str, object]]:
     """List saved credential titles/aliases that can be used as start_session base_url."""
     if not _CREDENTIAL_STORE_ENABLED:
         return []
-    return _credentials_store().titles()
+    return _credentials_store().titles(account_id=_current_account_id())
 
 
 _PLACEHOLDER_PASSWORD_RE = re.compile(r"^\*{3,}$")
@@ -5764,43 +5771,94 @@ async def _run(stale_scope_lock_existed: bool = False) -> None:
             reaper_task.cancel()
             with suppress(asyncio.CancelledError):
                 await reaper_task
-        for sid, sess in list(_SESSIONS.items()):
-            if SESSION_SCOPE_ID:
-                if sess.runtime is not None:
-                    runtime.kill_process(sess.runtime.manager_process, "test-manager")
-                    sess.manager_pid = 0
-                try:
-                    await sess.bridge.stop()
-                except Exception:
-                    pass
-                continue
+        await _cleanup_sessions()
+        _release_scope_lock()
+
+
+async def _run_http(args: argparse.Namespace) -> None:
+    """Run the MCP server over StreamableHTTP with static Bearer-token auth."""
+    import uvicorn
+
+    token_arg = args.http_token or ""
+    token_file_arg = args.http_token_file or ""
+    account_id_arg = args.http_account_id or ""
+
+    config = load_static_token_config(
+        token=token_arg or None,
+        token_file=token_file_arg or None,
+        account_id=account_id_arg or None,
+    )
+
+    # Attach auth to the module-level MCPServer instance. streamable_http_app
+    # reads these attributes at build time, so we can safely patch them here
+    # without re-creating the server.
+    mcp.settings.auth = build_auth_settings(config)
+    mcp._token_verifier = build_token_verifier(config)
+
+    logging.info(
+        "StreamableHTTP mode: host=%s port=%d account_id=%s stateless=%s path=/mcp",
+        args.http_host,
+        args.http_port,
+        config.account_id,
+        args.http_stateless,
+    )
+
+    app = mcp.streamable_http_app(
+        streamable_http_path="/mcp",
+        stateless_http=args.http_stateless,
+        host=args.http_host,
+    )
+    config_uvicorn = uvicorn.Config(
+        app,
+        host=args.http_host,
+        port=args.http_port,
+        log_level=logging.getLevelName(logging.getLogger().level).lower(),
+    )
+    server = uvicorn.Server(config_uvicorn)
+    try:
+        await server.serve()
+    finally:
+        await _cleanup_sessions()
+
+
+async def _cleanup_sessions() -> None:
+    """Stop all running sessions and release resources."""
+    for sid, sess in list(_SESSIONS.items()):
+        if SESSION_SCOPE_ID:
             if sess.runtime is not None:
                 runtime.kill_process(sess.runtime.manager_process, "test-manager")
-                runtime.kill_process(sess.runtime.server_process, "ibsrv")
-            if sess.client_runtime is not None:
-                if sess.shared_client_key:
-                    _release_shared_file_server(sess.shared_client_key, sid)
-                else:
-                    runtime.kill_process(sess.client_runtime.server_process, "ibsrv-client")
-            if sess.file_client_runtime is not None:
-                if sess.shared_file_key:
-                    _release_shared_file_server(sess.shared_file_key, sid)
-                else:
-                    runtime.kill_process(sess.file_client_runtime.server_process, "ibsrv-file-client")
+                sess.manager_pid = 0
             try:
                 await sess.bridge.stop()
             except Exception:
                 pass
-            runtime.stop_xvfb(sess.client_xvfb_process)
-            runtime.stop_xvfb(sess.xvfb_process)
-        if SESSION_SCOPE_ID:
-            _persist_sessions()
-            _mark_global_sessions_orphaned_for_owner()
-        else:
-            for sess in list(_SESSIONS.values()):
-                _remove_global_session_registry(sess)
-        _SESSIONS.clear()
-        _release_scope_lock()
+            continue
+        if sess.runtime is not None:
+            runtime.kill_process(sess.runtime.manager_process, "test-manager")
+            runtime.kill_process(sess.runtime.server_process, "ibsrv")
+        if sess.client_runtime is not None:
+            if sess.shared_client_key:
+                _release_shared_file_server(sess.shared_client_key, sid)
+            else:
+                runtime.kill_process(sess.client_runtime.server_process, "ibsrv-client")
+        if sess.file_client_runtime is not None:
+            if sess.shared_file_key:
+                _release_shared_file_server(sess.shared_file_key, sid)
+            else:
+                runtime.kill_process(sess.file_client_runtime.server_process, "ibsrv-file-client")
+        try:
+            await sess.bridge.stop()
+        except Exception:
+            pass
+        runtime.stop_xvfb(sess.client_xvfb_process)
+        runtime.stop_xvfb(sess.xvfb_process)
+    if SESSION_SCOPE_ID:
+        _persist_sessions()
+        _mark_global_sessions_orphaned_for_owner()
+    else:
+        for sess in list(_SESSIONS.values()):
+            _remove_global_session_registry(sess)
+    _SESSIONS.clear()
 
 
 def _register_dev_tools(enabled: bool) -> None:
@@ -5925,6 +5983,44 @@ def main(argv: list[str] | None = None) -> None:
         default=os.getenv("ONEC_MCP_TOOL_PROFILE", "full"),
         help="comma-separated tool profile groups: core, ui, sessions, windows, forms, tables, tabular, dynamic, rag, recording, full, all",
     )
+    parser.add_argument(
+        "--http",
+        action="store_true",
+        default=os.getenv("ONEC_MCP_HTTP", "").strip().lower() in {"1", "true", "yes", "on"},
+        help="run the MCP server over StreamableHTTP instead of stdio",
+    )
+    parser.add_argument(
+        "--http-host",
+        default=os.getenv("ONEC_MCP_HTTP_HOST", "127.0.0.1"),
+        help="host to bind the StreamableHTTP server to",
+    )
+    parser.add_argument(
+        "--http-port",
+        type=int,
+        default=int(os.getenv("ONEC_MCP_HTTP_PORT", "8080")),
+        help="port to bind the StreamableHTTP server to",
+    )
+    parser.add_argument(
+        "--http-token",
+        default=os.getenv("ONEC_MCP_HTTP_TOKEN", ""),
+        help="static Bearer token required by StreamableHTTP clients",
+    )
+    parser.add_argument(
+        "--http-token-file",
+        default=os.getenv("ONEC_MCP_HTTP_TOKEN_FILE", ""),
+        help="file containing the static Bearer token for StreamableHTTP",
+    )
+    parser.add_argument(
+        "--http-account-id",
+        default=os.getenv("ONEC_MCP_ACCOUNT_ID", ""),
+        help="MCP account id used to namespace credentials in HTTP mode; defaults to a hash of the token",
+    )
+    parser.add_argument(
+        "--http-stateless",
+        action="store_true",
+        default=os.getenv("ONEC_MCP_HTTP_STATELESS", "1").strip().lower() in {"1", "true", "yes", "on"},
+        help="use stateless StreamableHTTP mode (default); disable for resumable sessions",
+    )
     args = parser.parse_args(argv)
 
     _RAG_ENABLED = not args.disable_rag
@@ -5945,7 +6041,10 @@ def main(argv: list[str] | None = None) -> None:
     else:
         stale = False
     _reap_global_orphan_sessions()
-    asyncio.run(_run(stale))
+    if args.http:
+        asyncio.run(_run_http(args))
+    else:
+        asyncio.run(_run(stale))
 
 
 if __name__ == "__main__":
