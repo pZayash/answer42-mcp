@@ -1414,7 +1414,7 @@ def _copy_compact_object(value: Any) -> Any:
     return value
 
 
-def _summarize_ui_tree(tree: Any, max_depth: int, include_hidden: bool) -> dict[str, Any]:
+def _summarize_ui_tree(tree: Any, include_hidden: bool) -> dict[str, Any]:
     """Return compact diagnostics about omitted/truncated UI tree parts."""
     nodes = list(_walk_ui_tree(tree))
     truncated_nodes = [node for node in nodes if node.get("truncated")]
@@ -1427,7 +1427,6 @@ def _summarize_ui_tree(tree: Any, max_depth: int, include_hidden: bool) -> dict[
         if node.get("visible") is False:
             hidden_nodes.append(node)
     return {
-        "max_depth": max_depth,
         "include_hidden": include_hidden,
         "nodes_count": len(nodes),
         "truncated": bool(truncated_nodes),

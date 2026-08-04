@@ -92,7 +92,7 @@ def _safe_suffix(value: str) -> str:
 
 
 def _parse_tool_result(result: Any):
-    sc = result.structuredContent
+    sc = result.structured_content
     if isinstance(sc, dict) and "result" in sc:
         return sc["result"]
     if sc not in (None, {}):
@@ -114,7 +114,7 @@ def _parse_tool_result(result: Any):
 
 async def call_ok(session: ClientSession, name: str, args: dict | None = None):
     result = await session.call_tool(name, args or {})
-    if result.isError:
+    if result.is_error:
         raise AssertionError(f"{name} unexpectedly failed: {result.content}")
     value = _parse_tool_result(result)
     print(f"OK {name}", flush=True)
@@ -125,7 +125,7 @@ async def call_ui_ok(session: ClientSession, name: str, args: dict | None = None
     args = args or {}
     read_timeout = timedelta(seconds=timeout) if timeout else None
     result = await session.call_tool(name, args, read_timeout_seconds=read_timeout)
-    if result.isError:
+    if result.is_error:
         value = "\n".join(getattr(item, "text", "") for item in result.content)
         await _record_manual_step(session, args.get("session_id", "e2e-mcp"), name, args, {"error": value})
         raise AssertionError(f"{name} unexpectedly failed: {result.content}")
@@ -139,7 +139,7 @@ async def call_ui_ok(session: ClientSession, name: str, args: dict | None = None
 async def call_ui_optional_error(session: ClientSession, name: str, args: dict | None = None, allowed_contains: str = ""):
     args = args or {}
     result = await session.call_tool(name, args)
-    if not result.isError:
+    if not result.is_error:
         value = _parse_tool_result(result)
         print(f"OK {name}", flush=True)
         return value
@@ -154,7 +154,7 @@ async def call_ui_optional_error(session: ClientSession, name: str, args: dict |
 async def call_ui_expected_error(session: ClientSession, name: str, args: dict | None = None, contains: str = ""):
     args = args or {}
     result = await session.call_tool(name, args)
-    if not result.isError:
+    if not result.is_error:
         value = _parse_tool_result(result)
         await _record_manual_step(session, args.get("session_id", "e2e-mcp"), name, args, value)
         raise AssertionError(f"{name} unexpectedly succeeded: {value!r}")
@@ -181,7 +181,7 @@ async def _record_manual_step(session: ClientSession, sid: str, name: str, args:
         f"Response: {_summarize_for_note(value, 1200)}"
     )
     rec = await session.call_tool("recording_capture", {"action": name, "note": note, "session_id": sid})
-    if rec.isError:
+    if rec.is_error:
         text = "\n".join(getattr(item, "text", "") for item in rec.content)
         raise AssertionError(f"recording_capture failed after {name}: {text}")
 
@@ -283,7 +283,7 @@ async def run_smoke(session: ClientSession, sid: str, suffix: str, screenshot_di
     for tool in ("goto_start_page", "goto_next_window", "goto_previous_window"):
         res = await session.call_tool(tool, {"session_id": sid})
         print(f"OK_OR_EXPECTED_ERROR {tool}", flush=True)
-        if not res.isError:
+        if not res.is_error:
             _parse_tool_result(res)
 
     await call_ui_ok(session, "wait_window", {"title": windows.get("active_title", ""), "timeout": 3, "session_id": sid})
@@ -323,7 +323,7 @@ async def run_smoke(session: ClientSession, sid: str, suffix: str, screenshot_di
     await call_ui_ok(session, "click_button", {"name": "ФормаЗаписатьИЗакрыть", "session_id": sid})
     await call_ui_ok(session, "table_goto_row", {"name": "Список", "text": "Тестовый smoke", "session_id": sid})
     await call_ui_ok(session, "click_button", {"name": "ФормаИзменить", "session_id": sid})
-    await call_ui_ok(session, "ui_tree", {"session_id": sid, "max_depth": 3, "include_rag_types": True})
+    await call_ui_ok(session, "ui_tree", {"session_id": sid, "include_rag_types": True})
     await call_ui_ok(session, "command_bar", {"session_id": sid})
     await call_ui_ok(session, "current_element", {"session_id": sid})
     await call_ui_ok(session, "click_button", {"name": "ФормаЗаписатьИЗакрыть", "session_id": sid})
@@ -510,7 +510,7 @@ async def run_coverage(session: ClientSession, sid: str, suffix: str, screenshot
     for tool, args, expected in negative_calls:
         res = await session.call_tool(tool, args)
         if expected:
-            if not res.isError:
+            if not res.is_error:
                 value = _parse_tool_result(res)
                 if not (isinstance(value, dict) and value.get("found") is False):
                     raise AssertionError(f"{tool} unexpectedly succeeded: {value!r}")

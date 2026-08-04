@@ -444,8 +444,7 @@ def test_ui_tree_summary_reports_truncation_and_hidden_children():
             },
         ],
     }
-    summary = _summarize_ui_tree(tree, max_depth=4, include_hidden=False)
-    assert summary["max_depth"] == 4
+    summary = _summarize_ui_tree(tree, include_hidden=False)
     assert summary["include_hidden"] is False
     assert summary["truncated"] is True
     assert summary["truncated_nodes_count"] == 2
