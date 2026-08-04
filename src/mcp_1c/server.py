@@ -27,9 +27,9 @@ from mcp.server import MCPServer
 
 from . import __version__, os_support, release_helper, runtime, skill_installer
 from . import platform as _platform
-from .bridge import OneCBridgeServer
+from .auth import build_auth_settings, build_token_verifier, load_static_token_config
 from .auth import current_account_id as _current_account_id
-from .auth import load_static_token_config, build_auth_settings, build_token_verifier
+from .bridge import OneCBridgeServer
 from .credentials import get_store as _credentials_store
 from .protocol import MANAGER_PROTOCOL_VERSION
 from .rag import RagService
