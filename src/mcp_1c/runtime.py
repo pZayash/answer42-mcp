@@ -148,7 +148,7 @@ def is_port_listening(host: str, port: int, timeout: float = 1.0) -> bool:
     try:
         with socket.create_connection((host, port), timeout=timeout):
             return True
-    except (OSError, socket.timeout):
+    except (TimeoutError, OSError):
         return False
 
 
@@ -326,40 +326,40 @@ def start_standalone_server(
     data_dir.mkdir(parents=True, exist_ok=True)
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / "ibsrv.log"
-    log_handle = open(log_path, "ab", buffering=0)
-    LOGGER.info("Starting ibsrv (data=%s, name=%s, address=%s, port=%s, direct_regport=%s)", data_dir, name, address, port, direct_regport or "default")
-    config_path = ensure_standalone_config(
-        data_dir=data_dir,
-        db_path=db_path or Path(DEFAULT_IB_PATH),
-        address=address,
-        port=port,
-        name=name,
-    )
-    argv = [
-        ibsrv,
-        f"--data={data_dir}",
-        f"--config={config_path}",
-        f"--name={name}",
-    ]
-    if direct_regport is not None:
-        argv.append(f"--direct-regport={direct_regport}")
-    if direct_range is not None:
-        argv.append(f"--direct-range={direct_range[0]}:{direct_range[1]}")
-    proc = subprocess.Popen(
-        argv,
-        stdout=log_handle,
-        stderr=log_handle,
-        stdin=subprocess.DEVNULL,
-        **os_support.subprocess_creation_kwargs(),
-    )
-    if not wait_for_port(address, port, timeout=timeout):
-        kill_process(proc, "ibsrv")
-        raise RuntimeError(
-            f"ibsrv did not start listening on {address}:{port} within {timeout}s. "
-            f"See log: {log_path}"
+    with log_path.open("ab", buffering=0) as log_handle:
+        LOGGER.info("Starting ibsrv (data=%s, name=%s, address=%s, port=%s, direct_regport=%s)", data_dir, name, address, port, direct_regport or "default")
+        config_path = ensure_standalone_config(
+            data_dir=data_dir,
+            db_path=db_path or Path(DEFAULT_IB_PATH),
+            address=address,
+            port=port,
+            name=name,
         )
-    LOGGER.info("ibsrv is listening on %s:%s (pid=%s, name=%s)", address, port, proc.pid, name)
-    return proc
+        argv = [
+            ibsrv,
+            f"--data={data_dir}",
+            f"--config={config_path}",
+            f"--name={name}",
+        ]
+        if direct_regport is not None:
+            argv.append(f"--direct-regport={direct_regport}")
+        if direct_range is not None:
+            argv.append(f"--direct-range={direct_range[0]}:{direct_range[1]}")
+        proc = subprocess.Popen(
+            argv,
+            stdout=log_handle,
+            stderr=log_handle,
+            stdin=subprocess.DEVNULL,
+            **os_support.subprocess_creation_kwargs(),
+        )
+        if not wait_for_port(address, port, timeout=timeout):
+            kill_process(proc, "ibsrv")
+            raise RuntimeError(
+                f"ibsrv did not start listening on {address}:{port} within {timeout}s. "
+                f"See log: {log_path}"
+            )
+        LOGGER.info("ibsrv is listening on %s:%s (pid=%s, name=%s)", address, port, proc.pid, name)
+        return proc
 
 
 def export_eventlog(
@@ -489,24 +489,24 @@ def _start_thin_test_manager_argv(
     log_path = log_dir / log_name
     onec_out_path = log_dir / f"{Path(log_name).stem}_1c_out.log"
     argv = add_1c_out_args_before_testmanager(argv, onec_out_path)
-    log_handle = open(log_path, "ab", buffering=0)
-    LOGGER.info("Starting thin test manager: %s", " ".join(argv))
-    env = os.environ.copy()
-    if display:
-        env["DISPLAY"] = display
-    proc = subprocess.Popen(
-        argv,
-        stdout=log_handle,
-        stderr=log_handle,
-        stdin=subprocess.DEVNULL,
-        **os_support.subprocess_creation_kwargs(),
-        env=env,
-    )
-    proc.answer42_stdout_log_path = str(log_path)  # type: ignore[attr-defined]
-    proc.answer42_out_log_path = str(onec_out_path)  # type: ignore[attr-defined]
-    proc.answer42_argv = argv  # type: ignore[attr-defined]
-    LOGGER.info("Test manager launched (pid=%s); log=%s out=%s", proc.pid, log_path, onec_out_path)
-    return proc
+    with log_path.open("ab", buffering=0) as log_handle:
+        LOGGER.info("Starting thin test manager: %s", " ".join(argv))
+        env = os.environ.copy()
+        if display:
+            env["DISPLAY"] = display
+        proc = subprocess.Popen(
+            argv,
+            stdout=log_handle,
+            stderr=log_handle,
+            stdin=subprocess.DEVNULL,
+            **os_support.subprocess_creation_kwargs(),
+            env=env,
+        )
+        proc.answer42_stdout_log_path = str(log_path)  # type: ignore[attr-defined]
+        proc.answer42_out_log_path = str(onec_out_path)  # type: ignore[attr-defined]
+        proc.answer42_argv = argv  # type: ignore[attr-defined]
+        LOGGER.info("Test manager launched (pid=%s); log=%s out=%s", proc.pid, log_path, onec_out_path)
+        return proc
 
 
 def start_thin_test_manager(
@@ -617,20 +617,20 @@ def start_test_client(
         raise FileNotFoundError(f"1cv8c (thin) not found: {argv[0]}")
     log_dir.mkdir(parents=True, exist_ok=True)
     stdout_log_path = log_dir / log_name
-    log_handle = open(stdout_log_path, "ab", buffering=0)
-    LOGGER.info("Starting test client: %s", " ".join(argv))
-    env = os.environ.copy()
-    if display:
-        env["DISPLAY"] = display
-    proc = subprocess.Popen(
-        argv,
-        stdout=log_handle,
-        stderr=log_handle,
-        stdin=subprocess.DEVNULL,
-        **os_support.subprocess_creation_kwargs(),
-        env=env,
-    )
-    proc.answer42_stdout_log_path = str(stdout_log_path)  # type: ignore[attr-defined]
-    proc.answer42_argv = argv  # type: ignore[attr-defined]
-    LOGGER.info("Test client launched (pid=%s); stdout=%s", proc.pid, stdout_log_path)
-    return proc
+    with stdout_log_path.open("ab", buffering=0) as log_handle:
+        LOGGER.info("Starting test client: %s", " ".join(argv))
+        env = os.environ.copy()
+        if display:
+            env["DISPLAY"] = display
+        proc = subprocess.Popen(
+            argv,
+            stdout=log_handle,
+            stderr=log_handle,
+            stdin=subprocess.DEVNULL,
+            **os_support.subprocess_creation_kwargs(),
+            env=env,
+        )
+        proc.answer42_stdout_log_path = str(stdout_log_path)  # type: ignore[attr-defined]
+        proc.answer42_argv = argv  # type: ignore[attr-defined]
+        LOGGER.info("Test client launched (pid=%s); stdout=%s", proc.pid, stdout_log_path)
+        return proc

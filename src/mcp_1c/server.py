@@ -3,44 +3,40 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import hashlib
+import importlib.resources
 import json
 import logging
 import os
+import re
+import shlex
 import shutil
+import subprocess
 import sys
 import time
-import uuid
-from datetime import datetime
-import shlex
-import subprocess
-import re
-import hashlib
-import importlib.resources
 import urllib.request
-from urllib.parse import urlsplit, urlunsplit
-from dataclasses import dataclass, field
+import uuid
 from contextlib import contextmanager, suppress
+from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any
+from urllib.parse import urlsplit, urlunsplit
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer
 
-from . import __version__
-from . import os_support
-from .protocol import MANAGER_PROTOCOL_VERSION
+from . import __version__, os_support, release_helper, runtime, skill_installer
 from . import platform as _platform
-from . import runtime
-from . import skill_installer
-from . import release_helper
 from .bridge import OneCBridgeServer
 from .credentials import get_store as _credentials_store
+from .protocol import MANAGER_PROTOCOL_VERSION
 from .rag import RagService
 from .rag.dump import dump_all_extensions_to_xml, dump_cf_to_xml, dump_infobase_to_xml
+from .recorder import RecordingSession
 from .window_control import active_1c_window_geometry as _active_windows_1c_window_geometry
 from .window_control import maximize_test_client_window as _maximize_external_window
-from .recorder import RecordingSession
 
-mcp = FastMCP("Answer42")
+mcp = MCPServer("Answer42")
 _RAG = RagService()
 _RAG_ENABLED = os.getenv("ONEC_MCP_DISABLE_RAG", "").strip().lower() not in {"1", "true", "yes", "on"}
 _CREDENTIAL_STORE_ENABLED = os.getenv("ONEC_MCP_DISABLE_CREDENTIAL_STORE", "").strip().lower() not in {"1", "true", "yes", "on"}
@@ -499,7 +495,7 @@ class SessionState:
         }
 
     @classmethod
-    def from_json(cls, data: dict[str, Any]) -> "SessionState":
+    def from_json(cls, data: dict[str, Any]) -> SessionState:
         sess = cls(
             session_id=str(data["session_id"]),
             display=str(data["display"]),
@@ -1657,7 +1653,7 @@ def _pick_rag_element(ui_node: dict[str, Any], candidates: list[dict[str, Any]],
             value += 2
         return value
 
-    return sorted(candidates, key=score, reverse=True)[0]
+    return max(candidates, key=score)
 
 
 def _enrich_ui_tree_with_rag_types(tree: Any, snapshot: str | int | None = None) -> Any:
@@ -1877,7 +1873,7 @@ def _effective_dump_connection(
 
 def _rag_dump_root(session_id: str, root: str = "") -> Path:
     base = Path(root).expanduser() if root else os_support.default_data_dir() / "rag-dumps"
-    digest = hashlib.sha1(f"{session_id}:{time.time()}".encode("utf-8")).hexdigest()[:10]
+    digest = hashlib.sha1(f"{session_id}:{time.time()}".encode()).hexdigest()[:10]
     return base / f"{_safe_snapshot_part(session_id)}-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{digest}"
 
 
@@ -1913,9 +1909,7 @@ def _rag_match_needs_dump(match: dict[str, Any], target_version: str) -> bool:
     # A nearest-version match is useful as a fallback for read-only setups, but
     # if we are allowed to dump the live infobase then the live source is a
     # better/suitable version and should replace the nearest available one.
-    if target_version and not _rag_match_public(match).get("exact_version"):
-        return True
-    return False
+    return bool(target_version and not _rag_match_public(match).get("exact_version"))
 
 
 # ---------------------------------------------------------------------------
@@ -4391,7 +4385,7 @@ def _find_saved_tabular_document_file(files: list[Any], format: str) -> dict[str
             return item
         if wanted == "xls" and header.startswith(bytes.fromhex("d0cf11e0a1b11ae1")):
             return item
-        if wanted in {"html", "htm"} and (data.startswith(b"<") or data.startswith(b"\xef\xbb\xbf<")):
+        if wanted in {"html", "htm"} and data.startswith((b"<", b"\xef\xbb\xbf<")):
             return item
         if wanted == "txt" and _looks_like_plain_text(data):
             return item
@@ -4573,7 +4567,7 @@ def _parse_extension_metadata_description(description: str) -> list[dict[str, st
     pattern = re.compile(r"^(?P<name>.+?)\s*\((?P<version>[^)]*)\)(?:\s+(?P<hash>\S+))?(?:\s+БезопасныйРежим:(?P<safe_mode>\S+))?")
     for raw_line in description.splitlines():
         line = raw_line.strip()
-        if not line or line.startswith("EF_") or line.startswith("#"):
+        if not line or line.startswith(("EF_", "#")):
             continue
         match = pattern.match(line)
         if not match:
@@ -5540,8 +5534,7 @@ def _x11_screen_size(display: str | None = None) -> tuple[int, int] | None:
             env=env,
             check=True,
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             timeout=10,
         ).stdout
     except (subprocess.SubprocessError, FileNotFoundError):
@@ -5568,8 +5561,7 @@ def _active_x11_window_geometry(display: str | None = None) -> dict[str, int] | 
             env=env,
             check=True,
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             timeout=10,
         ).stdout
     except (subprocess.SubprocessError, FileNotFoundError):
@@ -5839,7 +5831,7 @@ def _apply_tool_profile(profile: str) -> dict[str, Any]:
     allowed = _tool_names_for_profile(profile)
     if allowed is None:
         return {"profile": profile or "full", "mode": "full", "removed": []}
-    existing = set(getattr(mcp, "_tool_manager")._tools.keys())
+    existing = set(mcp._tool_manager._tools.keys())
     removed: list[str] = []
     for name in sorted(existing - allowed):
         try:
@@ -5847,7 +5839,7 @@ def _apply_tool_profile(profile: str) -> dict[str, Any]:
             removed.append(name)
         except Exception:
             pass
-    remaining = sorted(set(getattr(mcp, "_tool_manager")._tools.keys()))
+    remaining = sorted(set(mcp._tool_manager._tools.keys()))
     return {"profile": profile, "mode": "filtered", "remaining_count": len(remaining), "removed_count": len(removed), "removed": removed}
 
 

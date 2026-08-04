@@ -3,8 +3,8 @@ from __future__ import annotations
 import html
 import re
 import xml.etree.ElementTree as ET
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
 
 from .detect import detect_source_format
 from .model import (

@@ -4,52 +4,53 @@ import json
 import os
 import subprocess
 import sys
-import pytest
 from pathlib import Path, PureWindowsPath
 
-from mcp_1c import __version__
+import pytest
+
+from mcp_1c import __version__, runtime
 from mcp_1c import platform as onec_platform
-from mcp_1c import runtime
 from mcp_1c.server import (
+    _SESSIONS,
     DEFAULT_SESSION,
     SessionState,
-    _SESSIONS,
+    _active_x11_window_geometry,
     _append_available_users_to_auth_error,
-    _configure_session_scope,
     _cf_marker_matches,
+    _configure_session_scope,
     _decode_log_bytes,
-    _load_global_registry_unlocked,
-    _metadata_objects_catalog_self_entry,
-    _metadata_catalog_rows_from_tabular_cells,
-    _match_metadata_object,
-    _format_navigation_suggestions,
+    _effective_dump_connection,
     _ensure_restored_session,
     _extract_error_lines,
-    _test_client_startup_error_from_logs,
-    _active_x11_window_geometry,
-    _wait_for_test_client_ready,
-    _write_cf_marker,
-    credentials_check,
-    credentials_list,
-    _is_placeholder_password,
-    _normalize_connection_mode,
-    _effective_dump_connection,
+    _format_navigation_suggestions,
     _is_ignored_runtime_extension_name,
+    _is_placeholder_password,
     _json_list,
+    _load_global_registry_unlocked,
+    _match_metadata_object,
+    _metadata_catalog_rows_from_tabular_cells,
+    _metadata_objects_catalog_self_entry,
+    _normalize_connection_mode,
     _parse_users_plain_text,
     _rag_diagnostic,
-    configuration_name_version_from_subsystems,
-    _register_dev_tools,
     _reap_global_orphan_sessions,
+    _register_dev_tools,
     _state_file_for_scope,
+    _test_client_startup_error_from_logs,
+    _tool_names_for_profile,
     _update_global_session_registry,
     _users_url_for_base_url,
-    _tool_names_for_profile,
-    main as mcp_main,
+    _wait_for_test_client_ready,
+    _write_cf_marker,
+    configuration_name_version_from_subsystems,
+    credentials_check,
+    credentials_list,
     mcp,
     screenshot,
 )
-
+from mcp_1c.server import (
+    main as mcp_main,
+)
 
 EXPECTED_NEW_TOOLS = {
     "wait_object",
@@ -178,8 +179,7 @@ def test_default_session_env_override_for_compatibility():
         check=True,
         env=env,
         text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
     )
 
     assert completed.stdout.strip() == "custom-default-session"
@@ -196,7 +196,7 @@ def test_session_scope_maps_to_dedicated_state_and_lock(tmp_path, monkeypatch):
 
 
 def test_configure_empty_session_scope_keeps_legacy_state(monkeypatch, tmp_path):
-    import mcp_1c.server as server
+    from mcp_1c import server
 
     legacy = tmp_path / "legacy-sessions.json"
     monkeypatch.setenv("ONEC_MCP_SESSION_STATE", str(legacy))
@@ -210,7 +210,7 @@ def test_configure_empty_session_scope_keeps_legacy_state(monkeypatch, tmp_path)
 
 
 def test_configure_session_scope_enables_scoped_state(monkeypatch, tmp_path):
-    import mcp_1c.server as server
+    from mcp_1c import server
 
     monkeypatch.setenv("ONEC_MCP_SESSION_SCOPES_DIR", str(tmp_path))
 
@@ -226,7 +226,7 @@ def test_configure_session_scope_enables_scoped_state(monkeypatch, tmp_path):
 
 
 def test_global_registry_tracks_session_process_pids(monkeypatch, tmp_path):
-    import mcp_1c.server as server
+    from mcp_1c import server
 
     monkeypatch.setattr(server, "GLOBAL_REGISTRY_FILE", tmp_path / "global-sessions.json")
     monkeypatch.setattr(server, "GLOBAL_REGISTRY_LOCK", tmp_path / "global-sessions.lock")
@@ -258,7 +258,7 @@ def test_global_registry_tracks_session_process_pids(monkeypatch, tmp_path):
 
 
 def test_global_registry_reaper_marks_dead_owner_before_ttl(monkeypatch, tmp_path):
-    import mcp_1c.server as server
+    from mcp_1c import server
 
     monkeypatch.setattr(server, "GLOBAL_REGISTRY_FILE", tmp_path / "global-sessions.json")
     monkeypatch.setattr(server, "GLOBAL_REGISTRY_LOCK", tmp_path / "global-sessions.lock")
@@ -279,7 +279,7 @@ def test_global_registry_reaper_marks_dead_owner_before_ttl(monkeypatch, tmp_pat
 
 
 def test_global_registry_reaper_kills_expired_orphan(monkeypatch, tmp_path):
-    import mcp_1c.server as server
+    from mcp_1c import server
 
     killed: list[int] = []
     monkeypatch.setattr(server, "GLOBAL_REGISTRY_FILE", tmp_path / "global-sessions.json")
@@ -323,7 +323,7 @@ def test_dev_eval_tool_is_registered_only_when_dev_tools_enabled():
         _register_dev_tools(True)
         tools = _tools_by_name()
         assert "dev_eval" in tools
-        assert tools["dev_eval"].inputSchema["required"] == ["code"]
+        assert tools["dev_eval"].input_schema["required"] == ["code"]
     finally:
         _register_dev_tools(False)
 
@@ -338,46 +338,46 @@ def test_new_mcp_tools_do_not_include_performance_metrics():
 def test_selected_new_tool_schemas():
     tools = _tools_by_name()
 
-    assert tools["wait_object"].inputSchema["properties"]["timeout"]["default"] == 15
-    assert tools["set_file_dialog_result"].inputSchema["required"] == ["paths"]
-    assert tools["field_info"].inputSchema["required"] == ["field_name"]
-    assert tools["field_dropdown_items"].inputSchema["required"] == ["field_name"]
-    assert tools["field_dropdown_items"].inputSchema["properties"]["timeout"]["default"] == 10
-    assert tools["field_dropdown_items"].inputSchema["properties"]["max_depth"]["default"] == 3
-    assert tools["field_dropdown_items"].inputSchema["properties"]["search_depth"]["default"] == 0
-    assert tools["toggle_field"].inputSchema["properties"]["max_depth"]["default"] == 20
-    assert tools["click_button"].inputSchema["properties"]["max_depth"]["default"] == 8
-    assert tools["decoration_click_link"].inputSchema["properties"]["presentation"]["default"] == ""
-    assert tools["command_interface_commands"].inputSchema["properties"]["section"]["default"] == ""
-    assert tools["command_interface_commands"].inputSchema["properties"]["max_depth"]["default"] == 4
-    assert tools["command_interface_search"].inputSchema["required"] == ["query"]
-    assert tools["command_interface_search"].inputSchema["properties"]["max_results"]["default"] == 20
-    assert "session_id" in tools["configuration_name_version_from_subsystems"].inputSchema["properties"]
-    assert "session_id" in tools["installed_extensions_from_catalog"].inputSchema["properties"]
-    assert tools["metadata_objects_from_catalog"].inputSchema["properties"]["query"]["default"] == ""
-    assert tools["metadata_objects_from_catalog"].inputSchema["properties"]["refresh_cache"]["default"] is False
-    assert tools["metadata_objects_from_catalog"].inputSchema["properties"]["include_groups"]["default"] is False
-    assert "session_id" in tools["metadata_objects_catalog_cache_clear"].inputSchema["properties"]
-    assert tools["window_command_interface"].inputSchema["properties"]["window_title"]["default"] == ""
-    assert tools["start_session"].inputSchema["properties"]["rag_enabled"]["default"] is True
-    assert tools["rag_sources_add_from_directory"].inputSchema["required"] == ["path"]
-    assert tools["rag_sources_add_from_directory"].inputSchema["properties"]["watch"]["default"] is True
-    assert tools["rag_available_configurations"].inputSchema["properties"]["sync"]["default"] is True
-    assert tools["rag_session_autoconfigure"].inputSchema["properties"]["snapshot_name"]["default"] == ""
-    assert tools["rag_session_autoconfigure"].inputSchema["properties"]["build_index"]["default"] is True
-    assert tools["rag_session_autoconfigure"].inputSchema["properties"]["sync_sources"]["default"] is True
-    assert tools["rag_session_autoconfigure"].inputSchema["properties"]["dump_username"]["default"] == ""
-    assert tools["rag_session_autoconfigure"].inputSchema["properties"]["dump_password"]["default"] == ""
-    assert tools["rag_session_autoconfigure"].inputSchema["properties"]["dump_all_extensions"]["default"] is True
-    assert tools["rag_session_autoconfigure"].inputSchema["properties"]["cleanup_generated_sources"]["default"] is True
-    assert "connection_mode" not in tools["start_session"].inputSchema["properties"]
-    assert "connection_value" not in tools["start_session"].inputSchema["properties"]
-    assert tools["credentials_save"].inputSchema["required"] == ["url", "username", "password"]
-    assert tools["credentials_remove"].inputSchema["required"] == ["url"]
-    assert tools["tabular_document_save"].inputSchema["properties"]["format"]["default"] == "pdf"
-    assert tools["tabular_document_state_display"].inputSchema["properties"]["max_depth"]["default"] == 8
-    assert tools["search_objects"].inputSchema["properties"]["limit"]["default"] == 50
-    assert tools["search_objects"].inputSchema["properties"]["max_depth"]["default"] == 8
+    assert tools["wait_object"].input_schema["properties"]["timeout"]["default"] == 15
+    assert tools["set_file_dialog_result"].input_schema["required"] == ["paths"]
+    assert tools["field_info"].input_schema["required"] == ["field_name"]
+    assert tools["field_dropdown_items"].input_schema["required"] == ["field_name"]
+    assert tools["field_dropdown_items"].input_schema["properties"]["timeout"]["default"] == 10
+    assert tools["field_dropdown_items"].input_schema["properties"]["max_depth"]["default"] == 3
+    assert tools["field_dropdown_items"].input_schema["properties"]["search_depth"]["default"] == 0
+    assert tools["toggle_field"].input_schema["properties"]["max_depth"]["default"] == 20
+    assert tools["click_button"].input_schema["properties"]["max_depth"]["default"] == 8
+    assert tools["decoration_click_link"].input_schema["properties"]["presentation"]["default"] == ""
+    assert tools["command_interface_commands"].input_schema["properties"]["section"]["default"] == ""
+    assert tools["command_interface_commands"].input_schema["properties"]["max_depth"]["default"] == 4
+    assert tools["command_interface_search"].input_schema["required"] == ["query"]
+    assert tools["command_interface_search"].input_schema["properties"]["max_results"]["default"] == 20
+    assert "session_id" in tools["configuration_name_version_from_subsystems"].input_schema["properties"]
+    assert "session_id" in tools["installed_extensions_from_catalog"].input_schema["properties"]
+    assert tools["metadata_objects_from_catalog"].input_schema["properties"]["query"]["default"] == ""
+    assert tools["metadata_objects_from_catalog"].input_schema["properties"]["refresh_cache"]["default"] is False
+    assert tools["metadata_objects_from_catalog"].input_schema["properties"]["include_groups"]["default"] is False
+    assert "session_id" in tools["metadata_objects_catalog_cache_clear"].input_schema["properties"]
+    assert tools["window_command_interface"].input_schema["properties"]["window_title"]["default"] == ""
+    assert tools["start_session"].input_schema["properties"]["rag_enabled"]["default"] is True
+    assert tools["rag_sources_add_from_directory"].input_schema["required"] == ["path"]
+    assert tools["rag_sources_add_from_directory"].input_schema["properties"]["watch"]["default"] is True
+    assert tools["rag_available_configurations"].input_schema["properties"]["sync"]["default"] is True
+    assert tools["rag_session_autoconfigure"].input_schema["properties"]["snapshot_name"]["default"] == ""
+    assert tools["rag_session_autoconfigure"].input_schema["properties"]["build_index"]["default"] is True
+    assert tools["rag_session_autoconfigure"].input_schema["properties"]["sync_sources"]["default"] is True
+    assert tools["rag_session_autoconfigure"].input_schema["properties"]["dump_username"]["default"] == ""
+    assert tools["rag_session_autoconfigure"].input_schema["properties"]["dump_password"]["default"] == ""
+    assert tools["rag_session_autoconfigure"].input_schema["properties"]["dump_all_extensions"]["default"] is True
+    assert tools["rag_session_autoconfigure"].input_schema["properties"]["cleanup_generated_sources"]["default"] is True
+    assert "connection_mode" not in tools["start_session"].input_schema["properties"]
+    assert "connection_value" not in tools["start_session"].input_schema["properties"]
+    assert tools["credentials_save"].input_schema["required"] == ["url", "username", "password"]
+    assert tools["credentials_remove"].input_schema["required"] == ["url"]
+    assert tools["tabular_document_save"].input_schema["properties"]["format"]["default"] == "pdf"
+    assert tools["tabular_document_state_display"].input_schema["properties"]["max_depth"]["default"] == 8
+    assert tools["search_objects"].input_schema["properties"]["limit"]["default"] == 50
+    assert tools["search_objects"].input_schema["properties"]["max_depth"]["default"] == 8
 
 
 def test_metadata_objects_catalog_self_entry_is_searchable():

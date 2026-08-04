@@ -148,7 +148,8 @@ def _title_matches(title: str, title_contains: str) -> bool:
 
 def _maximize_with_xlib(title_contains: str, display: str, width: int | None, height: int | None, env: dict[str, str]) -> WindowControlResult:
     try:
-        from Xlib import X, display as xdisplay
+        from Xlib import X
+        from Xlib import display as xdisplay
         disp = xdisplay.Display(display or None)
         root = disp.screen().root
         sw = width or disp.screen().width_in_pixels
@@ -264,7 +265,7 @@ def _find_windows_1c_window(title_contains: str = "") -> dict[str, Any] | None:
 
 def _maximize_with_winapi(title_contains: str, width: int | None, height: int | None) -> WindowControlResult:
     try:
-        import ctypes.wintypes  # type: ignore  # noqa: F401
+        import ctypes.wintypes  # type: ignore
 
         user32 = ctypes.windll.user32
         chosen = _find_windows_1c_window(title_contains)
