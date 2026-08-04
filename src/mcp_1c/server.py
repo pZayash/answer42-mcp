@@ -2986,6 +2986,7 @@ def credentials_check(base_url: str) -> dict[str, object]:
     result: dict[str, object] = {"base_url": base_url, "found": True, "url": credentials.get("url", "")}
     if credentials.get("title"):
         result["title"] = credentials["title"]
+    result["account_id"] = _current_account_id()
     return result
 
 

@@ -144,7 +144,7 @@ def build_auth_settings(config: StaticTokenConfig) -> AuthSettings:
 
 def build_token_verifier(config: StaticTokenConfig) -> StaticTokenVerifier:
     return StaticTokenVerifier(
-        token=token,
+        token=config.token,
         account_id=config.account_id,
         scope=config.scope,
         resource_server_url=config.resource_server_url,
