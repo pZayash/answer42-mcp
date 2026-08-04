@@ -1789,14 +1789,8 @@ async def _bridge_call_recorded(
     sess = await _ensure_restored_session(session_id)
     await _wait_for_bridge_connected(sess, timeout=60.0)
     _touch_session(sess)
-    start = time.monotonic()
-    try:
-        result = await sess.bridge.call(method, params)
-        _log_tool_call(session_id, method, params, result, None, time.monotonic() - start)
-        return _record_tool(session_id, method, params, result)
-    except Exception as exc:
-        _log_tool_call(session_id, method, params, None, str(exc), time.monotonic() - start)
-        raise
+    result = await sess.bridge.call(method, params)
+    return _record_tool(session_id, method, params, result)
 
 
 _TOOL_LOG_MAX_VALUE = int(os.getenv("ONEC_MCP_TOOL_LOG_MAX_VALUE", "4096"))
@@ -1880,6 +1874,33 @@ def _configure_tool_logging(log_path: str | Path) -> None:
     logger.addHandler(handler)
     _TOOL_LOGGER_CONFIGURED_PATH = path_str
     logger.info("Tool call logging enabled: %s", path, extra={"session_id": "-", "tool_name": "-"})
+
+
+_TOOL_CALL_WRAPPER_INSTALLED = False
+
+
+def _install_tool_call_logger() -> None:
+    """Wrap mcp.call_tool so every MCP tool invocation is logged."""
+    global _TOOL_CALL_WRAPPER_INSTALLED
+    if _TOOL_CALL_WRAPPER_INSTALLED:
+        return
+    original = mcp.call_tool
+
+    async def _logged_call_tool(name: str, arguments: dict[str, Any]) -> Any:
+        params = arguments or {}
+        session_id = params.get("session_id", DEFAULT_SESSION) if isinstance(params, dict) else DEFAULT_SESSION
+        start = time.monotonic()
+        try:
+            result = await original(name, params)
+            _log_tool_call(session_id, name, params, result, None, time.monotonic() - start)
+            return result
+        except Exception as exc:
+            _log_tool_call(session_id, name, params, None, str(exc), time.monotonic() - start)
+            raise
+
+    mcp.call_tool = _logged_call_tool
+    _TOOL_CALL_WRAPPER_INSTALLED = True
+
 
 
 def _screenshot_for_recorder(
@@ -6218,6 +6239,8 @@ def main(argv: list[str] | None = None) -> None:
     else:
         asyncio.run(_run(stale))
 
+
+_install_tool_call_logger()
 
 if __name__ == "__main__":
     main()
