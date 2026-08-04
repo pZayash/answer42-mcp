@@ -3951,7 +3951,7 @@ async def decoration_click(name: Annotated[str, "Decoration technical name"] = "
 
 
 @mcp.tool()
-async def ui_tree(max_depth: Annotated[int, "Maximum UI tree depth"] = 4,
+async def ui_tree(
     include_rag_types: Annotated[bool, "Enrich UI elements with best-effort types from the local RAG index"] = True,
     include_hidden: Annotated[bool, "Include invisible form elements; visible/available flags are always returned"] = False,
     compact: Annotated[bool | None, "Return compact tree fields; default follows ONEC_MCP_RESULT_VERBOSITY"] = None,
@@ -3961,14 +3961,16 @@ async def ui_tree(max_depth: Annotated[int, "Maximum UI tree depth"] = 4,
 ) -> Any:
     """Return a serialized tree of the active window/forms/elements.
 
+    The tree is no longer depth-limited; the full visible 1C form hierarchy is
+    returned. Use include_hidden=true to inspect the full 1C form tree, including
+    elements on inactive pages. Invisible elements are omitted by default.
     When RAG data is available, each matching element gets `rag_type` and `rag`
-    fields with metadata-derived type/source information.  Runtime 1C UI data is
-    returned unchanged when the RAG index has no match. Invisible elements are
-    omitted by default; pass include_hidden=true to inspect the full 1C form tree.
+    fields with metadata-derived type/source information. Runtime 1C UI data is
+    returned unchanged when the RAG index has no match.
     """
-    tree = await _bridge_call_recorded(session_id, "ui_tree", {"max_depth": max_depth, "include_hidden": include_hidden})
+    tree = await _bridge_call_recorded(session_id, "ui_tree", {"include_hidden": include_hidden})
     if isinstance(tree, dict):
-        tree["tree_summary"] = _summarize_ui_tree(tree, max_depth=max_depth, include_hidden=include_hidden)
+        tree["tree_summary"] = _summarize_ui_tree(tree, include_hidden=include_hidden)
     if include_rag_types:
         sess = _session(session_id)
         if _RAG_ENABLED and sess.rag_enabled:
@@ -4058,7 +4060,7 @@ async def get_object(
 
 
 @mcp.tool()
-async def activate_object(
+async def focus_object(
     name: Annotated[str, "Object technical name"] = "",
     title: Annotated[str, "Object visible title/caption"] = "",
     type: Annotated[str, "1C test object type"] = "",
@@ -4066,8 +4068,14 @@ async def activate_object(
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
-    """Find and activate a UI object in the active test client window."""
-    return await _bridge_call_recorded(session_id, "activate_object", {"name": name, "title": title, "type": type, "max_depth": max_depth})
+    """Move focus to a UI object in the active test client window.
+
+    This tool only changes focus/activation; it does not change values. For radio
+    buttons and dropdowns use set_field_value with the visible caption. To switch
+    to an inactive page, focus the page object first, then interact with its
+    children.
+    """
+    return await _bridge_call_recorded(session_id, "focus_object", {"name": name, "title": title, "type": type, "max_depth": max_depth})
 
 
 @mcp.tool()
