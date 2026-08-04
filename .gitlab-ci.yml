@@ -1,5 +1,6 @@
 stages:
   - test
+  - lint
   - package
   - deploy
   - publish
@@ -23,6 +24,12 @@ unit_tests:
   script:
     - python -m py_compile src/mcp_1c/*.py src/mcp_1c/rag/*.py
     - python -m pytest -q -c /dev/null tests/test_credentials.py tests/test_protocol.py tests/test_server_tools.py
+
+lint:
+  extends: .python-job
+  stage: lint
+  needs: []
+  script:
     - python -m ruff check src/mcp_1c tests
 
 package:
