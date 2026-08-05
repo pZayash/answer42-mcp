@@ -39,10 +39,22 @@ def test_credentials_v2_lookup_by_url_and_title(tmp_path):
     assert store.lookup("test-base") == {"username": "u", "password": "p"}
     assert store.resolve("bp27932")["url"] == "https://example.com/infobase"
     assert store.list_entries() == [
-        {"url": "https://example.com/infobase", "title": "bp27932", "aliases": ["test-base"]}
+        {
+            "url": "https://example.com/infobase",
+            "verified": False,
+            "verification_status": "unverified",
+            "title": "bp27932",
+            "aliases": ["test-base"],
+        }
     ]
     assert store.titles() == [
-        {"url": "https://example.com/infobase", "title": "bp27932", "aliases": ["test-base"]}
+        {
+            "url": "https://example.com/infobase",
+            "verified": False,
+            "verification_status": "unverified",
+            "title": "bp27932",
+            "aliases": ["test-base"],
+        }
     ]
 
 
@@ -139,7 +151,7 @@ def test_credentials_upsert_creates_file_and_returns_bool(tmp_path):
     saved = json.loads(path.read_text(encoding="utf-8"))
     assert saved["version"] == 2
     assert saved["accounts"]["default"]["entries"] == [
-        {"url": "https://example.com/infobase", "username": "u2", "password": "p2"}
+        {"url": "https://example.com/infobase", "username": "u2", "password": "p2", "verified": False}
     ]
 
 
@@ -153,6 +165,71 @@ def test_credentials_upsert_updates_by_title(tmp_path):
     assert updated is True
     assert store.resolve("main")["url"] == "https://new.example/ib"
     assert store.lookup("main") == {"username": "u2", "password": "p2"}
+
+
+def test_credentials_upsert_reuses_wildcard_with_same_login_password(tmp_path):
+    path = tmp_path / "credentials.json"
+    store = CredentialsStore(path)
+
+    assert store.upsert("https://*.example.invalid/*", "u", "p", title="wild") is False
+    assert store.upsert("https://dev.example.invalid/ib", "u", "p", title="dev", aliases=["dev-ib"]) is True
+
+    entries = json.loads(path.read_text(encoding="utf-8"))["accounts"]["default"]["entries"]
+    assert entries == [
+        {
+            "url": "https://*.example.invalid/*",
+            "username": "u",
+            "password": "p",
+            "verified": False,
+            "title": "dev",
+            "aliases": ["dev-ib"],
+        }
+    ]
+
+
+def test_credentials_upsert_reuses_same_url_with_same_login_password(tmp_path):
+    path = tmp_path / "credentials.json"
+    store = CredentialsStore(path)
+
+    assert store.upsert("https://example.invalid/ib", "u", "p") is False
+    assert store.upsert("https://example.invalid/ib/", "u", "p", title="same") is True
+
+    assert len(json.loads(path.read_text(encoding="utf-8"))["accounts"]["default"]["entries"]) == 1
+    assert store.resolve("same")["url"] == "https://example.invalid/ib"
+
+
+def test_credentials_upsert_same_url_new_password_becomes_unverified(tmp_path):
+    path = tmp_path / "credentials.json"
+    store = CredentialsStore(path)
+
+    store.upsert("https://example.invalid/ib", "u", "p1")
+    assert store.mark_verified("https://example.invalid/ib", "u", "p1") is True
+    assert store.list_entries()[0]["verified"] is True
+
+    assert store.upsert("https://example.invalid/ib", "u", "p2") is True
+
+    assert store.lookup("https://example.invalid/ib") == {"username": "u", "password": "p2"}
+    assert store.list_entries()[0]["verified"] is False
+    assert store.list_entries()[0]["verification_status"] == "unverified"
+
+
+def test_credentials_mark_verified_and_remove_matching_wildcard(tmp_path):
+    path = tmp_path / "credentials.json"
+    store = CredentialsStore(path)
+
+    store.upsert("https://*.example.invalid/*", "u", "p")
+    assert store.mark_verified("https://dev.example.invalid/ib", "u", "p") is True
+    assert store.list_entries() == [
+        {
+            "url": "https://*.example.invalid/*",
+            "verified": True,
+            "verification_status": "verified",
+        }
+    ]
+
+    assert store.remove_matching("https://dev.example.invalid/ib", "u", "bad") is False
+    assert store.remove_matching("https://dev.example.invalid/ib", "u", "p") is True
+    assert store.list_entries() == []
 
 
 def test_credentials_remove_exact_match(tmp_path):
@@ -250,5 +327,5 @@ def test_credentials_save_migrates_legacy_to_v2(tmp_path):
     assert saved["version"] == 2
     assert "legacy" in saved["accounts"]
     assert saved["accounts"]["default"]["entries"] == [
-        {"url": "https://new.example/ib", "username": "new", "password": "new-pass"}
+        {"url": "https://new.example/ib", "username": "new", "password": "new-pass", "verified": False}
     ]

@@ -62,7 +62,7 @@ class CredentialsStore:
     def __init__(self, path: Path | str | None = None) -> None:
         self._path = Path(path or DEFAULT_CREDENTIALS_PATH)
         self._version = 2
-        self._accounts: dict[str, dict[str, list[dict[str, str]]]] = {}
+        self._accounts: dict[str, dict[str, list[dict[str, object]]]] = {}
         self._load()
 
     # ------------------------------------------------------------------
@@ -114,10 +114,14 @@ class CredentialsStore:
         self,
         account_id: str | None = None,
     ) -> list[dict[str, object]]:
-        """Return credential titles and URL patterns without secrets."""
+        """Return credential titles, URL patterns and verification status without secrets."""
         result: list[dict[str, object]] = []
         for entry in self._account_entries(account_id):
-            public: dict[str, object] = {"url": entry.get("url", "")}
+            public: dict[str, object] = {
+                "url": entry.get("url", ""),
+                "verified": bool(entry.get("verified", False)),
+                "verification_status": "verified" if entry.get("verified", False) else "unverified",
+            }
             if entry.get("title"):
                 public["title"] = entry["title"]
             if entry.get("aliases"):
@@ -158,22 +162,32 @@ class CredentialsStore:
         for entry in entries:
             entry_url = str(entry.get("url", "")).rstrip("/")
             entry_title = str(entry.get("title", "")).strip()
-            if entry_url == url or (title and entry_title == title):
-                entry["url"] = url
+            same_url_or_title = entry_url == url or (title and entry_title == title)
+            same_credentials = entry.get("username") == username and entry.get("password") == password
+            duplicate_match = same_credentials and self._credential_url_matches(entry_url, url)
+            if same_url_or_title or duplicate_match:
+                # Do not create a second exact URL when an existing wildcard already
+                # covers it (or vice versa) for the same username/password.  Merge
+                # user-facing labels into the existing entry instead.
+                if not duplicate_match or not entry_url:
+                    entry["url"] = url
                 entry["username"] = username
                 entry["password"] = password
+                entry["verified"] = False
                 if title:
                     entry["title"] = title
-                else:
+                elif not duplicate_match:
                     entry.pop("title", None)
                 if aliases:
-                    entry["aliases"] = aliases
-                else:
+                    existing_aliases = [str(a).strip() for a in entry.get("aliases", []) if str(a).strip()]
+                    merged_aliases = list(dict.fromkeys(existing_aliases + aliases)) if duplicate_match else aliases
+                    entry["aliases"] = merged_aliases
+                elif not duplicate_match:
                     entry.pop("aliases", None)
                 updated = True
                 break
         else:
-            entry = {"url": url, "username": username, "password": password}
+            entry = {"url": url, "username": username, "password": password, "verified": False}
             if title:
                 entry["title"] = title
             if aliases:
@@ -199,6 +213,45 @@ class CredentialsStore:
                 return True
         return False
 
+    def mark_verified(
+        self,
+        url: str,
+        username: str,
+        password: str,
+        account_id: str | None = None,
+    ) -> bool:
+        """Mark a matching credential as successfully verified."""
+        entry = self._find_entry(url, username, password, account_id)
+        if entry is None:
+            return False
+        if entry.get("verified") is True:
+            return True
+        entry["verified"] = True
+        self._save()
+        return True
+
+    def remove_matching(
+        self,
+        url: str,
+        username: str,
+        password: str,
+        account_id: str | None = None,
+    ) -> bool:
+        """Remove a credential entry matching URL/pattern and username/password."""
+        entries = self._account_entries(account_id)
+        url = str(url or "").rstrip("/")
+        for i, entry in enumerate(entries):
+            entry_url = str(entry.get("url", "")).rstrip("/")
+            if (
+                entry.get("username") == username
+                and entry.get("password") == password
+                and self._credential_url_matches(entry_url, url)
+            ):
+                del entries[i]
+                self._save()
+                return True
+        return False
+
     def reload(self) -> None:
         """Re-read the credentials file (useful after external edits)."""
         self._load()
@@ -211,15 +264,51 @@ class CredentialsStore:
     # internal
     # ------------------------------------------------------------------
 
-    def _ensure_account(self, account_id: str) -> list[dict[str, str]]:
+    def _ensure_account(self, account_id: str) -> list[dict[str, object]]:
         account_id = _normalize_account(account_id)
         if account_id not in self._accounts:
             self._accounts[account_id] = {"entries": []}
         return self._accounts[account_id]["entries"]
 
-    def _account_entries(self, account_id: str | None) -> list[dict[str, str]]:
+    def _account_entries(self, account_id: str | None) -> list[dict[str, object]]:
         account_id = _normalize_account(account_id)
         return self._accounts.get(account_id, {}).get("entries", [])
+
+    @staticmethod
+    def _has_wildcards(value: str) -> bool:
+        return any(ch in value for ch in "*?[")
+
+    @classmethod
+    def _credential_url_matches(cls, stored_url: str, candidate_url: str) -> bool:
+        stored_url = str(stored_url or "").rstrip("/")
+        candidate_url = str(candidate_url or "").rstrip("/")
+        if not stored_url or not candidate_url:
+            return False
+        if stored_url == candidate_url:
+            return True
+        if cls._has_wildcards(stored_url) and fnmatch.fnmatch(candidate_url, stored_url):
+            return True
+        if cls._has_wildcards(candidate_url) and fnmatch.fnmatch(stored_url, candidate_url):
+            return True
+        return False
+
+    def _find_entry(
+        self,
+        url: str,
+        username: str,
+        password: str,
+        account_id: str | None = None,
+    ) -> dict[str, object] | None:
+        url = str(url or "").rstrip("/")
+        for entry in self._account_entries(account_id):
+            entry_url = str(entry.get("url", "")).rstrip("/")
+            if (
+                entry.get("username") == username
+                and entry.get("password") == password
+                and self._credential_url_matches(entry_url, url)
+            ):
+                return entry
+        return None
 
     def _save(self) -> None:
         """Persist entries to the JSON file atomically."""

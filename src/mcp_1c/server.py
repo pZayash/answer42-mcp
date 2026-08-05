@@ -2660,6 +2660,9 @@ async def start_session(
 ) -> dict[str, Any]:
     """One-shot session factory: detect version, start infrastructure and connect the 1C test client."""
     credential_ref = _resolve_credential_reference(base_url)
+    credential_account_id = _current_account_id()
+    saved_credentials_used = False
+    saved_credentials_unverified = False
     input_looks_like_url = bool(re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", str(base_url or "")))
     if credential_ref is not None:
         # For saved titles/aliases, replace title -> real URL.  For URL/wildcard matches,
@@ -2667,10 +2670,17 @@ async def start_session(
         # would make the 1C client fail with invalid connection parameters.
         if credential_ref.get("url") and not input_looks_like_url:
             base_url = str(credential_ref["url"])
+        original_username = username
+        original_password = password
         if not username:
             username = str(credential_ref.get("username", ""))
         if not password:
             password = str(credential_ref.get("password", ""))
+        saved_credentials_used = (
+            (not original_username or original_username == credential_ref.get("username"))
+            and (not original_password or original_password == credential_ref.get("password"))
+        )
+        saved_credentials_unverified = not bool(credential_ref.get("verified", False))
     base_url = _platform.normalize_infobase_url(base_url)
     connection_mode = "auto"
     connection_value = ""
@@ -2898,8 +2908,12 @@ async def start_session(
                 connect_connection_mode, connect_connection_value or connect_base_url, connect_base_url,
             )
             diagnostic_error = _client_failure_diagnostics(sess, enriched, target_mode)
+            if saved_credentials_used and saved_credentials_unverified and _looks_like_auth_failure(str(diagnostic_error)):
+                _discard_unverified_credentials(connect_base_url or connect_connection_value, username, password, credential_account_id)
             await _cleanup_failed_start_session(sess, "test-client startup failure")
             raise diagnostic_error from exc
+        if saved_credentials_used:
+            _mark_credentials_verified(connect_base_url or connect_connection_value, username, password, credential_account_id)
         _auto_maximize_test_client_result(connect_result, sess.client_display or sess.display)
 
     if sess.idle_timeout_seconds > 0:
@@ -3098,6 +3112,26 @@ def _resolve_credential_reference(value: str) -> dict[str, str] | None:
     if not _CREDENTIAL_STORE_ENABLED or not value:
         return None
     return _credentials_store().resolve(value, account_id=_current_account_id())
+
+
+def _mark_credentials_verified(url: str, username: str, password: str, account_id: str | None) -> None:
+    if not _CREDENTIAL_STORE_ENABLED or not url or not username:
+        return
+    try:
+        _credentials_store().mark_verified(url, username, password, account_id=account_id)
+    except Exception:
+        logging.exception("Failed to mark credentials as verified for %s", url)
+
+
+def _discard_unverified_credentials(url: str, username: str, password: str, account_id: str | None) -> None:
+    if not _CREDENTIAL_STORE_ENABLED or not url or not username:
+        return
+    try:
+        removed = _credentials_store().remove_matching(url, username, password, account_id=account_id)
+        if removed:
+            logging.warning("Removed unverified credentials after authentication failure for %s", url)
+    except Exception:
+        logging.exception("Failed to remove unverified credentials for %s", url)
 
 
 @mcp.tool()
