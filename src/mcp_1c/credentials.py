@@ -288,9 +288,7 @@ class CredentialsStore:
             return True
         if cls._has_wildcards(stored_url) and fnmatch.fnmatch(candidate_url, stored_url):
             return True
-        if cls._has_wildcards(candidate_url) and fnmatch.fnmatch(stored_url, candidate_url):
-            return True
-        return False
+        return cls._has_wildcards(candidate_url) and fnmatch.fnmatch(stored_url, candidate_url)
 
     def _find_entry(
         self,
