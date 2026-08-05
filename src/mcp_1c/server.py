@@ -2071,17 +2071,16 @@ def rag_sources_add_from_directory(
     path: Annotated[str, "Directory where Answer42 should discover 1C configurations/extensions"],
     prefix: Annotated[str, "Optional prefix for generated source names"] = "",
     recursive: Annotated[bool, "Search child directories"] = True,
-    max_depth: Annotated[int, "Maximum recursive discovery depth"] = 4,
     watch: Annotated[bool, "Remember this directory and auto-discover new sources on future RAG listings"] = True,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> dict[str, Any]:
     """Discover/register 1C configuration and extension source directories under a root directory."""
-    params = {"path": path, "prefix": prefix, "recursive": recursive, "max_depth": max_depth, "watch": watch}
+    params = {"path": path, "prefix": prefix, "recursive": recursive, "watch": watch}
     disabled = _rag_require_enabled(session_id, "rag_sources_add_from_directory", params)
     if disabled is not None:
         return disabled
-    return _record_tool(session_id, "rag_sources_add_from_directory", params, _RAG.add_sources_from_directory(path, prefix=prefix, recursive=recursive, max_depth=max_depth, watch=watch))
+    return _record_tool(session_id, "rag_sources_add_from_directory", params, _RAG.add_sources_from_directory(path, prefix=prefix, recursive=recursive, max_depth=4, watch=watch))
 
 
 @mcp.tool()
@@ -3739,11 +3738,10 @@ async def active_window(*,
 
 @mcp.tool()
 async def windows_list(*,
-    max_depth: Annotated[int, "Serialization depth for each window"] = 2,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
     """Return all windows of the tested 1C client application."""
-    return await _bridge_call_recorded(session_id, "windows_list", {"max_depth": max_depth})
+    return await _bridge_call_recorded(session_id, "windows_list", {})
 
 
 @mcp.tool()
@@ -3751,7 +3749,6 @@ async def activate_window(
     index: Annotated[int, "Window index from windows_list; -1 means search by name/title"] = -1,
     title: Annotated[str, "Case-insensitive title substring"] = "",
     name: Annotated[str, "Exact window name when available"] = "",
-    max_depth: Annotated[int, "Serialization depth for returned window"] = 2,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
@@ -3759,46 +3756,43 @@ async def activate_window(
     return await _bridge_call_recorded(
         session_id,
         "activate_window",
-        {"index": index, "title": title, "name": name, "max_depth": max_depth},
+        {"index": index, "title": title, "name": name},
     )
 
 
 @mcp.tool()
 async def goto_start_page(*,
-    max_depth: Annotated[int, "Serialization depth for returned window"] = 2,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
     """Navigate the main test-client window to the start page."""
     return await _bridge_call_recorded(
         session_id,
         "goto_start_page",
-        {"max_depth": max_depth},
+        {},
     )
 
 
 @mcp.tool()
 async def goto_previous_window(*,
-    max_depth: Annotated[int, "Serialization depth for returned window"] = 2,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
     """Navigate the main test-client window to the previous open window."""
     return await _bridge_call_recorded(
         session_id,
         "goto_previous_window",
-        {"max_depth": max_depth},
+        {},
     )
 
 
 @mcp.tool()
 async def goto_next_window(*,
-    max_depth: Annotated[int, "Serialization depth for returned window"] = 2,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
     """Navigate the main test-client window to the next open window."""
     return await _bridge_call_recorded(
         session_id,
         "goto_next_window",
-        {"max_depth": max_depth},
+        {},
     )
 
 
@@ -3809,12 +3803,11 @@ async def wait_object(
     title: Annotated[str, "Object title substring"] = "",
     type: Annotated[str, "1C test object type"] = "",
     timeout: Annotated[int, "Timeout in seconds"] = 15,
-    max_depth: Annotated[int, "Serialization depth for returned object"] = 2,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
     """Wait until an object appears in the tested client UI tree."""
-    return await _bridge_call_recorded(session_id, "wait_object", {"name": name, "title": title, "type": type, "timeout": timeout, "max_depth": max_depth})
+    return await _bridge_call_recorded(session_id, "wait_object", {"name": name, "title": title, "type": type, "timeout": timeout})
 
 
 @mcp.tool()
@@ -3822,12 +3815,11 @@ async def wait_form(
     form_name: Annotated[str, "1C metadata form name, e.g. Catalog.X.Form.ItemForm"] = "",
     title: Annotated[str, "Form title substring"] = "",
     timeout: Annotated[int, "Timeout in seconds"] = 15,
-    max_depth: Annotated[int, "Serialization depth for returned form"] = 2,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
     """Wait until a form appears."""
-    return await _bridge_call_recorded(session_id, "wait_form", {"form_name": form_name, "title": title, "timeout": timeout, "max_depth": max_depth})
+    return await _bridge_call_recorded(session_id, "wait_form", {"form_name": form_name, "title": title, "timeout": timeout})
 
 
 @mcp.tool()
@@ -3835,12 +3827,11 @@ async def wait_window(
     title: Annotated[str, "Window title substring"] = "",
     name: Annotated[str, "Window exact name when available"] = "",
     timeout: Annotated[int, "Timeout in seconds"] = 15,
-    max_depth: Annotated[int, "Serialization depth for returned window"] = 2,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
     """Wait until a client window appears."""
-    return await _bridge_call_recorded(session_id, "wait_window", {"title": title, "name": name, "timeout": timeout, "max_depth": max_depth})
+    return await _bridge_call_recorded(session_id, "wait_window", {"title": title, "name": name, "timeout": timeout})
 
 
 @mcp.tool()
@@ -3923,8 +3914,6 @@ async def field_dropdown_items(
     field_name: Annotated[str, "Field name, or title when search_by_title=true"],
     search_by_title: Annotated[bool, "Search by visible title instead of technical name"] = False,
     timeout: Annotated[int, "Dropdown formation timeout in seconds"] = 10,
-    max_depth: Annotated[int, "Maximum depth used to serialize dropdown child objects"] = 3,
-    search_depth: Annotated[int, "Maximum depth used to find the field; 0 means auto-expand search depth"] = 0,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
@@ -3940,8 +3929,6 @@ async def field_dropdown_items(
             "field_name": field_name,
             "search_by_title": search_by_title,
             "timeout": timeout,
-            "max_depth": max_depth,
-            "search_depth": search_depth,
         },
     )
 
@@ -3993,12 +3980,11 @@ async def object_command_panel(
     name: Annotated[str, "Object technical name"] = "",
     title: Annotated[str, "Object title substring"] = "",
     type: Annotated[str, "1C test object type"] = "",
-    max_depth: Annotated[int, "Serialization depth for returned panel"] = 2,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
     """Return command panel for a found UI object, when supported."""
-    return await _bridge_call_recorded(session_id, "object_command_panel", {"name": name, "title": title, "type": type, "max_depth": max_depth})
+    return await _bridge_call_recorded(session_id, "object_command_panel", {"name": name, "title": title, "type": type})
 
 
 @mcp.tool()
@@ -4006,23 +3992,21 @@ async def object_context_menu(
     name: Annotated[str, "Object technical name"] = "",
     title: Annotated[str, "Object title substring"] = "",
     type: Annotated[str, "1C test object type"] = "",
-    max_depth: Annotated[int, "Serialization depth for returned menu"] = 2,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
     """Return context menu for a found UI object, when supported."""
-    return await _bridge_call_recorded(session_id, "object_context_menu", {"name": name, "title": title, "type": type, "max_depth": max_depth})
+    return await _bridge_call_recorded(session_id, "object_context_menu", {"name": name, "title": title, "type": type})
 
 
 @mcp.tool()
 async def window_command_interface(
-    max_depth: Annotated[int, "Serialization depth for returned command interface"] = 2,
     window_title: Annotated[str, "Optional window title substring to activate before reading command interface"] = "",
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
     """Return active window command interface, when supported."""
-    return await _bridge_call_recorded(session_id, "window_command_interface", {"max_depth": max_depth, "window_title": window_title})
+    return await _bridge_call_recorded(session_id, "window_command_interface", {"window_title": window_title})
 
 
 @mcp.tool()
@@ -4038,7 +4022,6 @@ async def command_interface_sections(
 @mcp.tool()
 async def command_interface_commands(
     section: Annotated[str, "Optional top-level section title substring, e.g. 'Главное' or 'Администрирование'"] = "",
-    max_depth: Annotated[int, "Serialization depth for returned command tree"] = 4,
     window_title: Annotated[str, "Optional window title substring to activate before reading command interface"] = "",
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
@@ -4047,7 +4030,7 @@ async def command_interface_commands(
     return await _bridge_call_recorded(
         session_id,
         "command_interface_commands",
-        {"section": section, "max_depth": max_depth, "window_title": window_title},
+        {"section": section, "window_title": window_title},
     )
 
 
@@ -4081,15 +4064,15 @@ async def group_collapse(name: Annotated[str, "Group technical name"] = "", titl
 
 
 @mcp.tool()
-async def group_current_page(name: Annotated[str, "Group technical name"] = "", title: Annotated[str, "Group title substring"] = "", max_depth: Annotated[int, "Serialization depth for returned page"] = 2, *, session_id: Annotated[str, "Session id"] = DEFAULT_SESSION) -> Any:
+async def group_current_page(name: Annotated[str, "Group technical name"] = "", title: Annotated[str, "Group title substring"] = "", *, session_id: Annotated[str, "Session id"] = DEFAULT_SESSION) -> Any:
     """Return current page of a page-group form element."""
-    return await _bridge_call_recorded(session_id, "group_current_page", {"name": name, "title": title, "max_depth": max_depth})
+    return await _bridge_call_recorded(session_id, "group_current_page", {"name": name, "title": title})
 
 
 @mcp.tool()
-async def group_activate_page(name: Annotated[str, "Page-group technical name"] = "", title: Annotated[str, "Page-group title substring"] = "", page_name: Annotated[str, "Target page technical name"] = "", page_title: Annotated[str, "Target page title"] = "", max_depth: Annotated[int, "Search depth"] = 8, *, session_id: Annotated[str, "Session id"] = DEFAULT_SESSION) -> Any:
+async def group_activate_page(name: Annotated[str, "Page-group technical name"] = "", title: Annotated[str, "Page-group title substring"] = "", page_name: Annotated[str, "Target page technical name"] = "", page_title: Annotated[str, "Target page title"] = "", *, session_id: Annotated[str, "Session id"] = DEFAULT_SESSION) -> Any:
     """Activate/switch to another page in a page-group form element."""
-    return await _bridge_call_recorded(session_id, "group_activate_page", {"name": name, "title": title, "page_name": page_name, "page_title": page_title, "max_depth": max_depth})
+    return await _bridge_call_recorded(session_id, "group_activate_page", {"name": name, "title": title, "page_name": page_name, "page_title": page_title})
 
 
 @mcp.tool()
@@ -4172,12 +4155,11 @@ async def command_bar(*,
 async def click_button(
     name: Annotated[str, "Button name or title text"],
     search_by_title: Annotated[bool, "If true, match visible title instead of object name"] = False,
-    max_depth: Annotated[int, "Maximum search depth"] = 8,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
     """Find a button in the active UI tree and press it."""
-    return await _bridge_call_recorded(session_id, "click_button", {"name": name, "search_by_title": search_by_title, "max_depth": max_depth})
+    return await _bridge_call_recorded(session_id, "click_button", {"name": name, "search_by_title": search_by_title})
 
 
 @mcp.tool()
@@ -4185,12 +4167,11 @@ async def find_object(
     name: Annotated[str, "Object technical name"] = "",
     title: Annotated[str, "Object visible title/caption"] = "",
     type: Annotated[str, "1C test object type, e.g. ТестируемаяФорма"] = "",
-    max_depth: Annotated[int, "Maximum search depth"] = 8,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
     """Find an object in the active UI hierarchy by name, title, or test object type."""
-    return await _bridge_call_recorded(session_id, "find_object", {"name": name, "title": title, "type": type, "max_depth": max_depth})
+    return await _bridge_call_recorded(session_id, "find_object", {"name": name, "title": title, "type": type})
 
 
 @mcp.tool()
@@ -4199,12 +4180,11 @@ async def search_objects(
     title: Annotated[str, "Object visible title/caption, exact match when specified"] = "",
     type: Annotated[str, "1C test object type, e.g. ТестируемаяФорма"] = "",
     limit: Annotated[int, "Maximum number of matched objects to return"] = 50,
-    max_depth: Annotated[int, "Maximum search depth"] = 8,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
     """Find all UI objects matching name, title and/or 1C test object type."""
-    return await _bridge_call_recorded(session_id, "search_objects", {"name": name, "title": title, "type": type, "limit": limit, "max_depth": max_depth})
+    return await _bridge_call_recorded(session_id, "search_objects", {"name": name, "title": title, "type": type, "limit": limit})
 
 
 @mcp.tool()
@@ -4213,7 +4193,6 @@ async def get_object(
     title: Annotated[str, "Object title pattern"] = "",
     type: Annotated[str, "1C tested object type name, optional"] = "",
     timeout: Annotated[int, "Search timeout in seconds"] = 0,
-    max_depth: Annotated[int, "Children depth to serialize"] = 2,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
@@ -4222,7 +4201,7 @@ async def get_object(
     Prefer find_object/search_objects for structured diagnostics and activate_object for actions.
     Keep this tool for platform/test-client edge cases where direct GetObject semantics matter.
     """
-    return await _bridge_call_recorded(session_id, "get_object", {"name": name, "title": title, "type": type, "timeout": timeout, "max_depth": max_depth})
+    return await _bridge_call_recorded(session_id, "get_object", {"name": name, "title": title, "type": type, "timeout": timeout})
 
 
 @mcp.tool()
@@ -4230,7 +4209,6 @@ async def focus_object(
     name: Annotated[str, "Object technical name"] = "",
     title: Annotated[str, "Object visible title/caption"] = "",
     type: Annotated[str, "1C test object type"] = "",
-    max_depth: Annotated[int, "Maximum search depth"] = 8,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
@@ -4241,7 +4219,7 @@ async def focus_object(
     to an inactive page, focus the page object first, then interact with its
     children.
     """
-    return await _bridge_call_recorded(session_id, "focus_object", {"name": name, "title": title, "type": type, "max_depth": max_depth})
+    return await _bridge_call_recorded(session_id, "focus_object", {"name": name, "title": title, "type": type})
 
 
 @mcp.tool()
@@ -4368,7 +4346,6 @@ async def field_dropdown_state(
     field_name: Annotated[str, "Field technical name or title"],
     search_by_title: Annotated[bool, "Search field by visible title"] = False,
     timeout: Annotated[int, "Wait timeout for dropdown formation"] = 60,
-    max_depth: Annotated[int, "Maximum search depth"] = 32,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
@@ -4376,7 +4353,7 @@ async def field_dropdown_state(
     return await _bridge_call_recorded(
         session_id,
         "field_dropdown_state",
-        {"field_name": field_name, "search_by_title": search_by_title, "timeout": timeout, "max_depth": max_depth},
+        {"field_name": field_name, "search_by_title": search_by_title, "timeout": timeout},
     )
 
 
@@ -4384,7 +4361,6 @@ async def field_dropdown_state(
 async def field_dropdown_close(
     field_name: Annotated[str, "Field technical name or title"],
     search_by_title: Annotated[bool, "Search field by visible title"] = False,
-    max_depth: Annotated[int, "Maximum search depth"] = 32,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
@@ -4392,7 +4368,7 @@ async def field_dropdown_close(
     return await _bridge_call_recorded(
         session_id,
         "field_dropdown_close",
-        {"field_name": field_name, "search_by_title": search_by_title, "max_depth": max_depth},
+        {"field_name": field_name, "search_by_title": search_by_title},
     )
 
 
@@ -4400,24 +4376,22 @@ async def field_dropdown_close(
 async def table_current_row(
     name: Annotated[str, "Table technical name"] = "",
     title: Annotated[str, "Table visible title"] = "",
-    max_depth: Annotated[int, "Maximum search depth"] = 8,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
     """Return current row of a tested table as key/value text mapping."""
-    return await _bridge_call_recorded(session_id, "table_current_row", {"name": name, "title": title, "max_depth": max_depth})
+    return await _bridge_call_recorded(session_id, "table_current_row", {"name": name, "title": title})
 
 
 @mcp.tool()
 async def table_selected_rows(
     name: Annotated[str, "Table technical name"] = "",
     title: Annotated[str, "Table visible title"] = "",
-    max_depth: Annotated[int, "Maximum search depth"] = 8,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
     """Return selected rows of a tested table as key/value text mappings."""
-    return await _bridge_call_recorded(session_id, "table_selected_rows", {"name": name, "title": title, "max_depth": max_depth})
+    return await _bridge_call_recorded(session_id, "table_selected_rows", {"name": name, "title": title})
 
 
 @mcp.tool()
@@ -4425,18 +4399,16 @@ async def table_cell_text(
     cell: Annotated[str, "Column name or index; empty returns current cell"] = "",
     name: Annotated[str, "Table technical name"] = "",
     title: Annotated[str, "Table visible title"] = "",
-    max_depth: Annotated[int, "Maximum search depth"] = 8,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
     """Return cell text from a tested table via GetCellText()."""
-    return await _bridge_call_recorded(session_id, "table_cell_text", {"name": name, "title": title, "cell": cell, "max_depth": max_depth})
+    return await _bridge_call_recorded(session_id, "table_cell_text", {"name": name, "title": title, "cell": cell})
 
 
 @mcp.tool()
 async def tabular_documents(
     include_text: Annotated[bool, "Include tabular document cells"] = False,
-    max_depth: Annotated[int, "Maximum search depth"] = 8,
     row_start: Annotated[int, "First row to read when include_text=true (1-based)"] = 1,
     row_end: Annotated[int, "Last row to read when include_text=true; 0 = row_start + max_rows - 1"] = 0,
     column_start: Annotated[int, "First column to read when include_text=true (1-based)"] = 1,
@@ -4451,14 +4423,13 @@ async def tabular_documents(
     include_text is intended for small/partial ranges. For large tabular
     documents, save/export the report to a file and analyze that file instead.
     """
-    return await _bridge_call_recorded(session_id, "tabular_documents", {"include_text": include_text, "max_depth": max_depth, "row_start": row_start, "row_end": row_end, "column_start": column_start, "column_end": column_end, "max_rows": max_rows, "max_columns": max_columns})
+    return await _bridge_call_recorded(session_id, "tabular_documents", {"include_text": include_text, "row_start": row_start, "row_end": row_end, "column_start": column_start, "column_end": column_end, "max_rows": max_rows, "max_columns": max_columns})
 
 
 @mcp.tool()
 async def tabular_document_text(
     name: Annotated[str, "Tabular document field technical name"] = "",
     title: Annotated[str, "Tabular document field visible title"] = "",
-    max_depth: Annotated[int, "Maximum search depth"] = 8,
     row_start: Annotated[int, "First row to read (1-based)"] = 1,
     row_end: Annotated[int, "Last row to read; 0 = row_start + max_rows - 1"] = 0,
     column_start: Annotated[int, "First column to read (1-based)"] = 1,
@@ -4476,7 +4447,7 @@ async def tabular_document_text(
     and analyze the saved PDF/XLSX/TXT/HTML file instead of reading UI cells one
     by one.
     """
-    result = await _bridge_call_recorded(session_id, "tabular_document_text", {"name": name, "title": title, "max_depth": max_depth, "row_start": row_start, "row_end": row_end, "column_start": column_start, "column_end": column_end, "max_rows": max_rows, "max_columns": max_columns})
+    result = await _bridge_call_recorded(session_id, "tabular_document_text", {"name": name, "title": title, "row_start": row_start, "row_end": row_end, "column_start": column_start, "column_end": column_end, "max_rows": max_rows, "max_columns": max_columns})
     return _compact_tabular_text_result(result, include_raw=not _compact_enabled(compact))
 
 
@@ -4486,12 +4457,11 @@ async def tabular_document_save(
     title: Annotated[str, "Tabular document field visible title"] = "",
     path: Annotated[str, "Output file path; empty = auto-generated temp path"] = "",
     format: Annotated[str, "Output format: pdf | xlsx | xls | html | txt"] = "pdf",
-    max_depth: Annotated[int, "Maximum search depth"] = 8,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
     """Save a tabular document field to a file in the selected format."""
-    result = await _bridge_call_recorded(session_id, "tabular_document_save", {"name": name, "title": title, "path": path, "format": format, "max_depth": max_depth})
+    result = await _bridge_call_recorded(session_id, "tabular_document_save", {"name": name, "title": title, "path": path, "format": format})
     return _select_saved_tabular_document_file(result, format)
 
 
@@ -4499,12 +4469,11 @@ async def tabular_document_save(
 async def tabular_document_state_display(
     name: Annotated[str, "Tabular document field technical name"] = "",
     title: Annotated[str, "Tabular document field visible title"] = "",
-    max_depth: Annotated[int, "Maximum search depth"] = 8,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
     """Return the state display of a tabular document field, when exposed by 1C."""
-    return await _bridge_call_recorded(session_id, "tabular_document_state_display", {"name": name, "title": title, "max_depth": max_depth})
+    return await _bridge_call_recorded(session_id, "tabular_document_state_display", {"name": name, "title": title})
 
 
 def _select_saved_tabular_document_file(result: Any, format: str) -> Any:
@@ -4599,12 +4568,11 @@ def _looks_like_plain_text(data: bytes) -> bool:
 async def toggle_field(
     field_name: Annotated[str, "Field technical name"],
     value: Annotated[bool, "Desired checkbox value"] = False,
-    max_depth: Annotated[int, "Max UI tree depth for nested fields"] = 20,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
     """Set a checkbox-like field using the 1C test client API."""
-    return await _bridge_call_recorded(session_id, "toggle_field", {"field_name": field_name, "value": value, "max_depth": max_depth})
+    return await _bridge_call_recorded(session_id, "toggle_field", {"field_name": field_name, "value": value})
 
 
 @mcp.tool()
@@ -4612,24 +4580,22 @@ async def set_field_value(
     field_name: Annotated[str, "Field technical name or title"],
     value: Annotated[str, "Value to set"],
     search_by_title: Annotated[bool, "If true, match visible title instead of object name"] = False,
-    max_depth: Annotated[int, "Max UI tree depth for nested fields"] = 8,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
     """Set a value in a form field by name or title."""
-    return await _bridge_call_recorded(session_id, "set_field_value", {"field_name": field_name, "value": value, "search_by_title": search_by_title, "max_depth": max_depth})
+    return await _bridge_call_recorded(session_id, "set_field_value", {"field_name": field_name, "value": value, "search_by_title": search_by_title})
 
 
 @mcp.tool()
 async def activate_field(
     field_name: Annotated[str, "Field technical name or title"],
     search_by_title: Annotated[bool, "If true, match visible title instead of object name"] = False,
-    max_depth: Annotated[int, "Max UI tree depth for nested fields"] = 8,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
     """Activate/focus a form field by name or title."""
-    return await _bridge_call_recorded(session_id, "activate_field", {"field_name": field_name, "search_by_title": search_by_title, "max_depth": max_depth})
+    return await _bridge_call_recorded(session_id, "activate_field", {"field_name": field_name, "search_by_title": search_by_title})
 
 
 @mcp.tool()
@@ -4669,13 +4635,12 @@ async def table_rows(
     name: Annotated[str, "Table technical name"] = "",
     title: Annotated[str, "Table visible title"] = "",
     limit: Annotated[int, "Maximum rows to return"] = 50,
-    max_depth: Annotated[int, "Maximum search depth"] = 8,
     compact: Annotated[bool | None, "Return compact row values; default follows ONEC_MCP_RESULT_VERBOSITY"] = None,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
     """Return rows of a tested table as key/value mappings."""
-    result = await _bridge_call_recorded(session_id, "table_rows", {"name": name, "title": title, "limit": limit, "max_depth": max_depth})
+    result = await _bridge_call_recorded(session_id, "table_rows", {"name": name, "title": title, "limit": limit})
     return _compact_rows_result(result, include_raw=not _compact_enabled(compact))
 
 
@@ -4974,7 +4939,6 @@ async def _metadata_catalog_rows_from_output(session_id: str, max_rows: int) -> 
         output = await _bridge_call_recorded(session_id, "dynamic_list_output", {
             "button": "",
             "wait_seconds": 3,
-            "max_depth": 8,
         })
         tabular_docs = output.get("tabular_documents", {}) if isinstance(output, dict) else {}
         items = tabular_docs.get("items", []) if isinstance(tabular_docs, dict) else []
@@ -5043,7 +5007,7 @@ async def _load_metadata_objects_from_catalog(session_id: str, limit: int) -> di
     source_method = "dynamic_list_output"
     warnings.extend(output_warnings)
     if not parsed_rows:
-        rows_result = await _bridge_call_recorded(session_id, "table_rows", {"name": "Список", "title": "", "limit": limit, "max_depth": 8})
+        rows_result = await _bridge_call_recorded(session_id, "table_rows", {"name": "Список", "title": "", "limit": limit})
         rows = rows_result.get("rows", []) if isinstance(rows_result, dict) else []
         parsed_rows = [_table_row_pairs(row) for row in rows]
         source_method = "table_rows"
@@ -5162,7 +5126,6 @@ async def configuration_name_version_from_subsystems(
     output_result = await _bridge_call_recorded(session_id, "dynamic_list_output", {
         "button": "",
         "wait_seconds": 3,
-        "max_depth": 8,
     })
     tabular_docs = output_result.get("tabular_documents", {}) if isinstance(output_result, dict) else {}
     items = tabular_docs.get("items", []) if isinstance(tabular_docs, dict) else []
@@ -5247,7 +5210,7 @@ async def installed_extensions_from_catalog(
     """
     navigation_link = "e1cib/list/Справочник.ВерсииРасширений"
     await _bridge_call_recorded(session_id, "open_navigation_link", {"navigation_link": navigation_link})
-    rows_result = await _bridge_call_recorded(session_id, "table_rows", {"name": "Список", "title": "", "limit": 500, "max_depth": 8})
+    rows_result = await _bridge_call_recorded(session_id, "table_rows", {"name": "Список", "title": "", "limit": 500})
     rows = rows_result.get("rows", []) if isinstance(rows_result, dict) else []
 
     parsed_rows = [_table_row_pairs(row) for row in rows]
@@ -5276,12 +5239,11 @@ async def table_find_row(
     name: Annotated[str, "Table technical name"] = "",
     title: Annotated[str, "Table visible title"] = "",
     limit: Annotated[int, "Maximum rows to scan"] = 200,
-    max_depth: Annotated[int, "Maximum search depth"] = 8,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
     """Find a tested table row containing text."""
-    return await _bridge_call_recorded(session_id, "table_find_row", {"name": name, "title": title, "text": text, "limit": limit, "max_depth": max_depth})
+    return await _bridge_call_recorded(session_id, "table_find_row", {"name": name, "title": title, "text": text, "limit": limit})
 
 
 @mcp.tool()
@@ -5290,12 +5252,11 @@ async def table_goto_row(
     name: Annotated[str, "Table technical name"] = "",
     title: Annotated[str, "Table visible title"] = "",
     limit: Annotated[int, "Maximum rows to scan"] = 200,
-    max_depth: Annotated[int, "Maximum search depth"] = 8,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
     """Move cursor to the first tested table row containing text."""
-    return await _bridge_call_recorded(session_id, "table_goto_row", {"name": name, "title": title, "text": text, "limit": limit, "max_depth": max_depth})
+    return await _bridge_call_recorded(session_id, "table_goto_row", {"name": name, "title": title, "text": text, "limit": limit})
 
 
 @mcp.tool()
@@ -5304,13 +5265,12 @@ async def table_move_row(
     steps: Annotated[int, "Number of row moves"] = 1,
     name: Annotated[str, "Table technical name"] = "",
     title: Annotated[str, "Table visible title"] = "",
-    max_depth: Annotated[int, "Maximum search depth"] = 8,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
     """Move current row using official test-client table navigation methods."""
     return await _bridge_call_recorded(session_id, "table_move_row",
-        {"name": name, "title": title, "direction": direction, "steps": steps, "max_depth": max_depth},
+        {"name": name, "title": title, "direction": direction, "steps": steps},
     )
 
 
@@ -5318,12 +5278,11 @@ async def table_move_row(
 async def table_add_row(
     name: Annotated[str, "Table technical name"] = "",
     title: Annotated[str, "Table visible title"] = "",
-    max_depth: Annotated[int, "Maximum UI search depth"] = 8,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
     """Add a row to the active tested table via the 1C test-client API (Insert / plus)."""
-    return await _bridge_call_recorded(session_id, "table_add_row", {"name": name, "title": title, "max_depth": max_depth})
+    return await _bridge_call_recorded(session_id, "table_add_row", {"name": name, "title": title})
 
 
 @mcp.tool()
@@ -5332,7 +5291,6 @@ async def table_set_field(
     field: Annotated[str, "Column field technical name or title"],
     value: Annotated[str, "Value to set"],
     search_by_title: Annotated[bool, "If true, match visible title instead of object name"] = False,
-    max_depth: Annotated[int, "Maximum UI search depth"] = 20,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
@@ -5341,7 +5299,7 @@ async def table_set_field(
     Finds the editor field for the column (e.g. ТоварыНоменклатура), activates it,
     delegates to the general set_field_value logic, ends row editing, and verifies
     the value in the current table row."""
-    return await _bridge_call_recorded(session_id, "table_set_field", {"table": table, "field": field, "value": value, "search_by_title": search_by_title, "max_depth": max_depth})
+    return await _bridge_call_recorded(session_id, "table_set_field", {"table": table, "field": field, "value": value, "search_by_title": search_by_title})
 
 
 @mcp.tool()
@@ -5349,24 +5307,22 @@ async def table_set_row_values(
     table: Annotated[str, "Table technical name"],
     values: Annotated[str, "JSON object mapping column names/titles to values"],
     search_by_title: Annotated[bool, "If true, match visible title instead of object name"] = False,
-    max_depth: Annotated[int, "Maximum UI search depth"] = 20,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
     """Set multiple fields in the current row of a form table and verify each value."""
-    return await _bridge_call_recorded(session_id, "table_set_row_values", {"table": table, "values": values, "search_by_title": search_by_title, "max_depth": max_depth})
+    return await _bridge_call_recorded(session_id, "table_set_row_values", {"table": table, "values": values, "search_by_title": search_by_title})
 
 
 @mcp.tool()
 async def set_form_fields(
     values: Annotated[str, "JSON object mapping field names/titles to values"],
     search_by_title: Annotated[bool, "If true, match visible title instead of object name"] = False,
-    max_depth: Annotated[int, "Maximum UI search depth"] = 20,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
     """Set multiple ordinary form fields using the same logic as set_field_value."""
-    return await _bridge_call_recorded(session_id, "set_form_fields", {"values": values, "search_by_title": search_by_title, "max_depth": max_depth})
+    return await _bridge_call_recorded(session_id, "set_form_fields", {"values": values, "search_by_title": search_by_title})
 
 
 @mcp.tool()
@@ -5508,7 +5464,6 @@ async def dynamic_list_settings_available_fields(
     expand_tree: Annotated[bool, "Expand tree rows to discover nested fields"] = True,
     limit: Annotated[int, "Max fields to return"] = 500,
     close: Annotated[bool, "Close the settings form after reading"] = False,
-    max_depth: Annotated[int, "Maximum UI search depth"] = 30,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
@@ -5523,7 +5478,6 @@ async def dynamic_list_settings_available_fields(
         "expand_tree": expand_tree,
         "limit": limit,
         "close": close,
-        "max_depth": max_depth,
     })
 
 
@@ -5533,7 +5487,6 @@ async def dynamic_list_set_settings(
     orders: Annotated[str, "JSON array of order objects [{field, direction?}] or empty string"] = "",
     clear_first: Annotated[bool, "Reset list settings before applying new filters/orders"] = False,
     close: Annotated[bool, "Close the settings form after applying"] = True,
-    max_depth: Annotated[int, "Maximum UI search depth"] = 30,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
@@ -5551,7 +5504,6 @@ async def dynamic_list_set_settings(
         "orders": order_list,
         "clear_first": clear_first,
         "close": close,
-        "max_depth": max_depth,
     })
 
 
@@ -5559,7 +5511,6 @@ async def dynamic_list_set_settings(
 async def dynamic_list_current_settings(
     section: Annotated[str, "Settings section to read: 'filter' (Отбор), 'order' (Сортировка), 'conditional' (Условное оформление), 'group' (Группировка)"] = "filter",
     close: Annotated[bool, "Close the settings form after reading"] = False,
-    max_depth: Annotated[int, "Maximum UI search depth"] = 30,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
@@ -5571,7 +5522,6 @@ async def dynamic_list_current_settings(
     return await _bridge_call_recorded(session_id, "dynamic_list_current_settings", {
         "section": section,
         "close": close,
-        "max_depth": max_depth,
     })
 
 
@@ -5580,24 +5530,22 @@ async def dynamic_list_sort_by_column(
     column_title: Annotated[str, "Visible column title to sort by using 1C УстановитьПорядок(<ЗаголовокКолонки>)"],
     name: Annotated[str, "Dynamic list/table technical name"] = "Список",
     title: Annotated[str, "Dynamic list/table visible title"] = "",
-    max_depth: Annotated[int, "Maximum search depth"] = 8,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
     """Quickly sort the active dynamic list by a visible column title via the 1C test-client API УстановитьПорядок; this is not the settings-form Sort tab."""
-    return await _bridge_call_recorded(session_id, "dynamic_list_sort_by_column", {"name": name, "title": title, "column_title": column_title, "max_depth": max_depth})
+    return await _bridge_call_recorded(session_id, "dynamic_list_sort_by_column", {"name": name, "title": title, "column_title": column_title})
 
 
 @mcp.tool()
 async def dynamic_list_output(
     button: Annotated[str, "Optional exact 1C button name/title; empty tries common Вывести список buttons"] = "",
     wait_seconds: Annotated[int, "Seconds to wait for the tabular document form"] = 2,
-    max_depth: Annotated[int, "Maximum UI search depth"] = 8,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
     """Press dynamic list 'Вывести список' button and return detected tabular document(s), including text when possible."""
-    return await _bridge_call_recorded(session_id, "dynamic_list_output", {"button": button, "wait_seconds": wait_seconds, "max_depth": max_depth})
+    return await _bridge_call_recorded(session_id, "dynamic_list_output", {"button": button, "wait_seconds": wait_seconds})
 
 
 @mcp.tool()
@@ -5617,7 +5565,6 @@ async def dynamic_list_find(
     compare_type: Annotated[str, "Optional visible compare mode in 'Как искать'; empty uses dialog default"] = "",
     name: Annotated[str, "Dynamic list/table technical name"] = "Список",
     title: Annotated[str, "Dynamic list/table visible title"] = "",
-    max_depth: Annotated[int, "Maximum UI search depth"] = 8,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
@@ -5628,7 +5575,6 @@ async def dynamic_list_find(
         "field": field,
         "text": text,
         "compare_type": compare_type,
-        "max_depth": max_depth,
     })
 
 
@@ -5639,7 +5585,6 @@ async def dynamic_list_filter_by_current_value(
     cell: Annotated[str, "Column/cell technical name to make current before filtering; empty uses current cell"] = "",
     text: Annotated[str, "Optional substring: first move to a row containing this text, then filter by the current value"] = "",
     limit: Annotated[int, "Max rows to scan when text is set"] = 200,
-    max_depth: Annotated[int, "Maximum UI search depth"] = 8,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
@@ -5650,7 +5595,6 @@ async def dynamic_list_filter_by_current_value(
         "cell": cell,
         "text": text,
         "limit": limit,
-        "max_depth": max_depth,
     })
 
 

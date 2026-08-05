@@ -123,8 +123,7 @@ async def call_ok(session: ClientSession, name: str, args: dict | None = None):
 
 async def call_ui_ok(session: ClientSession, name: str, args: dict | None = None, timeout: float | None = None):
     args = args or {}
-    read_timeout = timedelta(seconds=timeout) if timeout else None
-    result = await session.call_tool(name, args, read_timeout_seconds=read_timeout)
+    result = await session.call_tool(name, args, read_timeout_seconds=timeout)
     if result.is_error:
         value = "\n".join(getattr(item, "text", "") for item in result.content)
         await _record_manual_step(session, args.get("session_id", "e2e-mcp"), name, args, {"error": value})
@@ -482,7 +481,7 @@ async def run_coverage(session: ClientSession, sid: str, suffix: str, screenshot
 
     negative_calls = [
         ("get_object", {"name": "DefinitelyMissing", "session_id": sid}, "Объект не может быть найден"),
-        ("activate_object", {"name": "DefinitelyMissing", "session_id": sid}, "Объект не найден"),
+        ("focus_object", {"name": "DefinitelyMissing", "session_id": sid}, "Объект не найден"),
         ("click_button", {"name": "DefinitelyMissing", "session_id": sid}, "Кнопка не найдена"),
         ("set_field_value", {"field_name": "DefinitelyMissing", "value": "x", "session_id": sid}, "Поле не найдено"),
         ("activate_field", {"field_name": "DefinitelyMissing", "session_id": sid}, "Поле не найдено"),

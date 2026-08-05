@@ -343,13 +343,13 @@ def test_selected_new_tool_schemas():
     assert tools["field_info"].input_schema["required"] == ["field_name"]
     assert tools["field_dropdown_items"].input_schema["required"] == ["field_name"]
     assert tools["field_dropdown_items"].input_schema["properties"]["timeout"]["default"] == 10
-    assert tools["field_dropdown_items"].input_schema["properties"]["max_depth"]["default"] == 3
-    assert tools["field_dropdown_items"].input_schema["properties"]["search_depth"]["default"] == 0
-    assert tools["toggle_field"].input_schema["properties"]["max_depth"]["default"] == 20
-    assert tools["click_button"].input_schema["properties"]["max_depth"]["default"] == 8
+    assert "max_depth" not in tools["field_dropdown_items"].input_schema["properties"]
+    assert "search_depth" not in tools["field_dropdown_items"].input_schema["properties"]
+    assert "max_depth" not in tools["toggle_field"].input_schema["properties"]
+    assert "max_depth" not in tools["click_button"].input_schema["properties"]
     assert tools["decoration_click_link"].input_schema["properties"]["presentation"]["default"] == ""
     assert tools["command_interface_commands"].input_schema["properties"]["section"]["default"] == ""
-    assert tools["command_interface_commands"].input_schema["properties"]["max_depth"]["default"] == 4
+    assert "max_depth" not in tools["command_interface_commands"].input_schema["properties"]
     assert tools["command_interface_search"].input_schema["required"] == ["query"]
     assert tools["command_interface_search"].input_schema["properties"]["max_results"]["default"] == 20
     assert "session_id" in tools["configuration_name_version_from_subsystems"].input_schema["properties"]
@@ -375,9 +375,9 @@ def test_selected_new_tool_schemas():
     assert tools["credentials_save"].input_schema["required"] == ["url", "username", "password"]
     assert tools["credentials_remove"].input_schema["required"] == ["url"]
     assert tools["tabular_document_save"].input_schema["properties"]["format"]["default"] == "pdf"
-    assert tools["tabular_document_state_display"].input_schema["properties"]["max_depth"]["default"] == 8
+    assert "max_depth" not in tools["tabular_document_state_display"].input_schema["properties"]
     assert tools["search_objects"].input_schema["properties"]["limit"]["default"] == 50
-    assert tools["search_objects"].input_schema["properties"]["max_depth"]["default"] == 8
+    assert "max_depth" not in tools["search_objects"].input_schema["properties"]
 
 
 def test_metadata_objects_catalog_self_entry_is_searchable():
