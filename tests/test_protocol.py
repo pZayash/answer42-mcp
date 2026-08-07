@@ -36,3 +36,10 @@ def test_set_field_value_suggests_creating_missing_reference_values():
     assert "Возможно значение '" in module
     assert "откройте форму выбора" in module
     assert "создайте элемент справочника/вида/единицы" in module
+
+
+def test_table_set_field_suggests_missing_reference_when_value_not_confirmed():
+    module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
+
+    assert "Если это ссылочное поле, значение могло не найтись в справочнике" in module
+    assert 'ПодсказкаСозданияСсылочногоЗначенияMCP(ИмяПоля, Значение)' in module
