@@ -4104,7 +4104,7 @@ async def ui_tree(
     include_rag_types: Annotated[bool, "Enrich UI elements with best-effort types from the local RAG index"] = True,
     include_hidden: Annotated[bool, "Include invisible form elements; visible/available flags are always returned"] = False,
     compact: Annotated[bool | None, "Return compact tree fields; default follows ONEC_MCP_RESULT_VERBOSITY"] = None,
-    max_nodes: Annotated[int, "Maximum nodes serialized by the 1C side; 0 disables the limit"] = 3000,
+    max_nodes: Annotated[int, "Maximum nodes serialized by the 1C side; 0 disables the limit"] = 0,
     max_depth: Annotated[int, "Maximum UI tree depth serialized by the 1C side; 0 disables the limit"] = 0,
     include_data: Annotated[bool, "Include potentially expensive data presentations from UI nodes"] = True,
     rag_snapshot: Annotated[str, "Optional RAG snapshot name/id used for type enrichment"] = "",
@@ -4113,11 +4113,10 @@ async def ui_tree(
 ) -> Any:
     """Return a serialized tree of the active window/forms/elements.
 
-    By default the 1C side serializes the visible/active form tree with a safety
-    node limit. Use include_hidden=true to inspect hidden pages/elements. For huge
-    forms, tune max_nodes/max_depth or set include_data=false to skip expensive
-    ПолучитьПредставлениеДанных() calls. Pass max_nodes=0/max_depth=0 to disable
-    those limits when a full diagnostic dump is required.
+    By default the 1C side serializes the full visible/active form tree without
+    depth or node limits. Use include_hidden=true to inspect hidden pages/elements.
+    For huge forms, optionally tune max_nodes/max_depth or set include_data=false
+    to skip expensive ПолучитьПредставлениеДанных() calls.
     When RAG data is available, each matching element gets `rag_type` and `rag`
     fields with metadata-derived type/source information. Runtime 1C UI data is
     returned unchanged when the RAG index has no match.
