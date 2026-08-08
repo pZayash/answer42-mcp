@@ -1443,7 +1443,7 @@ def _compact_ui_node(node: Any, depth: int = 0, max_children: int = 30) -> Any:
         return node
     keep_keys = (
         "type", "name", "title", "text", "value", "presentation", "visible", "available", "enabled", "read_only",
-        "current", "selected", "data_path", "rag_type", "rag", "truncated", "truncated_reason", "hidden_children_count",
+        "current", "selected", "data_path", "rag_type", "rag", "hidden_children_count",
     )
     result = {key: _copy_compact_object(node[key]) for key in keep_keys if key in node and node.get(key) not in (None, "", [], {})}
     children = node.get("children") or []
@@ -4104,8 +4104,6 @@ async def ui_tree(
     include_rag_types: Annotated[bool, "Enrich UI elements with best-effort types from the local RAG index"] = True,
     include_hidden: Annotated[bool, "Include invisible form elements; visible/available flags are always returned"] = False,
     compact: Annotated[bool | None, "Return compact tree fields; default follows ONEC_MCP_RESULT_VERBOSITY"] = None,
-    max_nodes: Annotated[int, "Maximum nodes serialized by the 1C side; 0 disables the limit"] = 0,
-    max_depth: Annotated[int, "Maximum UI tree depth serialized by the 1C side; 0 disables the limit"] = 0,
     include_data: Annotated[bool, "Include potentially expensive data presentations from UI nodes"] = True,
     rag_snapshot: Annotated[str, "Optional RAG snapshot name/id used for type enrichment"] = "",
     *,
@@ -4115,16 +4113,14 @@ async def ui_tree(
 
     By default the 1C side serializes the full visible/active form tree without
     depth or node limits. Use include_hidden=true to inspect hidden pages/elements.
-    For huge forms, optionally tune max_nodes/max_depth or set include_data=false
-    to skip expensive ПолучитьПредставлениеДанных() calls.
+    For huge forms, set include_data=false to skip expensive
+    ПолучитьПредставлениеДанных() calls.
     When RAG data is available, each matching element gets `rag_type` and `rag`
     fields with metadata-derived type/source information. Runtime 1C UI data is
     returned unchanged when the RAG index has no match.
     """
     tree = await _bridge_call_recorded(session_id, "ui_tree", {
         "include_hidden": include_hidden,
-        "max_nodes": max_nodes,
-        "max_depth": max_depth,
         "include_data": include_data,
     })
     if isinstance(tree, dict):
