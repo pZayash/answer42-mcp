@@ -432,11 +432,18 @@ async def run_dynamic_lists(session: ClientSession, sid: str, suffix: str, scree
     available = await call_ui_ok(session, "dynamic_list_settings_available_fields", {"session_id": sid})
     assert available.get("count", 0) > 0, available
     assert "Наименование" in str(available), available
-    await call_ui_ok(session, "dynamic_list_set_settings", {
+    settings_result = await call_ui_ok(session, "dynamic_list_set_settings", {
         "orders": json.dumps([{"field": "Наименование", "direction": "Asc"}], ensure_ascii=False),
         "clear_first": True,
         "session_id": sid,
     }, timeout=180)
+    assert settings_result.get("applied") is True, settings_result
+    items = settings_result.get("items") or []
+    assert items, settings_result
+    assert all(item.get("applied") is True and not item.get("skipped") for item in items), settings_result
+    current = await call_ui_ok(session, "dynamic_list_current_settings", {"section": "order", "close": True, "session_id": sid})
+    assert current.get("found") is True and current.get("count", 0) > 0, current
+    assert "Наименование" in str(current), current
     await capture_screenshot(session, sid, str(screenshot_dir / "12-final-list.png"))
 
 
