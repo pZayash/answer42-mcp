@@ -20,6 +20,12 @@ class BridgeError(RuntimeError):
     """Raised when the 1C bridge is not connected or returns an error."""
 
 
+def _bridge_error_text(response: BridgeResponse, method: str) -> str:
+    """Return a non-empty error text for a failed bridge response."""
+    error = response.error.strip() if isinstance(response.error, str) else ""
+    return error or f"1C bridge command {method!r} failed without error text"
+
+
 @dataclass(slots=True)
 class ConnectedBridge:
     websocket: WebSocketServerProtocol
@@ -80,7 +86,7 @@ class OneCBridgeServer:
             bridge.pending.pop(request_id, None)
 
         if not response.ok:
-            raise BridgeError(response.error or f"1C bridge command {method!r} failed")
+            raise BridgeError(_bridge_error_text(response, method))
         return response.result
 
     async def _handler(self, websocket: WebSocketServerProtocol) -> None:

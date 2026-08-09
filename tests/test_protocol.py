@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from mcp_1c.bridge import _bridge_error_text
 from mcp_1c.protocol import MANAGER_PROTOCOL_VERSION, BridgeRequest, BridgeResponse
 
 
@@ -18,6 +19,16 @@ def test_bridge_response_shape():
     assert response.id == "1"
     assert response.ok is True
     assert response.result == {"pong": True}
+
+
+def test_bridge_error_text_never_empty():
+    assert _bridge_error_text(BridgeResponse(id="1", ok=False, error=""), "click_button") == (
+        "1C bridge command 'click_button' failed without error text"
+    )
+    assert _bridge_error_text(BridgeResponse(id="1", ok=False, error="  \n  "), "click_button") == (
+        "1C bridge command 'click_button' failed without error text"
+    )
+    assert _bridge_error_text(BridgeResponse(id="1", ok=False, error=" boom "), "click_button") == "boom"
 
 
 def test_form_close_and_save_uses_platform_wait_for_form_close():
@@ -43,3 +54,19 @@ def test_table_set_field_suggests_missing_reference_when_value_not_confirmed():
 
     assert "Если это ссылочное поле, значение могло не найтись в справочнике" in module
     assert 'ПодсказкаСозданияСсылочногоЗначенияMCP(ИмяПоля, Значение)' in module
+
+
+def test_client_diagnostics_collects_user_messages_via_test_application_api_and_clears_them():
+    module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
+    server = Path("src/mcp_1c/server.py").read_text(encoding="utf-8")
+
+    assert "Функция ТекстИсключенияMCP(Инфо, Метод)" in module
+    assert 'ТекстОшибки = "Команда " + Метод + " завершилась исключением без текста ошибки"' in module
+    assert "АктивноеОкно.ПолучитьТекстыСообщенийПользователю()" in module
+    assert "АктивноеОкно.ЗакрытьПанельСообщенийПользователю()" in module
+    assert 'Результат.Вставить("user_message_texts", СнимокСообщений.message_texts)' in module
+    assert 'Результат.Вставить("user_messages_cleared", СнимокСообщений.cleared)' in module
+    assert "ПолучитьСообщенияПользователю()" not in module
+    assert "ТестируемоеПриложение.ОчиститьСообщения()" not in module
+    assert 'ТекстОшибки = ТекстОшибки + Символы.ПС + "client_diagnostics=" + ДиагностикаJSON' in module
+    assert "except BridgeError as exc:" not in server
