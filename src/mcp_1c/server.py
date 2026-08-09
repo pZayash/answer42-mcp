@@ -5251,6 +5251,18 @@ async def table_find_row(
     return await _bridge_call_recorded(session_id, "table_find_row", {"name": name, "title": title, "text": text, "limit": limit})
 
 
+def _table_tool_bridge_error_result(tool: str, name: str, title: str, exc: Exception) -> dict[str, Any]:
+    error_text = str(exc).strip() or f"{tool} failed without error text"
+    return {
+        "found": None,
+        "table_name": name,
+        "table_title": title,
+        "reason": "bridge_error",
+        "tool": tool,
+        "error": error_text,
+    }
+
+
 @mcp.tool()
 async def table_goto_row(
     text: Annotated[str, "Substring to search in serialized row values"],
@@ -5287,7 +5299,10 @@ async def table_add_row(
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
     """Add a row to the active tested table via the 1C test-client API (Insert / plus)."""
-    return await _bridge_call_recorded(session_id, "table_add_row", {"name": name, "title": title})
+    try:
+        return await _bridge_call_recorded(session_id, "table_add_row", {"name": name, "title": title})
+    except BridgeError as bridge_exc:
+        return _table_tool_bridge_error_result("table_add_row", name, title, bridge_exc)
 
 
 @mcp.tool()
@@ -5415,7 +5430,10 @@ async def table_begin_edit(
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
     """Begin editing the current row in a form table."""
-    return await _bridge_call_recorded(session_id, "table_begin_edit", {"name": name, "title": title})
+    try:
+        return await _bridge_call_recorded(session_id, "table_begin_edit", {"name": name, "title": title})
+    except BridgeError as bridge_exc:
+        return _table_tool_bridge_error_result("table_begin_edit", name, title, bridge_exc)
 
 
 @mcp.tool()
@@ -5680,7 +5698,7 @@ async def close_form(*,
     """Close the active form."""
     try:
         return await _bridge_call_recorded(session_id, "close_form", {})
-    except (BridgeError, asyncio.TimeoutError) as exc:
+    except (TimeoutError, BridgeError) as exc:
         error_text = str(exc).strip() or "close_form failed without error text"
         try:
             window = await _bridge_call_recorded(session_id, "active_window", {})
