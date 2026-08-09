@@ -29,7 +29,7 @@ from . import __version__, os_support, release_helper, runtime, skill_installer
 from . import platform as _platform
 from .auth import build_auth_settings, build_token_verifier, load_static_token_config
 from .auth import current_account_id as _current_account_id
-from .bridge import OneCBridgeServer
+from .bridge import BridgeError, OneCBridgeServer
 from .credentials import get_store as _credentials_store
 from .protocol import MANAGER_PROTOCOL_VERSION
 from .rag import RagService
@@ -5639,12 +5639,76 @@ async def save_form(*,
     return await _bridge_call_recorded(session_id, "save_form", {})
 
 
+def _find_message_box_texts_and_buttons(node: Any) -> tuple[str, list[str], list[dict[str, str]]]:
+    texts: list[str] = []
+    buttons: list[dict[str, str]] = []
+
+    def walk(current: Any) -> None:
+        if not isinstance(current, dict):
+            return
+        node_type = str(current.get("type") or "")
+        title = str(current.get("title") or "")
+        name = str(current.get("name") or "")
+        visible = current.get("current_visible", current.get("visible", True))
+        available = current.get("current_available", current.get("available", True))
+        if title and visible:
+            texts.append(title)
+        if "кнопка" in node_type.lower() and visible and available:
+            buttons.append({"name": name, "title": title})
+        for child in current.get("children") or []:
+            walk(child)
+        current_page = current.get("current_page")
+        if current_page:
+            walk(current_page)
+
+    walk(node)
+    # Keep order but remove duplicates/noise.
+    unique_texts: list[str] = []
+    seen_texts: set[str] = set()
+    for text in texts:
+        if text in seen_texts:
+            continue
+        seen_texts.add(text)
+        unique_texts.append(text)
+    return "\n".join(unique_texts), unique_texts, buttons
+
+
 @mcp.tool()
 async def close_form(*,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
     """Close the active form."""
-    return await _bridge_call_recorded(session_id, "close_form", {})
+    try:
+        return await _bridge_call_recorded(session_id, "close_form", {})
+    except (BridgeError, asyncio.TimeoutError) as exc:
+        error_text = str(exc).strip() or "close_form failed without error text"
+        try:
+            window = await _bridge_call_recorded(session_id, "active_window", {})
+        except Exception as diag_exc:
+            return {
+                "closed": False,
+                "reason": "close_failed",
+                "close_error": error_text,
+                "diagnostics_error": str(diag_exc) or type(diag_exc).__name__,
+            }
+        modal_text, modal_texts, modal_buttons = _find_message_box_texts_and_buttons(window)
+        result: dict[str, Any] = {
+            "closed": False,
+            "reason": "close_failed",
+            "close_error": error_text,
+            "active_window": window,
+            "modal_title": window.get("title", "") if isinstance(window, dict) else "",
+            "modal_text": modal_text,
+            "modal_texts": modal_texts,
+            "modal_buttons": modal_buttons,
+        }
+        if isinstance(window, dict) and any(
+            child.get("form_name") == "MessageBox" for child in window.get("children", []) if isinstance(child, dict)
+        ):
+            result["reason"] = "close_blocked_by_modal_dialog"
+            result["modal_form_name"] = "MessageBox"
+            result["modal_looks_like_dialog"] = True
+        return _record_tool(session_id, "close_form", {}, result)
 
 
 def _x11_screen_size(display: str | None = None) -> tuple[int, int] | None:
