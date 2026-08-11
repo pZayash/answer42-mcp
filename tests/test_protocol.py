@@ -193,6 +193,8 @@ def test_manager_search_objects_serializes_matches_shallow_by_default():
 
     assert 'ВключатьДетей = СвойствоСтруктуры(Параметры, "include_children", Ложь)' in module
     assert "ОбъектВСтруктуру(РодительскийОбъект, 0, Истина, Истина, Истина, Ложь, КешПоиска, Истина, ВключатьДетей)" in module
+    assert "ПостФильтрНайденныхОбъектовMCP" in module
+    assert "СтрНайти(ЗаголовокОбъекта, ИскомыйЗаголовокСтрокой)" in module
 
 
 def test_ui_tree_current_page_is_shallow_and_command_panels_can_be_disabled():
