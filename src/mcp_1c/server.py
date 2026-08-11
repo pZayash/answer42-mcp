@@ -1789,8 +1789,15 @@ async def _bridge_call_recorded(
     await _wait_for_bridge_connected(sess, timeout=60.0)
     _touch_session(sess)
     request_timeout = sess.bridge.request_timeout
-    if method == "click_button":
-        request_timeout = float(os.getenv("ONEC_MCP_CLICK_BUTTON_TIMEOUT", str(request_timeout * 5 / 3)))
+    method_timeouts = {
+        "click_button": ("ONEC_MCP_CLICK_BUTTON_TIMEOUT", request_timeout * 5 / 3),
+        "ui_tree": ("ONEC_MCP_UI_TREE_TIMEOUT", request_timeout * 5 / 3),
+        "find_object": ("ONEC_MCP_FIND_OBJECT_TIMEOUT", request_timeout),
+        "search_objects": ("ONEC_MCP_SEARCH_OBJECTS_TIMEOUT", request_timeout * 5 / 3),
+    }
+    if method in method_timeouts:
+        env_name, default_timeout = method_timeouts[method]
+        request_timeout = float(os.getenv(env_name, str(default_timeout)))
     result = await sess.bridge.call(method, params, timeout=request_timeout)
     return _record_tool(session_id, method, params, result)
 
@@ -4159,6 +4166,52 @@ async def command_bar(*,
     return await _bridge_call_recorded(session_id, "command_bar", {})
 
 
+
+
+def _ui_match_text(actual: Any, expected: str, *, substring: bool = False) -> bool:
+    expected_norm = str(expected or "").strip().casefold()
+    if not expected_norm:
+        return True
+    actual_norm = str(actual or "").strip().casefold()
+    return expected_norm in actual_norm if substring else actual_norm == expected_norm
+
+
+def _ui_object_matches_query(obj: dict[str, Any], name: str = "", title: str = "", type: str = "") -> bool:
+    if not isinstance(obj, dict):
+        return False
+    if not _ui_match_text(obj.get("name"), name):
+        return False
+    # Runtime BSL search supports title containment for practical UI lookup; keep
+    # Python-side post-filtering aligned so buggy/older managers cannot leak
+    # unrelated rows into search_objects results.
+    if not _ui_match_text(obj.get("title"), title, substring=True):
+        return False
+    if type:
+        expected_type = str(type).replace(" ", "").strip().casefold()
+        actual_type = str(obj.get("type") or "").replace(" ", "").strip().casefold()
+        if expected_type not in actual_type and actual_type not in expected_type:
+            return False
+    return True
+
+
+def _filter_search_objects_result(result: Any, name: str = "", title: str = "", type: str = "") -> Any:
+    if not isinstance(result, dict) or not (name or title or type):
+        return result
+    objects = result.get("objects")
+    if not isinstance(objects, list):
+        return result
+    filtered = [obj for obj in objects if _ui_object_matches_query(obj, name=name, title=title, type=type)]
+    if len(filtered) == len(objects):
+        return result
+    result = dict(result)
+    result["objects"] = filtered
+    result["count"] = len(filtered)
+    result["found"] = bool(filtered)
+    result["post_filter_applied"] = True
+    result["post_filter_before_count"] = len(objects)
+    return result
+
+
 @mcp.tool()
 async def click_button(
     name: Annotated[str, "Button name or title text"],
@@ -4179,7 +4232,12 @@ async def find_object(
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
     """Find an object in the active UI hierarchy by name, title, or test object type."""
-    return await _bridge_call_recorded(session_id, "find_object", {"name": name, "title": title, "type": type})
+    result = await _bridge_call_recorded(session_id, "find_object", {"name": name, "title": title, "type": type})
+    if isinstance(result, dict) and result.get("found") and not _ui_object_matches_query(result.get("object") or {}, name=name, title=title, type=type):
+        filtered = dict(result)
+        filtered.update({"found": False, "post_filter_applied": True, "post_filter_reason": "manager_returned_non_matching_object"})
+        return filtered
+    return result
 
 
 @mcp.tool()
@@ -4192,7 +4250,8 @@ async def search_objects(
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
     """Find all UI objects matching name, title and/or 1C test object type."""
-    return await _bridge_call_recorded(session_id, "search_objects", {"name": name, "title": title, "type": type, "limit": limit})
+    result = await _bridge_call_recorded(session_id, "search_objects", {"name": name, "title": title, "type": type, "limit": limit})
+    return _filter_search_objects_result(result, name=name, title=title, type=type)
 
 
 @mcp.tool()

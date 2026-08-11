@@ -31,6 +31,24 @@ def test_bridge_error_text_never_empty():
     assert _bridge_error_text(BridgeResponse(id="1", ok=False, error=" boom "), "click_button") == "boom"
 
 
+
+def test_bridge_timeout_error_includes_last_progress_event(monkeypatch):
+    from mcp_1c.bridge import _format_timeout_progress
+
+    monkeypatch.setattr("mcp_1c.bridge.time.monotonic", lambda: 15.0)
+    text = _format_timeout_progress({
+        "phase": "search_done",
+        "method": "click_button",
+        "elapsed_ms": 1234,
+        "received_monotonic": 10.0,
+    })
+
+    assert "last progress" in text
+    assert "phase='search_done'" in text
+    assert "method='click_button'" in text
+    assert "elapsed_ms=1234" in text
+    assert "last_progress_age=5.0s" in text
+
 def test_form_close_does_not_block_on_save_discard_message_box():
     module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
 
@@ -144,3 +162,43 @@ def test_manager_uses_strict_match_for_form_command_names():
 
     assert 'СтрНайти(ИмяКнопки, "Форма") = 1' in module
     assert "ФормаПровести совпадает" in module
+
+
+def test_manager_sends_progress_events_for_slow_ui_commands():
+    module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
+
+    assert "ОтправитьСобытиеПрогрессаMCP" in module
+    assert 'Событие.Вставить("type", "event")' in module
+    assert 'Событие.Вставить("event", "progress")' in module
+    assert 'Событие.Вставить("id", ТекущийИдентификаторЗапросаMCP)' in module
+    assert 'ОтправитьСобытиеПрогрессаMCP("click_button", "search_done"' in module
+    assert 'ОтправитьСобытиеПрогрессаMCP("ui_tree", "active_window_done"' in module
+    assert 'ОтправитьСобытиеПрогрессаMCP("find_object", "fast_done"' in module
+    assert 'ОтправитьСобытиеПрогрессаMCP("search_objects", "visited"' in module
+
+
+def test_manager_find_object_has_fast_path_and_search_stats():
+    module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
+
+    assert "НайтиОбъектБыстроMCP" in module
+    assert "fast_platform_search" in module
+    assert "dfs_fallback" in module
+    assert "search_stats" in module
+    assert "НайтиОбъектРекурсивно(АктивноеОкно, Имя, Заголовок, ТипОбъекта, 0, СчетчикУзлов, КешПоиска)" in module
+    assert "СтрНайти(НормализованныйЗаголовок, НРег(ИскомыйЗаголовокСтрокой))" in module
+
+
+def test_manager_search_objects_serializes_matches_shallow_by_default():
+    module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
+
+    assert 'ВключатьДетей = СвойствоСтруктуры(Параметры, "include_children", Ложь)' in module
+    assert "ОбъектВСтруктуру(РодительскийОбъект, 0, Истина, Истина, Истина, Ложь, КешПоиска, Истина, ВключатьДетей)" in module
+
+
+def test_ui_tree_current_page_is_shallow_and_command_panels_can_be_disabled():
+    module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
+
+    assert 'ВключатьКомандныеПанели = СвойствоСтруктуры(Параметры, "include_command_panels", Истина)' in module
+    assert 'Результат.Вставить("current_page_name", ИмяТекущейСтраницы)' in module
+    assert "КешСериализации, ВключатьДанные, Ложь, СчетчикУзлов, Ложь" in module
+    assert "Если ВключатьКомандныеПанели И (ТипОбъекта" in module
