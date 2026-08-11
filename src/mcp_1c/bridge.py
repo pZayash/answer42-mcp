@@ -36,7 +36,7 @@ class ConnectedBridge:
 class OneCBridgeServer:
     """JSON-RPC-like WebSocket server for the embedded 1C manager processor."""
 
-    def __init__(self, host: str = "127.0.0.1", port: int = 8765, request_timeout: float = 60.0):
+    def __init__(self, host: str = "127.0.0.1", port: int = 8765, request_timeout: float = 180.0):
         self.host = host
         self.port = port
         self.request_timeout = request_timeout
@@ -69,11 +69,12 @@ class OneCBridgeServer:
             "pending": len(bridge.pending) if bridge else 0,
         }
 
-    async def call(self, method: str, params: dict[str, Any] | None = None) -> Any:
+    async def call(self, method: str, params: dict[str, Any] | None = None, timeout: float | None = None) -> Any:
         bridge = self._bridge
         if bridge is None:
             raise BridgeError("1C bridge is not connected. Start the 1C manager first.")
 
+        request_timeout = self.request_timeout if timeout is None else timeout
         request_id = str(uuid.uuid4())
         future: asyncio.Future[BridgeResponse] = asyncio.get_running_loop().create_future()
         bridge.pending[request_id] = future
@@ -81,7 +82,12 @@ class OneCBridgeServer:
 
         try:
             await bridge.websocket.send(json.dumps(request.to_json(), ensure_ascii=False))
-            response = await asyncio.wait_for(future, timeout=self.request_timeout)
+            try:
+                response = await asyncio.wait_for(future, timeout=request_timeout)
+            except asyncio.TimeoutError as exc:
+                raise BridgeError(
+                    f"1C bridge command {method!r} timed out after {request_timeout:g}s without response"
+                ) from exc
         finally:
             bridge.pending.pop(request_id, None)
 

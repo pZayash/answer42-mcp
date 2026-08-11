@@ -1012,3 +1012,61 @@ def test_configure_tool_logging_creates_rotating_handler(tmp_path):
 # Form navigation tests (Python-side fallback for form_next_element)
 # ---------------------------------------------------------------------------
 
+
+
+def test_click_button_uses_extended_timeout(monkeypatch):
+    from mcp_1c import server
+
+    class DummyBridge:
+        request_timeout = 180.0
+
+        async def call(self, method, params, timeout=None):
+            self.called = (method, params, timeout)
+            return {"ok": True}
+
+    class DummySession:
+        bridge = DummyBridge()
+
+    async def fake_ensure_restored_session(session_id):
+        return DummySession()
+
+    async def fake_wait_for_bridge_connected(sess, timeout=60.0):
+        return None
+
+    monkeypatch.setattr(server, "_ensure_restored_session", fake_ensure_restored_session)
+    monkeypatch.setattr(server, "_wait_for_bridge_connected", fake_wait_for_bridge_connected)
+    monkeypatch.setattr(server, "_record_tool", lambda session_id, method, params, result: result)
+
+    result = asyncio.run(server._bridge_call_recorded("unit", "click_button", {"name": "ФормаПровести"}))
+
+    assert result == {"ok": True}
+    assert DummySession.bridge.called == ("click_button", {"name": "ФормаПровести"}, 300.0)
+
+
+def test_non_click_button_uses_global_timeout(monkeypatch):
+    from mcp_1c import server
+
+    class DummyBridge:
+        request_timeout = 180.0
+
+        async def call(self, method, params, timeout=None):
+            self.called = (method, params, timeout)
+            return {"ok": True}
+
+    class DummySession:
+        bridge = DummyBridge()
+
+    async def fake_ensure_restored_session(session_id):
+        return DummySession()
+
+    async def fake_wait_for_bridge_connected(sess, timeout=60.0):
+        return None
+
+    monkeypatch.setattr(server, "_ensure_restored_session", fake_ensure_restored_session)
+    monkeypatch.setattr(server, "_wait_for_bridge_connected", fake_wait_for_bridge_connected)
+    monkeypatch.setattr(server, "_record_tool", lambda session_id, method, params, result: result)
+
+    result = asyncio.run(server._bridge_call_recorded("unit", "active_window", {}))
+
+    assert result == {"ok": True}
+    assert DummySession.bridge.called == ("active_window", {}, 180.0)

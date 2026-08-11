@@ -459,7 +459,7 @@ class SessionState:
         self.bridge = OneCBridgeServer(
             host="127.0.0.1",
             port=ws_port,
-            request_timeout=float(os.getenv("ONEC_MCP_REQUEST_TIMEOUT", "60")),
+            request_timeout=float(os.getenv("ONEC_MCP_REQUEST_TIMEOUT", "180")),
         )
         self.recorder = RecordingSession()
         self.rag_snapshot: str = ""
@@ -1788,7 +1788,10 @@ async def _bridge_call_recorded(
     sess = await _ensure_restored_session(session_id)
     await _wait_for_bridge_connected(sess, timeout=60.0)
     _touch_session(sess)
-    result = await sess.bridge.call(method, params)
+    request_timeout = sess.bridge.request_timeout
+    if method == "click_button":
+        request_timeout = float(os.getenv("ONEC_MCP_CLICK_BUTTON_TIMEOUT", str(request_timeout * 5 / 3)))
+    result = await sess.bridge.call(method, params, timeout=request_timeout)
     return _record_tool(session_id, method, params, result)
 
 
