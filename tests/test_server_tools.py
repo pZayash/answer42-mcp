@@ -1014,7 +1014,7 @@ def test_configure_tool_logging_creates_rotating_handler(tmp_path):
 
 
 
-def test_click_button_uses_extended_timeout(monkeypatch):
+def test_slow_ui_tools_use_method_specific_timeouts(monkeypatch):
     from mcp_1c import server
 
     class DummyBridge:
@@ -1037,36 +1037,52 @@ def test_click_button_uses_extended_timeout(monkeypatch):
     monkeypatch.setattr(server, "_wait_for_bridge_connected", fake_wait_for_bridge_connected)
     monkeypatch.setattr(server, "_record_tool", lambda session_id, method, params, result: result)
 
-    result = asyncio.run(server._bridge_call_recorded("unit", "click_button", {"name": "ФормаПровести"}))
+    expected = {
+        "click_button": 300.0,
+        "ui_tree": 300.0,
+        "find_object": 180.0,
+        "search_objects": 300.0,
+        "active_window": 180.0,
+    }
+    for method, timeout in expected.items():
+        result = asyncio.run(server._bridge_call_recorded("unit", method, {"name": "ФормаПровести"}))
+        assert result == {"ok": True}
+        assert DummySession.bridge.called == (method, {"name": "ФормаПровести"}, timeout)
 
-    assert result == {"ok": True}
-    assert DummySession.bridge.called == ("click_button", {"name": "ФормаПровести"}, 300.0)
+
+def test_search_objects_post_filters_manager_results_by_title_and_type():
+    from mcp_1c.server import _filter_search_objects_result
+
+    result = _filter_search_objects_result(
+        {
+            "found": True,
+            "count": 2,
+            "objects": [
+                {"name": "КомандаЗакрыть", "title": "Закрыть", "type": "Тестируемая кнопка формы"},
+                {"name": "КомандаОповещения", "title": "Отключить оповещения", "type": "Тестируемая кнопка формы"},
+            ],
+        },
+        title="Закрыть",
+        type="Тестируемая кнопка формы",
+    )
+
+    assert result["found"] is True
+    assert result["count"] == 1
+    assert result["objects"][0]["name"] == "КомандаЗакрыть"
+    assert result["post_filter_applied"] is True
+    assert result["post_filter_before_count"] == 2
 
 
-def test_non_click_button_uses_global_timeout(monkeypatch):
-    from mcp_1c import server
+def test_find_object_match_accepts_title_substring():
+    from mcp_1c.server import _ui_object_matches_query
 
-    class DummyBridge:
-        request_timeout = 180.0
-
-        async def call(self, method, params, timeout=None):
-            self.called = (method, params, timeout)
-            return {"ok": True}
-
-    class DummySession:
-        bridge = DummyBridge()
-
-    async def fake_ensure_restored_session(session_id):
-        return DummySession()
-
-    async def fake_wait_for_bridge_connected(sess, timeout=60.0):
-        return None
-
-    monkeypatch.setattr(server, "_ensure_restored_session", fake_ensure_restored_session)
-    monkeypatch.setattr(server, "_wait_for_bridge_connected", fake_wait_for_bridge_connected)
-    monkeypatch.setattr(server, "_record_tool", lambda session_id, method, params, result: result)
-
-    result = asyncio.run(server._bridge_call_recorded("unit", "active_window", {}))
-
-    assert result == {"ok": True}
-    assert DummySession.bridge.called == ("active_window", {}, 180.0)
+    assert _ui_object_matches_query(
+        {"name": "КомандаЗакрыть", "title": "Закрыть форму", "type": "Тестируемая кнопка формы"},
+        title="Закрыть",
+        type="ТестируемаяКнопкаФормы",
+    )
+    assert not _ui_object_matches_query(
+        {"name": "КомандаОповещения", "title": "Отключить оповещения", "type": "Тестируемая кнопка формы"},
+        title="Закрыть",
+        type="ТестируемаяКнопкаФормы",
+    )

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
@@ -31,6 +32,7 @@ class ConnectedBridge:
     websocket: WebSocketServerProtocol
     peer: str
     pending: dict[str, asyncio.Future[BridgeResponse]] = field(default_factory=dict)
+    progress: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 class OneCBridgeServer:
@@ -78,6 +80,7 @@ class OneCBridgeServer:
         request_id = str(uuid.uuid4())
         future: asyncio.Future[BridgeResponse] = asyncio.get_running_loop().create_future()
         bridge.pending[request_id] = future
+        bridge.progress.pop(request_id, None)
         request = BridgeRequest(id=request_id, method=method, params=params or {})
 
         try:
@@ -85,11 +88,14 @@ class OneCBridgeServer:
             try:
                 response = await asyncio.wait_for(future, timeout=request_timeout)
             except TimeoutError as exc:
+                progress = bridge.progress.get(request_id)
+                suffix = _format_timeout_progress(progress)
                 raise BridgeError(
-                    f"1C bridge command {method!r} timed out after {request_timeout:g}s without response"
+                    f"1C bridge command {method!r} timed out after {request_timeout:g}s without response{suffix}"
                 ) from exc
         finally:
             bridge.pending.pop(request_id, None)
+            bridge.progress.pop(request_id, None)
 
         if not response.ok:
             raise BridgeError(_bridge_error_text(response, method))
@@ -122,6 +128,17 @@ class OneCBridgeServer:
                     future.set_exception(BridgeError("1C bridge disconnected"))
             LOGGER.info("WebSocket bridge %s disconnected", peer)
 
+
+    def _record_event_progress(self, bridge: ConnectedBridge, data: dict[str, Any]) -> None:
+        request_id = str(data.get("id") or "")
+        if not request_id or request_id not in bridge.pending:
+            return
+        if str(data.get("event") or "") != "progress":
+            return
+        progress = dict(data)
+        progress["received_monotonic"] = time.monotonic()
+        bridge.progress[request_id] = progress
+
     async def _process_message(self, bridge: ConnectedBridge, raw_message: str | bytes) -> None:
         if isinstance(raw_message, bytes):
             raw_message = raw_message.decode("utf-8")
@@ -132,7 +149,11 @@ class OneCBridgeServer:
             return
 
         message_type = data.get("type")
-        if message_type in {"hello", "event"}:
+        if message_type == "hello":
+            LOGGER.info("1C bridge %s: %s", message_type, data)
+            return
+        if message_type == "event":
+            self._record_event_progress(bridge, data)
             LOGGER.info("1C bridge %s: %s", message_type, data)
             return
         if message_type != "response":
@@ -146,3 +167,21 @@ class OneCBridgeServer:
             return
         if not future.done():
             future.set_result(response)
+
+
+def _format_timeout_progress(progress: dict[str, Any] | None) -> str:
+    if not progress:
+        return ""
+    phase = str(progress.get("phase") or "")
+    method = str(progress.get("method") or "")
+    elapsed_ms = progress.get("elapsed_ms")
+    age = time.monotonic() - float(progress.get("received_monotonic") or time.monotonic())
+    parts = []
+    if phase:
+        parts.append(f"phase={phase!r}")
+    if method:
+        parts.append(f"method={method!r}")
+    if elapsed_ms is not None:
+        parts.append(f"elapsed_ms={elapsed_ms}")
+    parts.append(f"last_progress_age={age:.1f}s")
+    return "; last progress: " + ", ".join(parts)
