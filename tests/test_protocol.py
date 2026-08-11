@@ -120,3 +120,27 @@ def test_client_diagnostics_collects_user_messages_via_test_application_api_and_
     assert "ТестируемоеПриложение.ОчиститьСообщения()" not in module
     assert 'ТекстОшибки = ТекстОшибки + Символы.ПС + "client_diagnostics=" + ДиагностикаJSON' in module
     assert "except BridgeError as exc:" not in server
+
+
+def test_bridge_default_timeout_is_longer_for_slow_1c_tools():
+    from mcp_1c.bridge import OneCBridgeServer
+
+    assert OneCBridgeServer().request_timeout == 180.0
+
+
+def test_manager_logs_click_button_search_stats():
+    module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
+
+    assert "click_button: search_done" in module
+    assert "search_stats" in module
+    assert "fast_platform_search" in module
+    assert "dfs_fallback" in module
+    assert "Статистика.buttons_checked" in module
+    assert "Статистика.nodes" in module
+
+
+def test_manager_uses_strict_match_for_form_command_names():
+    module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
+
+    assert 'СтрНайти(ИмяКнопки, "Форма") = 1' in module
+    assert "ФормаПровести совпадает" in module
