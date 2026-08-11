@@ -84,7 +84,7 @@ class OneCBridgeServer:
             await bridge.websocket.send(json.dumps(request.to_json(), ensure_ascii=False))
             try:
                 response = await asyncio.wait_for(future, timeout=request_timeout)
-            except asyncio.TimeoutError as exc:
+            except TimeoutError as exc:
                 raise BridgeError(
                     f"1C bridge command {method!r} timed out after {request_timeout:g}s without response"
                 ) from exc
