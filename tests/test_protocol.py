@@ -1,6 +1,7 @@
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -40,6 +41,19 @@ def test_bridge_error_text_never_empty():
         "1C bridge command 'click_button' failed without error text"
     )
     assert _bridge_error_text(BridgeResponse(id="1", ok=False, error=" boom "), "click_button") == "boom"
+
+
+def test_ruff_check_is_part_of_pytest_suite():
+    result = subprocess.run(
+        [sys.executable, "-m", "ruff", "check", "src/mcp_1c", "tests"],
+        text=True,
+        capture_output=True,
+        timeout=120,
+        check=False,
+    )
+    if result.returncode != 0 and "No module named ruff" in result.stderr:
+        pytest.skip("ruff is not installed")
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 
