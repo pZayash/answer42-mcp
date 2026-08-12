@@ -1,4 +1,10 @@
+import os
+import shutil
+import subprocess
+
 from pathlib import Path
+
+import pytest
 
 from mcp_1c.bridge import _bridge_error_text
 from mcp_1c.protocol import MANAGER_PROTOCOL_VERSION, BridgeRequest, BridgeResponse
@@ -141,14 +147,68 @@ def test_dynamic_list_find_preserves_row_when_standard_search_loses_current_row(
     assert 'ТекущаяСтрока = СвойствоСтруктуры(ПредварительныйКандидат, "row", ТекущаяСтрока)' in find_body
 
 
-def test_dynamic_list_filter_by_current_value_does_not_call_missing_activate_cell_api():
-    module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
-    filter_body = _bsl_function_body(module, "ОтборДинамическогоСпискаПоТекущемуЗначениюMCP")
+def _run_1c_command(argv: list[str], *, timeout: int = 300, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        argv,
+        input=input_text,
+        text=True,
+        capture_output=True,
+        timeout=timeout,
+        check=False,
+    )
 
-    assert "Таблица.АктивизироватьЯчейку" not in filter_body
-    assert "У ТестируемаяТаблицаФормы нет метода АктивизироватьЯчейку" in filter_body
-    assert "ПолучитьТекстЯчейки(<колонка>) достаточно" in filter_body
-    assert "ЗначениеЯчейки = Таблица.ПолучитьТекстЯчейки(ИмяЯчейки)" in filter_body
+
+def test_manager_cf_passes_1c_configurator_syntax_check(tmp_path):
+    platform_dir = Path(os.getenv("ONEC_PLATFORM_DIR") or os.getenv("PLATFORM_DIR") or "/opt/1cv8/x86_64/8.5.1.1150")
+    ibcmd = platform_dir / "ibcmd"
+    onec = platform_dir / "1cv8"
+    if not ibcmd.exists() or not onec.exists():
+        pytest.skip(f"1C platform tools not found in {platform_dir}")
+
+    source_dir = Path("src/cf")
+    cf_path = tmp_path / "MCPTestManager.cf"
+    db_path = tmp_path / "ib"
+    log_path = tmp_path / "check-modules.log"
+
+    build = _run_1c_command([str(ibcmd), "config", "import", f"--out={cf_path}", str(source_dir)], timeout=600)
+    assert build.returncode == 0, build.stdout + build.stderr
+
+    create = _run_1c_command([str(ibcmd), "infobase", "create", f"--db-path={db_path}", "--create-database"], timeout=180)
+    assert create.returncode == 0, create.stdout + create.stderr
+
+    load = _run_1c_command([str(ibcmd), "config", "load", f"--db-path={db_path}", str(cf_path)], timeout=300)
+    assert load.returncode == 0, load.stdout + load.stderr
+
+    apply = _run_1c_command([
+        str(ibcmd),
+        "config",
+        "apply",
+        f"--db-path={db_path}",
+        "--force",
+        "--dynamic=force",
+        "--session-terminate=force",
+    ], timeout=300, input_text="3\n")
+    assert apply.returncode == 0, apply.stdout + apply.stderr
+
+    designer_cmd = [
+        str(onec),
+        "DESIGNER",
+        "/F",
+        str(db_path),
+        "/CheckModules",
+        "-ThinClient",
+        "-Server",
+        "/Out",
+        str(log_path),
+        "/DisableStartupDialogs",
+    ]
+    if os.name != "nt" and not os.getenv("DISPLAY") and shutil.which("xvfb-run"):
+        designer_cmd = ["xvfb-run", "-a", *designer_cmd]
+
+    check = _run_1c_command(designer_cmd, timeout=300)
+    check_log = log_path.read_text(encoding="utf-8", errors="replace") if log_path.exists() else ""
+    assert check.returncode == 0, check.stdout + check.stderr + check_log
+    assert "Синтаксических ошибок не обнаружено" in check_log
 
 
 def test_dynamic_list_settings_available_fields_uses_lightweight_timeout_bounded_scan():
