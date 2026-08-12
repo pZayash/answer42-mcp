@@ -4,6 +4,12 @@ from mcp_1c.bridge import _bridge_error_text
 from mcp_1c.protocol import MANAGER_PROTOCOL_VERSION, BridgeRequest, BridgeResponse
 
 
+def _bsl_function_body(module: str, name: str) -> str:
+    start = module.index(f"Функция {name}")
+    end = module.index("КонецФункции", start) + len("КонецФункции")
+    return module[start:end]
+
+
 def test_manager_protocol_version_is_embedded_in_cf_sources():
     module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
     assert f'Возврат "{MANAGER_PROTOCOL_VERSION}"' in module
@@ -116,10 +122,45 @@ def test_object_search_prefers_visible_available_non_readonly_form_fields():
 
 def test_dynamic_list_find_distinguishes_search_execution_from_row_match():
     module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
+    find_body = _bsl_function_body(module, "НайтиВДинамическомСпискеMCP")
 
-    assert "СовпадениеНайдено" in module
-    assert "no_current_row_after_search" in module
-    assert "found,searched,matched,match_reason" in module
+    assert "СовпадениеНайдено" in find_body
+    assert "no_current_row_after_search" in find_body
+    assert "match_method" in find_body
+    assert "found,searched,matched,match_reason,match_method" in find_body
+
+
+def test_dynamic_list_find_preserves_row_when_standard_search_loses_current_row():
+    module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
+    find_body = _bsl_function_body(module, "НайтиВДинамическомСпискеMCP")
+
+    assert "ПредварительныйКандидат" in find_body
+    assert "pre_search_navigation_candidate" in find_body
+    assert "ПерейтиКСтрокеТаблицыMCP" in find_body
+    assert find_body.index("ПредварительныйКандидат = ПерейтиКСтрокеТаблицыMCP") < find_body.index("Кнопка.Нажать()")
+    assert 'ТекущаяСтрока = СвойствоСтруктуры(ПредварительныйКандидат, "row", ТекущаяСтрока)' in find_body
+
+
+def test_dynamic_list_filter_by_current_value_does_not_call_missing_activate_cell_api():
+    module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
+    filter_body = _bsl_function_body(module, "ОтборДинамическогоСпискаПоТекущемуЗначениюMCP")
+
+    assert "Таблица.АктивизироватьЯчейку" not in filter_body
+    assert "У ТестируемаяТаблицаФормы нет метода АктивизироватьЯчейку" in filter_body
+    assert "ПолучитьТекстЯчейки(<колонка>) достаточно" in filter_body
+    assert "ЗначениеЯчейки = Таблица.ПолучитьТекстЯчейки(ИмяЯчейки)" in filter_body
+
+
+def test_dynamic_list_settings_available_fields_uses_lightweight_timeout_bounded_scan():
+    module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
+    available_fields = _bsl_function_body(module, "ПолучитьДоступныеПоляНастроекСпискаMCP")
+
+    assert "ЛегкаяСтрокаДоступногоПоляНастроекСпискаMCP" in module
+    assert "МаксДлительностьМС = 5000" in available_fields
+    assert "available_fields traversal timeout" in available_fields
+    assert 'Таблица.ПолучитьТекстЯчейки("Доступные поля")' in available_fields
+    assert "ЗначениеВJSON(СтруктураСтроки)" not in available_fields
+    assert 'Возврат Новый Структура("fields,count,errors,timeout"' in available_fields
 
 
 def test_client_diagnostics_collects_user_messages_via_test_application_api_and_clears_them():
