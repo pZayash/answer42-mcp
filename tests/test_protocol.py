@@ -57,7 +57,7 @@ def test_form_close_does_not_block_on_save_discard_message_box():
     assert "MessageBox" in module
     assert "Сохранить изменения?" in module
     assert "close_blocked_by_modal_dialog" in module
-    close_form = module[module.index("Функция ЗакрытьФорму()"):module.index("Функция ПроверитьСостояниеКлиентаПослеШага()")]
+    close_form = module[module.index("Функция ЗакрытьФорму()"):module.index("Функция ПроверитьСостояниеКлиентаПослеШага")]
     assert "ДобавитьСостояниеОкнаПослеДействияMCP(Результат, ЗаголовокДоЗакрытия, ФормаДоЗакрытия, Ложь)" in close_form
     assert "ДобавитьСостояниеОкнаПослеДействияMCP(Результат, ЗаголовокДоЗакрытия, ФормаДоЗакрытия, Истина)" not in close_form
 
@@ -132,6 +132,14 @@ def test_client_diagnostics_collects_user_messages_via_test_application_api_and_
     assert "АктивноеОкно.ЗакрытьПанельСообщенийПользователю()" in module
     assert 'Результат.Вставить("user_message_texts", СнимокСообщений.message_texts)' in module
     assert 'Результат.Вставить("user_messages_cleared", СнимокСообщений.cleared)' in module
+    assert 'Результат.Вставить("has_user_messages", Ложь)' in module
+    assert 'Результат.has_user_messages = СообщенияПользователю.Количество() > 0' in module
+    assert 'Результат.Вставить("has_dialog", Ложь)' in module
+    assert 'Результат.Вставить("events", Новый Массив)' in module
+    assert 'Новый Структура("kind,texts,messages", "user_messages"' in module
+    assert 'Новый Структура("kind,title,form_name,text,buttons,is_error_window", "dialog"' in module
+    assert 'Результат.Вставить("active_window_changed"' in module
+    assert 'ДиагностикаКлиента = ПроверитьСостояниеКлиентаПослеШага(ЗаголовокОкнаДоКоманды, ИмяФормыОкнаДоКоманды)' in module
     assert '"user_messages_panel_closed"' in module
     assert 'ПричинаСообщений <> "user_messages_panel_closed"' in module
     assert "ПолучитьСообщенияПользователю()" not in module
