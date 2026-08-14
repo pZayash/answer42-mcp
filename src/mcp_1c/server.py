@@ -5546,7 +5546,7 @@ async def dynamic_list_metadata_available_fields(
 @mcp.tool()
 async def dynamic_list_settings_available_fields(
     section: Annotated[str, "Settings section: 'filter' (Отбор), 'order' (Сортировка), 'conditional' (Условное оформление), 'group' (Группировка)"] = "filter",
-    expand_tree: Annotated[bool, "Expand tree rows to discover nested fields"] = True,
+    expand_tree: Annotated[bool, "Expand tree rows to discover nested fields (slower on large live lists)"] = False,
     limit: Annotated[int, "Max fields to return"] = 500,
     close: Annotated[bool, "Close the settings form after reading"] = False,
     *,

@@ -231,9 +231,36 @@ def test_dynamic_list_settings_available_fields_uses_lightweight_timeout_bounded
     assert "ЛегкаяСтрокаДоступногоПоляНастроекСпискаMCP" in module
     assert "МаксДлительностьМС = 5000" in available_fields
     assert "available_fields traversal timeout" in available_fields
-    assert 'Таблица.ПолучитьТекстЯчейки("Доступные поля")' in available_fields
+    assert "ТекстТекущегоДоступногоПоляНастроекСпискаMCP(Таблица)" in available_fields
+    assert 'Таблица.ПолучитьТекстЯчейки("Доступные поля")' in module
     assert "ЗначениеВJSON(СтруктураСтроки)" not in available_fields
-    assert 'Возврат Новый Структура("fields,count,errors,timeout"' in available_fields
+    assert 'Новый Структура("fields,count,errors,timeout"' in available_fields
+    assert 'РезультатПолей.Вставить("expanded", Разворачиваний)' in available_fields
+
+
+def test_dynamic_list_set_settings_does_not_bypass_table_edit_guard():
+    module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
+    set_field = _bsl_function_body(module, "УстановитьЗначениеПоля")
+    settings_setter = _bsl_function_body(module, "УстановитьПолеЭлементаНастройкиСпискаMCP")
+
+    assert "skip_table_edit_check" not in module
+    assert "ПропуститьПроверкуРедактированияТаблицы" not in module
+    assert "ПроверитьРедактированиеРодительскойТаблицыПередВводомMCP" in set_field
+    assert "ОбеспечитьРедактированиеТекущейСтрокиТаблицыMCP" in settings_setter
+    assert "строка настройки не перешла в режим редактирования" in settings_setter
+    assert "ВвестиТекст(Значение)" not in settings_setter
+
+
+def test_dynamic_list_set_settings_refreshes_active_window_after_available_field_choice():
+    module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
+    add_setting = _bsl_function_body(module, "ДобавитьЭлементНастройкиСпискаMCP")
+
+    choose_index = add_setting.index("КнопкаВыбрать.Нажать()")
+    refresh_index = add_setting.index("АктивноеОкно = ТестируемоеПриложение.ПолучитьАктивноеОкно()", choose_index)
+    table_lookup_index = add_setting.index("Таблица = НайтиТаблицуПоПараметрам", choose_index)
+
+    assert "После выбора форма перестраивается" in add_setting
+    assert choose_index < refresh_index < table_lookup_index
 
 
 def test_client_diagnostics_collects_user_messages_via_test_application_api_and_clears_them():
