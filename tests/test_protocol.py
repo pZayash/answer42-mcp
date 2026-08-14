@@ -263,6 +263,36 @@ def test_dynamic_list_set_settings_refreshes_active_window_after_available_field
     assert choose_index < refresh_index < table_lookup_index
 
 
+def test_dynamic_list_set_settings_filter_value_uses_quick_fields_before_table_editor():
+    module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
+    add_setting = _bsl_function_body(module, "ДобавитьЭлементНастройкиСпискаMCP")
+
+    assert "УстановитьБыстрыеПоляОтбораНастройкиСпискаMCP" in add_setting
+    assert "ВидСравненияЭлементаОтбора" in module
+    assert "comparison_set" in module
+    assert "value_set" in module
+
+
+def test_dynamic_list_filter_by_current_value_uses_table_context_menu_not_search():
+    module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
+    filter_value = _bsl_function_body(module, "ОтборДинамическогоСпискаПоТекущемуЗначениюMCP")
+    context_button = _bsl_function_body(module, "КнопкаКонтекстногоМенюТаблицыMCP")
+
+    assert "КнопкаКонтекстногоМенюТаблицыMCP" in filter_value
+    assert "Таблица.ПолучитьКонтекстноеМеню()" in context_button
+    assert "ПерейтиКСтрокеТаблицыMCP" not in filter_value
+    assert "Извлечение значения из найденной строки" not in filter_value
+    assert "dynamic_list_find" not in filter_value
+
+
+def test_dynamic_list_set_settings_does_not_bypass_table_edit_guard_for_generic_tables():
+    module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
+    setter = _bsl_function_body(module, "УстановитьПолеЭлементаНастройкиСпискаMCP")
+
+    assert 'Лев(ИмяТаблицы, СтрДлина("КомпоновщикНастроек")) = "КомпоновщикНастроек"' in setter
+    assert "РазрешитьБезРежимаРедактирования" in module
+
+
 def test_client_diagnostics_collects_user_messages_via_test_application_api_and_clears_them():
     module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
     server = Path("src/mcp_1c/server.py").read_text(encoding="utf-8")
