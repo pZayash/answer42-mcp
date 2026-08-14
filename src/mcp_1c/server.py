@@ -4552,7 +4552,7 @@ def _select_saved_tabular_document_file(result: Any, format: str) -> Any:
             result["saved"] = False
             result.setdefault("error", f"No files were produced for requested tabular document format: {format.lower()}")
         return result
-    selected = _find_saved_tabular_document_file(files, format)
+    selected = _find_saved_tabular_document_file_with_retry(files, format)
     if selected is None:
         result["selected"] = None
         result["saved"] = False
@@ -4569,6 +4569,17 @@ def _select_saved_tabular_document_file(result: Any, format: str) -> Any:
     result["selected"] = selected
     result["saved"] = True
     return result
+
+
+def _find_saved_tabular_document_file_with_retry(files: list[Any], format: str, *, timeout: float = 2.0, interval: float = 0.05) -> dict[str, Any] | None:
+    deadline = time.monotonic() + timeout
+    while True:
+        selected = _find_saved_tabular_document_file(files, format)
+        if selected is not None:
+            return selected
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(interval)
 
 
 def _find_saved_tabular_document_file(files: list[Any], format: str) -> dict[str, Any] | None:

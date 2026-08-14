@@ -911,6 +911,36 @@ def test_tabular_document_file_selection_accepts_requested_format(tmp_path):
     assert requested_pdf.read_bytes().startswith(b"%PDF")
 
 
+def test_tabular_document_file_selection_waits_for_delayed_xlsx_materialization(tmp_path):
+    import threading
+    import time
+    import zipfile
+
+    from mcp_1c.server import _select_saved_tabular_document_file
+
+    actual_xlsx = tmp_path / "actual.xlsx"
+    requested_xlsx = tmp_path / "requested.xlsx"
+    result = {"saved": True, "path": str(requested_xlsx), "format": "xlsx", "files": [{"path": str(actual_xlsx)}]}
+
+    def write_later():
+        time.sleep(0.1)
+        with zipfile.ZipFile(actual_xlsx, "w") as archive:
+            archive.writestr("xl/workbook.xml", "<workbook/>")
+
+    writer = threading.Thread(target=write_later)
+    writer.start()
+    try:
+        selected = _select_saved_tabular_document_file(result, "xlsx")
+    finally:
+        writer.join(timeout=1)
+
+    assert selected["saved"] is True
+    assert selected["selected"]["copied_to"] == str(requested_xlsx)
+    assert requested_xlsx.is_file()
+    with zipfile.ZipFile(requested_xlsx) as archive:
+        assert "xl/workbook.xml" in archive.namelist()
+
+
 def test_tool_profile_core_is_compact_and_keeps_common_ui_tools():
     core = _tool_names_for_profile("core")
     assert core is not None
