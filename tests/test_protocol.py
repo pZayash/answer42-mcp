@@ -149,6 +149,19 @@ def test_dynamic_list_find_distinguishes_search_execution_from_row_match():
     assert "found,searched,matched,match_reason,match_method" in find_body
 
 
+
+
+def test_dynamic_list_find_returns_clean_pre_search_match_before_opening_find_dialog():
+    module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
+    find_body = _bsl_function_body(module, "НайтиВДинамическомСпискеMCP")
+
+    pre_index = find_body.index('ПредварительныйКандидат = ПерейтиКСтрокеТаблицыMCP')
+    return_index = find_body.index('match_method,table,field,text,compare_type,errors,current_row')
+    dialog_index = find_body.index('Кнопка = НайтиКнопку')
+    assert pre_index < return_index < dialog_index
+    assert '"pre_search_navigation"' in find_body
+    assert 'Новый Массив, СвойствоСтруктуры(ПредварительныйКандидат, "row"' in find_body
+
 def test_dynamic_list_find_preserves_row_when_standard_search_loses_current_row():
     module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
     find_body = _bsl_function_body(module, "НайтиВДинамическомСпискеMCP")
