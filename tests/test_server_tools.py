@@ -332,6 +332,7 @@ def test_removed_mcp_tools_are_not_registered():
     tool_names = set(_tools_by_name())
 
     assert "dynamic_list_filter_by_current_value" not in tool_names
+    assert "create_new_item" not in tool_names
     assert "performance_get" not in tool_names
     assert "performance_clear" not in tool_names
 

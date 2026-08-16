@@ -24,7 +24,6 @@ import subprocess
 import sys
 import tempfile
 import time
-from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -308,7 +307,7 @@ async def run_smoke(session: ClientSession, sid: str, suffix: str, screenshot_di
     await capture_screenshot(session, sid, str(screenshot_dir / "01-initial-window.png"))
 
     await call_ui_ok(session, "open_navigation_link", {"navigation_link": "e1cib/list/Catalog.ПС_Владелец", "session_id": sid})
-    await call_ui_ok(session, "create_new_item", {"session_id": sid})
+    await call_ui_ok(session, "click_button", {"name": "ФормаСоздать", "session_id": sid})
     await call_ui_ok(session, "set_field_value", {"field_name": "Наименование", "value": "Владелец smoke", "session_id": sid})
     await call_ui_ok(session, "click_button", {"name": "ФормаЗаписатьИЗакрыть", "session_id": sid})
     await capture_screenshot(session, sid, str(screenshot_dir / "02-owner-created.png"))
@@ -316,7 +315,7 @@ async def run_smoke(session: ClientSession, sid: str, suffix: str, screenshot_di
     await call_ui_ok(session, "open_navigation_link", {"navigation_link": "e1cib/list/Catalog.ПС_Справочник1", "session_id": sid})
     rows = await call_ui_ok(session, "table_rows", {"name": "Список", "session_id": sid})
     assert rows["found"] is True, rows
-    await call_ui_ok(session, "create_new_item", {"session_id": sid})
+    await call_ui_ok(session, "click_button", {"name": "ФормаСоздать", "session_id": sid})
     await call_ui_ok(session, "set_field_value", {"field_name": "Наименование", "value": "Тестовый smoke", "session_id": sid})
     await call_ui_ok(session, "set_field_value", {"field_name": "Реквизит1", "value": "Рекв smoke", "session_id": sid})
     await call_ui_ok(session, "click_button", {"name": "ФормаЗаписатьИЗакрыть", "session_id": sid})
@@ -331,7 +330,7 @@ async def run_smoke(session: ClientSession, sid: str, suffix: str, screenshot_di
 async def seed_dynamic_data(session: ClientSession, sid: str, suffix: str) -> tuple[str, str]:
     await call_ui_ok(session, "open_navigation_link", {"navigation_link": "e1cib/list/Catalog.ПС_Владелец", "session_id": sid})
     for owner in (f"Владелец 1 {suffix}", f"Владелец 2 {suffix}"):
-        await call_ui_ok(session, "create_new_item", {"session_id": sid})
+        await call_ui_ok(session, "click_button", {"name": "ФормаСоздать", "session_id": sid})
         await call_ui_ok(session, "set_field_value", {"field_name": "Наименование", "value": owner, "session_id": sid})
         await call_ui_ok(session, "click_button", {"name": "ФормаЗаписатьИЗакрыть", "session_id": sid})
 
@@ -339,7 +338,7 @@ async def seed_dynamic_data(session: ClientSession, sid: str, suffix: str) -> tu
     item1 = f"Тестовый элемент 1 {suffix}"
     item2 = f"Тестовый элемент 2 {suffix}"
     for item, req in ((item1, f"Рекв1 {suffix}"), (item2, f"Рекв2 {suffix}")):
-        await call_ui_ok(session, "create_new_item", {"session_id": sid})
+        await call_ui_ok(session, "click_button", {"name": "ФормаСоздать", "session_id": sid})
         await call_ui_ok(session, "set_field_value", {"field_name": "Наименование", "value": item, "session_id": sid})
         await call_ui_ok(session, "set_field_value", {"field_name": "Реквизит1", "value": req, "session_id": sid})
         await call_ui_ok(session, "click_button", {"name": "ФормаЗаписатьИЗакрыть", "session_id": sid})
@@ -351,12 +350,12 @@ async def run_dynamic_tables(session: ClientSession, sid: str, suffix: str, scre
 
     await call_ui_ok(session, "open_navigation_link", {"navigation_link": "e1cib/list/Catalog.ПС_Владелец", "session_id": sid})
     for owner in (f"Владелец табличной части 1 {suffix}", f"Владелец табличной части 2 {suffix}"):
-        await call_ui_ok(session, "create_new_item", {"session_id": sid})
+        await call_ui_ok(session, "click_button", {"name": "ФормаСоздать", "session_id": sid})
         await call_ui_ok(session, "set_field_value", {"field_name": "Наименование", "value": owner, "session_id": sid})
         await call_ui_ok(session, "click_button", {"name": "ФормаЗаписатьИЗакрыть", "session_id": sid})
 
     await call_ui_ok(session, "open_navigation_link", {"navigation_link": "e1cib/list/Catalog.ПС_Справочник1", "session_id": sid})
-    await call_ui_ok(session, "create_new_item", {"session_id": sid})
+    await call_ui_ok(session, "click_button", {"name": "ФормаСоздать", "session_id": sid})
     await call_ui_ok(session, "set_field_value", {"field_name": "Наименование", "value": f"Табличная часть {suffix}", "session_id": sid})
     await call_ui_ok(session, "set_field_value", {"field_name": "Реквизит1", "value": f"Рекв ТЧ {suffix}", "session_id": sid})
     await capture_screenshot(session, sid, str(screenshot_dir / "05b-tabular-section-form.png"))

@@ -77,7 +77,7 @@ TOOL_PROFILE_GROUPS: dict[str, set[str]] = {
         "ui_tree", "command_bar", "click_button", "find_object", "search_objects", "get_object", "activate_object",
         "open_navigation_link", "current_element", "field_dropdown_state", "field_dropdown_close", "toggle_field",
         "set_field_value", "activate_field", "choose_field_from_list", "choose_field_first_row", "choose_current_row",
-        "set_form_fields", "create_new_item", "save_form", "close_form", "form_open_settings",
+        "set_form_fields", "save_form", "close_form", "form_open_settings",
     },
     "tables": {
         "table_current_row", "table_selected_rows", "table_cell_text", "table_rows", "table_find_row", "table_goto_row",
@@ -5693,13 +5693,6 @@ async def form_open_settings(
     """Open the current form customization dialog via 'Изменить форму'."""
     return await _bridge_call_recorded(session_id, "form_open_settings", {"button": button})
 
-
-@mcp.tool()
-async def create_new_item(*,
-    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
-) -> Any:
-    """Create a new item in the active form (e.g. new catalog/dictionary entry)."""
-    return await _bridge_call_recorded(session_id, "create_new_item", {})
 
 
 @mcp.tool()

@@ -303,7 +303,7 @@ def test_dynamic_list_set_settings_filter_values_are_set_via_settings_table_edit
     assert "per-field quick-группы" not in set_settings
 
 
-def test_dynamic_list_filter_by_current_value_bridge_method_is_removed():
+def test_removed_bridge_methods_are_not_registered():
     module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
     server = Path("src/mcp_1c/server.py").read_text(encoding="utf-8")
 
@@ -311,6 +311,9 @@ def test_dynamic_list_filter_by_current_value_bridge_method_is_removed():
     assert "dynamic_list_filter_by_current_value" not in module
     assert "ОтборДинамическогоСпискаПоТекущемуЗначениюMCP" not in module
     assert "КнопкаКонтекстногоМенюТаблицыMCP" not in module
+    assert "create_new_item" not in server
+    assert "create_new_item" not in module
+    assert "СоздатьНовыйЭлемент" not in module
 
 
 def test_dynamic_list_set_settings_repositions_to_added_setting_row_before_section_specific_handling():
