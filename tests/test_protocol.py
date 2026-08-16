@@ -263,27 +263,89 @@ def test_dynamic_list_set_settings_refreshes_active_window_after_available_field
     assert choose_index < refresh_index < table_lookup_index
 
 
-def test_dynamic_list_set_settings_filter_value_uses_quick_fields_before_table_editor():
+def test_dynamic_list_set_settings_filter_values_are_set_via_settings_table_editor():
+    module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
+    add_setting = _bsl_function_body(module, "ДобавитьЭлементНастройкиСпискаMCP")
+    set_settings = _bsl_function_body(module, "УстановитьНастройкиДинамическогоСпискаMCP")
+    table_helper = _bsl_function_body(module, "УстановитьКолонкуСтрокиНастройкиСпискаВТаблицеMCP")
+
+    assert "Quick-поля формы здесь не используем" in add_setting
+    assert "Для отбора здесь только добавляем строку" in add_setting
+    assert "ДозаполнитьТабличныеПоляОтборовНастройкиСпискаMCP(Параметры.filters)" in set_settings
+    assert "ПерейтиКСтрокеТаблицыMCP(ПараметрыПерехода)" in table_helper
+    assert "УстановитьПолеТаблицыMCP(ПараметрыКолонки)" in table_helper
+    assert "АктивироватьРазделНастроекСпискаMCP(Раздел)" in table_helper
+    assert "table_goto_row + table_set_field" in table_helper
+    assert "ЗакончитьРедактированиеСтроки(Ложь)" in table_helper
+    assert "ТекущаяСтрокаНастройкиУжеСодержитЗначениеMCP" in table_helper
+    assert 'Новый Структура("name,title,text,limit", ИмяТаблицы, "", ПолеНастройки, 200)' in table_helper
+    assert "ДозаполнитьБыстрыеПоляОтборовНастройкиСпискаMCP(Параметры.filters)" not in set_settings
+    assert "ДозаполнитьТабличныеПоляОтборовНастройкиСпискаMCP" in module
+    assert "per-field quick-группы" not in set_settings
+
+
+def test_dynamic_list_filter_by_current_value_bridge_method_is_removed():
+    module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
+    server = Path("src/mcp_1c/server.py").read_text(encoding="utf-8")
+
+    assert "dynamic_list_filter_by_current_value" not in server
+    assert "dynamic_list_filter_by_current_value" not in module
+    assert "ОтборДинамическогоСпискаПоТекущемуЗначениюMCP" not in module
+    assert "КнопкаКонтекстногоМенюТаблицыMCP" not in module
+
+
+def test_dynamic_list_set_settings_repositions_to_added_setting_row_before_section_specific_handling():
     module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
     add_setting = _bsl_function_body(module, "ДобавитьЭлементНастройкиСпискаMCP")
 
-    assert "УстановитьБыстрыеПоляОтбораНастройкиСпискаMCP" in add_setting
-    assert "ВидСравненияЭлементаОтбора" in module
-    assert "comparison_set" in module
-    assert "value_set" in module
+    assert "ПерейтиКСтрокеНастройкиСпискаПоПолюMCP" in module
+    assert "АктивизироватьТекущуюСтрокуНастройкиСпискаMCP" in module
+    assert "ПозиционированиеСтроки = ПерейтиКСтрокеНастройкиСпискаПоПолюMCP(Таблица, Поле, 200)" in add_setting
+    position_index = add_setting.index("ПозиционированиеСтроки = ПерейтиКСтрокеНастройкиСпискаПоПолюMCP")
+    filter_index = add_setting.index("НомерЭлементаНастроекСпискаMCP(Раздел) = 0")
+    assert position_index < filter_index
 
 
-def test_dynamic_list_filter_by_current_value_uses_table_context_menu_not_search():
+def test_dynamic_list_set_settings_order_direction_uses_settings_table_editor_not_quick_fallback():
     module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
-    filter_value = _bsl_function_body(module, "ОтборДинамическогоСпискаПоТекущемуЗначениюMCP")
-    context_button = _bsl_function_body(module, "КнопкаКонтекстногоМенюТаблицыMCP")
+    add_setting = _bsl_function_body(module, "ДобавитьЭлементНастройкиСпискаMCP")
 
-    assert "КнопкаКонтекстногоМенюТаблицыMCP" in filter_value
-    assert "Таблица.ПолучитьКонтекстноеМеню()" in context_button
-    assert "ПерейтиКСтрокеТаблицыMCP" not in filter_value
-    assert "Извлечение значения из найденной строки" not in filter_value
-    assert "dynamic_list_find" not in filter_value
+    # Direction must be written in the settings form table itself, using the same
+    # table-editor path as table_set_field.  Do not mask failures with quick form
+    # fields or post-close list ordering fallback.
+    assert "УстановитьПолеТаблицыMCP(ПараметрыНаправления)" in add_setting
+    assert 'Новый Структура("table,field,value,search_by_title", ИмяТаблицы, "Направление сортировки"' in add_setting
+    assert "УстановитьБыстрыеПоляПорядкаНастройкиСпискаMCP" not in add_setting
+    assert 'УстановитьПолеЭлементаНастройкиСпискаMCP(Таблица, ИмяТаблицы, "ТипУпорядочивания"' not in add_setting
 
+
+def test_dynamic_list_set_settings_order_direction_activates_direction_column_by_title():
+    module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
+    editor = _bsl_function_body(module, "НайтиПолеРедактораТаблицыMCP")
+
+    assert 'АктивизироватьКолонкуТаблицыMCP(Таблица, "Направление сортировки", Истина)' in editor
+    assert 'Таблица.ПерейтиКСледующемуЭлементу();' not in editor
+
+def test_choice_list_variant_prefers_display_text_for_settings_enum_structures():
+    module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
+    variant = _bsl_function_body(module, "ПредставлениеВариантаСпискаВыбораMCP")
+
+    display_index = variant.index('Представление.Свойство("ОтображаемыйТекст")')
+    data_index = variant.index('Представление.Свойство("ПредставлениеДанных")')
+    assert display_index < data_index
+    assert 'ПредставлениеДанных="Структура"' in variant
+
+
+
+def test_dynamic_list_set_settings_desc_order_must_be_set_in_settings_form_not_list_fallback():
+    module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
+    add_setting = _bsl_function_body(module, "ДобавитьЭлементНастройкиСпискаMCP")
+    set_settings = _bsl_function_body(module, "УстановитьНастройкиДинамическогоСпискаMCP")
+
+    assert "УстановитьПорядокДинамическогоСпискаMCP" not in set_settings
+    assert "ПрименитьНаправленияПорядкаКСпискуMCP" not in module
+    assert "list_order" not in set_settings
+    assert "Направление сортировки для поля" in add_setting
 
 def test_dynamic_list_set_settings_does_not_bypass_table_edit_guard_for_generic_tables():
     module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")

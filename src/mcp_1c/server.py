@@ -89,7 +89,7 @@ TOOL_PROFILE_GROUPS: dict[str, set[str]] = {
     "dynamic": {
         "dynamic_list_metadata_available_fields", "dynamic_list_settings_available_fields", "dynamic_list_set_settings",
         "dynamic_list_current_settings", "dynamic_list_sort_by_column", "dynamic_list_output", "dynamic_list_open_settings",
-        "dynamic_list_find", "dynamic_list_filter_by_current_value", "dynamic_list_clear_settings",
+        "dynamic_list_find", "dynamic_list_clear_settings",
     },
     "rag": {
         "rag_source_add", "rag_sources_add_from_directory", "rag_source_roots_list", "rag_available_configurations",
@@ -5671,26 +5671,6 @@ async def dynamic_list_find(
         "field": field,
         "text": text,
         "compare_type": compare_type,
-    })
-
-
-@mcp.tool()
-async def dynamic_list_filter_by_current_value(
-    name: Annotated[str, "Dynamic list/table technical name"] = "Список",
-    title: Annotated[str, "Dynamic list/table visible title"] = "",
-    cell: Annotated[str, "Column/cell technical name to make current before filtering; empty uses current cell"] = "",
-    text: Annotated[str, "Optional substring: first move to a row containing this text, then filter by the current value"] = "",
-    limit: Annotated[int, "Max rows to scan when text is set"] = 200,
-    *,
-    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
-) -> Any:
-    """Quickly filter a dynamic list via context menu 'Найти по текущему значению'."""
-    return await _bridge_call_recorded(session_id, "dynamic_list_filter_by_current_value", {
-        "name": name,
-        "title": title,
-        "cell": cell,
-        "text": text,
-        "limit": limit,
     })
 
 

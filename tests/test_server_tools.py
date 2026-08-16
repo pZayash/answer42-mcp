@@ -102,7 +102,6 @@ EXPECTED_NEW_TOOLS = {
     "dynamic_list_sort_by_column",
     "form_open_settings",
     "dynamic_list_find",
-    "dynamic_list_filter_by_current_value",
     "rag_sources_add_from_directory",
     "rag_source_roots_list",
     "rag_available_configurations",
@@ -328,9 +327,11 @@ def test_dev_eval_tool_is_registered_only_when_dev_tools_enabled():
         _register_dev_tools(False)
 
 
-def test_new_mcp_tools_do_not_include_performance_metrics():
+def test_removed_mcp_tools_are_not_registered():
+    _register_dev_tools(False)
     tool_names = set(_tools_by_name())
 
+    assert "dynamic_list_filter_by_current_value" not in tool_names
     assert "performance_get" not in tool_names
     assert "performance_clear" not in tool_names
 
