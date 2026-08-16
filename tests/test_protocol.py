@@ -151,26 +151,32 @@ def test_dynamic_list_find_distinguishes_search_execution_from_row_match():
 
 
 
-def test_dynamic_list_find_returns_clean_pre_search_match_before_opening_find_dialog():
+def test_dynamic_list_find_uses_standard_find_dialog_without_row_scan_fallback():
     module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
     find_body = _bsl_function_body(module, "НайтиВДинамическомСпискеMCP")
 
-    pre_index = find_body.index('ПредварительныйКандидат = ПерейтиКСтрокеТаблицыMCP')
-    return_index = find_body.index('match_method,table,field,text,compare_type,errors,current_row')
-    dialog_index = find_body.index('Кнопка = НайтиКнопку')
-    assert pre_index < return_index < dialog_index
-    assert '"pre_search_navigation"' in find_body
-    assert 'Новый Массив, СвойствоСтруктуры(ПредварительныйКандидат, "row"' in find_body
+    assert "ПредварительныйКандидат" not in find_body
+    assert "pre_search_navigation" not in find_body
+    assert "navigation_fallback" not in find_body
+    assert "ПерейтиКСтрокеТаблицыMCP" not in find_body
+    assert "УстановитьПолеГдеИскатьОкнаПоискаMCP" in find_body
+    assert "УстановитьРежимПоискаОкнаПоискаMCP" in find_body
+    assert '"standard_find_dialog"' in find_body
 
-def test_dynamic_list_find_preserves_row_when_standard_search_loses_current_row():
+
+def test_dynamic_list_find_search_mode_maps_user_terms_to_find_dialog_compare_type():
     module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
-    find_body = _bsl_function_body(module, "НайтиВДинамическомСпискеMCP")
+    normalize_body = _bsl_function_body(module, "НормализоватьРежимПоискаДинамическогоСпискаMCP")
+    code_body = _bsl_function_body(module, "КодРежимаПоискаДинамическогоСпискаMCP")
 
-    assert "ПредварительныйКандидат" in find_body
-    assert "pre_search_navigation_candidate" in find_body
-    assert "ПерейтиКСтрокеТаблицыMCP" in find_body
-    assert find_body.index("ПредварительныйКандидат = ПерейтиКСтрокеТаблицыMCP") < find_body.index("Кнопка.Нажать()")
-    assert 'ТекущаяСтрока = СвойствоСтруктуры(ПредварительныйКандидат, "row", ТекущаяСтрока)' in find_body
+    assert 'Норм = "содержит"' in normalize_body
+    assert 'Норм = "подстрока"' in normalize_body
+    assert 'Возврат "По части строки"' in normalize_body
+    assert 'Возврат "По началу строки"' in normalize_body
+    assert 'Возврат "По точному совпадению"' in normalize_body
+    assert 'Возврат 0' in code_body
+    assert 'Возврат 1' in code_body
+    assert 'Возврат 2' in code_body
 
 
 def _run_1c_command(argv: list[str], *, timeout: int = 300, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
