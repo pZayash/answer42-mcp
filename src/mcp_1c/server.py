@@ -74,7 +74,7 @@ TOOL_PROFILE_GROUPS: dict[str, set[str]] = {
         "wait_form_closed", "object_command_panel", "object_context_menu", "window_command_interface",
         "command_interface_sections", "command_interface_commands", "command_interface_search", "group_expand", "group_collapse",
         "group_current_page", "group_activate_page", "group_state", "decoration_links", "decoration_click_link", "decoration_click",
-        "ui_tree", "command_bar", "click_button", "find_object", "search_objects", "get_object", "activate_object",
+        "ui_tree", "command_bar", "click_button", "find_object", "search_objects", "get_object", "focus_object",
         "open_navigation_link", "current_element", "field_dropdown_state", "field_dropdown_close", "toggle_field",
         "set_field_value", "activate_field", "choose_field_from_list", "choose_field_first_row", "choose_current_row",
         "set_form_fields", "save_form", "close_form", "form_open_settings",
@@ -105,7 +105,7 @@ TOOL_PROFILE_CORE: set[str] = TOOL_PROFILE_GROUPS["sessions"] | {
     "field_info", "field_value_text", "field_dropdown_items", "field_dropdown_state", "field_dropdown_close",
     "toggle_field", "set_field_value", "activate_field", "choose_field_from_list", "choose_field_first_row", "choose_current_row",
     "form_state", "form_default_button", "wait_form_closed", "click_button", "find_object", "search_objects", "get_object",
-    "activate_object", "open_navigation_link", "current_element", "table_current_row", "table_selected_rows", "table_cell_text",
+    "focus_object", "open_navigation_link", "current_element", "table_current_row", "table_selected_rows", "table_cell_text",
     "table_rows", "table_find_row", "table_goto_row", "table_move_row", "table_add_row", "table_set_field", "table_set_row_values",
     "table_choose_field_from_list", "table_edit_info", "table_begin_edit", "table_end_edit", "table_editing_state",
     "tabular_documents", "tabular_document_text", "tabular_document_save", "screenshot",
@@ -4265,7 +4265,7 @@ async def get_object(
 ) -> Any:
     """Low-level escape hatch: call TestedApplication.GetObject with optional wildcard name/title.
 
-    Prefer find_object/search_objects for structured diagnostics and activate_object for actions.
+    Prefer find_object/search_objects for structured diagnostics and focus_object for changing focus.
     Keep this tool for platform/test-client edge cases where direct GetObject semantics matter.
     """
     return await _bridge_call_recorded(session_id, "get_object", {"name": name, "title": title, "type": type, "timeout": timeout})
