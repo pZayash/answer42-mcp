@@ -5733,8 +5733,10 @@ async def _metadata_rows_from_universal_report(
         if not ready:
             return [], [
                 *warnings,
-                "Universal report tabular document was not ready for XLSX save"
-                f"; readiness={_truncate_value(readiness)}",
+                (
+                    "Universal report tabular document was not ready for XLSX save"
+                    f"; readiness={_truncate_value(readiness)}"
+                ),
             ]
         rows: list[dict[str, str]] = []
         read_warnings: list[str] = []
@@ -5825,8 +5827,8 @@ async def _metadata_catalog_rows_from_output(session_id: str, max_rows: int) -> 
 
 
 def _metadata_catalog_rows_from_xlsx(path: Path) -> list[dict[str, str]]:
-    import zipfile
     import xml.etree.ElementTree as ET
+    import zipfile
 
     ns = {"a": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
 

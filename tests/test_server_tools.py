@@ -17,6 +17,7 @@ from mcp_1c.server import (
     _append_available_users_to_auth_error,
     _cf_marker_matches,
     _configure_session_scope,
+    _configure_universal_report_metadata_settings,
     _decode_log_bytes,
     _effective_dump_connection,
     _ensure_restored_session,
@@ -27,11 +28,10 @@ from mcp_1c.server import (
     _json_list,
     _load_global_registry_unlocked,
     _match_metadata_object,
-    _configure_universal_report_metadata_settings,
     _metadata_catalog_rows_from_tabular_cells,
-    _metadata_rows_from_direct_catalog_query,
     _metadata_object_from_row,
     _metadata_objects_catalog_self_entry,
+    _metadata_rows_from_direct_catalog_query,
     _metadata_universal_report_filter_specs,
     _normalize_connection_mode,
     _parse_users_plain_text,
@@ -1843,6 +1843,7 @@ def test_click_button_watchdog_can_be_disabled(monkeypatch):
 
 def test_publish_tools_list_changed_uses_subscription_bus(monkeypatch):
     from mcp.shared.subscriptions import ToolsListChanged
+
     from mcp_1c import server
 
     events = []
