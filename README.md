@@ -58,7 +58,7 @@ PyPI-пакет не записывает agent skills в пользовател
 answer42 install-skills
 ```
 
-По умолчанию команда устанавливает `answer42` и `answer42-rag` в OpenClaw:
+По умолчанию команда устанавливает `answer42`, `answer42-rag` и `answer42-universal-report` в OpenClaw:
 
 ```text
 ~/.openclaw/workspace/skills
