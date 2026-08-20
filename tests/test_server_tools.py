@@ -1700,8 +1700,52 @@ def test_metadata_universal_report_primary_path_skips_settings_ui(monkeypatch):
 
     assert rows == [{"Полное имя": "Справочник.Номенклатура", "Синоним": "Номенклатура"}]
     assert any("settings UI skipped" in warning for warning in warnings)
+    assert ("set_field_value", {
+        "field_name": "Тип объекта",
+        "value": "Справочники",
+        "search_by_title": True,
+    }, 15) in calls
+    assert ("set_field_value", {
+        "field_name": "Объект",
+        "value": "Идентификаторы объектов метаданных",
+        "search_by_title": True,
+    }, 15) in calls
+    assert not any(
+        method == "set_field_value" and str(params.get("field_name", "")).startswith("КомпоновщикНастроек")
+        for method, params, _timeout in calls
+    )
     assert ("click_button", {"name": "СформироватьОтчет"}, 30) in calls
     assert not any(method == "click_button" and params.get("name") == "ВсеНастройки" for method, params, _timeout in calls)
+
+
+def test_metadata_universal_report_quick_settings_try_labels_in_order(monkeypatch):
+    from mcp_1c import server
+
+    calls = []
+
+    async def fake_bridge_call(session_id, method, params, *, timeout=None):
+        assert session_id == "unit"
+        calls.append((method, params, timeout))
+        if params["field_name"] == "Тип объекта":
+            raise RuntimeError("label absent")
+        return {"ok": True}
+
+    monkeypatch.setattr(server, "_bridge_call_recorded", fake_bridge_call)
+    warnings = []
+
+    result = asyncio.run(server._set_universal_report_quick_setting_by_titles(
+        "unit",
+        ["Тип объекта", "Тип данных", "Раздел"],
+        "Справочники",
+        warnings,
+    ))
+
+    assert result is True
+    assert calls == [
+        ("set_field_value", {"field_name": "Тип объекта", "value": "Справочники", "search_by_title": True}, 15),
+        ("set_field_value", {"field_name": "Тип данных", "value": "Справочники", "search_by_title": True}, 15),
+    ]
+    assert any("Тип объекта" in warning for warning in warnings)
 
 
 def test_metadata_universal_report_chunk_read_uses_query_early_stop(monkeypatch):
