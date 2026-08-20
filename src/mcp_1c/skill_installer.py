@@ -7,7 +7,7 @@ import importlib.resources
 import shutil
 from pathlib import Path
 
-PACKAGED_SKILLS = ("answer42", "answer42-rag")
+PACKAGED_SKILLS = ("answer42", "answer42-rag", "answer42-universal-report")
 
 AGENT_SKILL_DIRS = {
     # OpenClaw workspace skills.
