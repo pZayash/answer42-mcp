@@ -1665,6 +1665,34 @@ def test_table_goto_row_passes_occurrence_to_bridge(monkeypatch):
     }, None)]
 
 
+def test_universal_report_message_box_is_closed_before_forming(monkeypatch):
+    from mcp_1c import server
+
+    calls = []
+
+    async def fake_bridge_call(session_id, method, params, *, timeout=None):
+        assert session_id == "unit"
+        calls.append((method, params, timeout))
+        if method == "active_window":
+            return {"form_name": "MessageBox", "client_diagnostics": {"modal_form_name": "MessageBox"}}
+        if method == "click_button":
+            assert params == {"name": "OK", "watchdog_timeout": 30}
+            return {"pressed": True}
+        raise AssertionError(method)
+
+    monkeypatch.setattr(server, "_bridge_call_recorded", fake_bridge_call)
+    warnings = []
+
+    result = asyncio.run(server._close_universal_report_message_box_if_present("unit", warnings))
+
+    assert result is True
+    assert calls == [
+        ("active_window", {}, 5),
+        ("click_button", {"name": "OK", "watchdog_timeout": 30}, 35),
+    ]
+    assert warnings == ["Universal report informational MessageBox was closed before forming the report"]
+
+
 def test_metadata_universal_report_primary_path_skips_settings_ui(monkeypatch):
     from mcp_1c import server
 
@@ -1673,6 +1701,8 @@ def test_metadata_universal_report_primary_path_skips_settings_ui(monkeypatch):
     async def fake_bridge_call(session_id, method, params, *, timeout=None):
         assert session_id == "unit"
         calls.append((method, params, timeout))
+        if method == "field_info":
+            return {"found": True, "name": f"КомпоновщикНастроекПользовательскиеНастройки{params['field_name']}Значение"}
         return {"ok": True}
 
     async def fail_configure(session_id, query=""):
@@ -1700,17 +1730,9 @@ def test_metadata_universal_report_primary_path_skips_settings_ui(monkeypatch):
 
     assert rows == [{"Полное имя": "Справочник.Номенклатура", "Синоним": "Номенклатура"}]
     assert any("settings UI skipped" in warning for warning in warnings)
-    assert ("set_field_value", {
-        "field_name": "Тип объекта",
-        "value": "Справочники",
-        "search_by_title": True,
-    }, 15) in calls
-    assert ("set_field_value", {
-        "field_name": "Объект",
-        "value": "Идентификаторы объектов метаданных",
-        "search_by_title": True,
-    }, 15) in calls
-    assert not any(
+    assert ("field_info", {"field_name": "Тип объекта", "search_by_title": True}, 10) in calls
+    assert ("field_info", {"field_name": "Объект", "search_by_title": True}, 10) in calls
+    assert any(
         method == "set_field_value" and str(params.get("field_name", "")).startswith("КомпоновщикНастроек")
         for method, params, _timeout in calls
     )
@@ -1726,9 +1748,15 @@ def test_metadata_universal_report_quick_settings_try_labels_in_order(monkeypatc
     async def fake_bridge_call(session_id, method, params, *, timeout=None):
         assert session_id == "unit"
         calls.append((method, params, timeout))
-        if params["field_name"] == "Тип объекта":
+        if method == "field_info":
+            if params["field_name"] == "Тип объекта":
+                return {"found": True, "name": "КомпоновщикНастроекПользовательскиеНастройкиЭлемент0Значение"}
+            if params["field_name"] == "Тип данных":
+                return {"found": True, "name": "КомпоновщикНастроекПользовательскиеНастройкиЭлемент1Значение"}
             raise RuntimeError("label absent")
-        return {"ok": True}
+        if method == "set_field_value":
+            return {"ok": True}
+        raise AssertionError(method)
 
     monkeypatch.setattr(server, "_bridge_call_recorded", fake_bridge_call)
     warnings = []
@@ -1742,10 +1770,71 @@ def test_metadata_universal_report_quick_settings_try_labels_in_order(monkeypatc
 
     assert result is True
     assert calls == [
-        ("set_field_value", {"field_name": "Тип объекта", "value": "Справочники", "search_by_title": True}, 15),
-        ("set_field_value", {"field_name": "Тип данных", "value": "Справочники", "search_by_title": True}, 15),
+        ("field_info", {"field_name": "Тип объекта", "search_by_title": True}, 10),
+        ("set_field_value", {"field_name": "КомпоновщикНастроекПользовательскиеНастройкиЭлемент0Значение", "value": "Справочники"}, 15),
     ]
-    assert any("Тип объекта" in warning for warning in warnings)
+    assert warnings == []
+
+
+def test_metadata_universal_report_quick_settings_keep_warnings_local_until_all_titles_fail(monkeypatch):
+    from mcp_1c import server
+
+    calls = []
+
+    async def fake_bridge_call(session_id, method, params, *, timeout=None):
+        assert session_id == "unit"
+        calls.append((method, params, timeout))
+        if method == "field_info":
+            if params["field_name"] == "Объект":
+                raise RuntimeError("first label absent")
+            if params["field_name"] == "Имя объекта":
+                return {
+                    "found": True,
+                    "name": "КомпоновщикНастроекПользовательскиеНастройкиЭлемент1Значение",
+                    "data_text": "ИдентификаторыОбъектовМетаданных",
+                }
+        raise AssertionError(method)
+
+    monkeypatch.setattr(server, "_bridge_call_recorded", fake_bridge_call)
+    warnings = []
+
+    result = asyncio.run(server._set_universal_report_quick_setting_by_titles(
+        "unit",
+        ["Объект", "Имя объекта"],
+        "ИдентификаторыОбъектовМетаданных",
+        warnings,
+    ))
+
+    assert result is True
+    assert warnings == []
+    assert calls == [
+        ("field_info", {"field_name": "Объект", "search_by_title": True}, 10),
+        ("field_info", {"field_name": "Имя объекта", "search_by_title": True}, 10),
+    ]
+
+
+def test_load_metadata_objects_caps_universal_report_limit(monkeypatch):
+    from mcp_1c import server
+
+    calls = []
+
+    async def fake_universal_report(session_id, limit, *, query="", target_matches=0):
+        calls.append((session_id, limit, query, target_matches))
+        return [
+            {"Полное имя": "Справочник.Номенклатура", "Синоним": "Номенклатура", "Пометка удаления": "Нет"},
+        ], []
+
+    monkeypatch.setattr(server, "_metadata_rows_from_universal_report", fake_universal_report)
+    monkeypatch.setattr(server, "METADATA_UNIVERSAL_REPORT_SAFE_ROW_LIMIT", 1000)
+
+    result = asyncio.run(server._load_metadata_objects_from_catalog("unit", 10000, query="Номенклатура", max_results=20))
+
+    assert calls == [("unit", 1000, "", 0)]
+    assert result["requested_limit"] == 10000
+    assert result["effective_limit"] == 1000
+    assert result["limit"] == 1000
+    assert result["snapshot_truncated_by_safe_limit"] is True
+    assert any("capped at 1000 rows" in warning for warning in result["warnings"])
 
 
 def test_metadata_universal_report_chunk_read_uses_query_early_stop(monkeypatch):
