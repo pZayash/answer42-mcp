@@ -5639,6 +5639,25 @@ async def _add_universal_report_selected_field(session_id: str, field: str, warn
         return False
 
 
+async def _set_universal_report_quick_setting_by_titles(
+    session_id: str,
+    titles: list[str],
+    value: str,
+    warnings: list[str],
+) -> bool:
+    for title in titles:
+        try:
+            await _bridge_call_recorded(session_id, "set_field_value", {
+                "field_name": title,
+                "value": value,
+                "search_by_title": True,
+            }, timeout=15)
+            return True
+        except Exception as exc:
+            warnings.append(f"Universal report quick setting {title!r} was not set by title: {exc}")
+    return False
+
+
 async def _configure_universal_report_metadata_settings(session_id: str, query: str = "") -> list[str]:
     del query
     warnings: list[str] = []
@@ -5705,14 +5724,23 @@ async def _metadata_rows_from_universal_report(
     navigation_link = "e1cib/app/Отчет.УниверсальныйОтчет"
     try:
         await _bridge_call_recorded(session_id, "open_navigation_link", {"navigation_link": navigation_link})
-        await _bridge_call_recorded(session_id, "set_field_value", {
-            "field_name": "КомпоновщикНастроекПользовательскиеНастройкиЭлемент0Значение",
-            "value": "Справочники",
-        })
-        await _bridge_call_recorded(session_id, "set_field_value", {
-            "field_name": "КомпоновщикНастроекПользовательскиеНастройкиЭлемент1Значение",
-            "value": "Идентификаторы объектов метаданных",
-        })
+        type_set = await _set_universal_report_quick_setting_by_titles(
+            session_id,
+            ["Тип объекта", "Тип данных", "Раздел"],
+            "Справочники",
+            warnings,
+        )
+        object_set = await _set_universal_report_quick_setting_by_titles(
+            session_id,
+            ["Объект", "Справочник", "Имя объекта"],
+            "Идентификаторы объектов метаданных",
+            warnings,
+        )
+        if not type_set or not object_set:
+            return [], [
+                *warnings,
+                "Universal report metadata source quick settings were not found by visible labels",
+            ]
         # Do not open the Universal report settings form in the primary path.
         # Live thin-client/web sessions can visually open `ВсеНастройки` but
         # leave the test bridge unresponsive for minutes; adding the first
