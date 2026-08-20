@@ -46,6 +46,7 @@ _RAG_ENABLED = os.getenv("ONEC_MCP_DISABLE_RAG", "").strip().lower() not in {"1"
 _CREDENTIAL_STORE_ENABLED = os.getenv("ONEC_MCP_DISABLE_CREDENTIAL_STORE", "").strip().lower() not in {"1", "true", "yes", "on"}
 _DEV_TOOLS_ENABLED = os.getenv("ONEC_MCP_DEV_TOOLS", "").strip().lower() in {"1", "true", "yes", "on"}
 DEFAULT_SESSION = os.getenv("ONEC_MCP_DEFAULT_SESSION", f"default-{os.getpid()}")
+METADATA_UNIVERSAL_REPORT_SAFE_ROW_LIMIT = int(os.getenv("ONEC_MCP_METADATA_UNIVERSAL_REPORT_SAFE_ROW_LIMIT", "1000"))
 SESSION_SCOPE_ID = os.getenv("ONEC_MCP_SESSION_SCOPE_ID") or os.getenv("ONEC_MCP_SESSION_SCOPE") or ""
 STATE_FILE = os_support.runtime_path("ONEC_MCP_SESSION_STATE", "sessions.json")
 SCOPE_DIR: Path | None = None
@@ -5614,6 +5615,55 @@ async def _add_universal_report_filter(
     return True
 
 
+async def _close_universal_report_message_box_if_present(
+    session_id: str,
+    warnings: list[str],
+    *,
+    wait_seconds: float = 30.0,
+) -> bool:
+    """Wait for Universal report UI to become responsive and close a safe MessageBox if it appears."""
+    deadline = time.time() + max(0.0, wait_seconds)
+    last_error = ""
+    while True:
+        try:
+            active = await _bridge_call_recorded(session_id, "active_window", {}, timeout=5)
+        except Exception as exc:
+            last_error = str(exc)
+            if time.time() >= deadline:
+                warnings.append(f"Universal report active-window check before forming failed: {last_error}")
+                return False
+            await asyncio.sleep(2)
+            continue
+        if not isinstance(active, dict):
+            return False
+        form_name = str(active.get("form_name") or "")
+        title = str(active.get("title") or "")
+        diagnostics = active.get("client_diagnostics") if isinstance(active.get("client_diagnostics"), dict) else {}
+        modal_form = str(diagnostics.get("modal_form_name") or form_name)
+        if form_name == "MessageBox" or modal_form == "MessageBox":
+            try:
+                await _bridge_call_recorded(session_id, "click_button", {"name": "OK", "watchdog_timeout": 30}, timeout=35)
+                warnings.append("Universal report informational MessageBox was closed before forming the report")
+                return True
+            except Exception as exc:
+                last_error = str(exc)
+                if time.time() >= deadline:
+                    warnings.append(f"Universal report informational MessageBox could not be closed automatically: {last_error}")
+                    return False
+                await asyncio.sleep(2)
+                continue
+        if "Универсальный отчет" in title or form_name == "ОбщаяФорма.ФормаОтчета":
+            return False
+        # Some start-page/advertising forms can be active immediately before the
+        # navigation completes.  Wait a little instead of touching quick settings
+        # on the wrong form.
+        if time.time() >= deadline:
+            return False
+        await asyncio.sleep(1)
+
+
+
+
 async def _add_universal_report_selected_field(session_id: str, field: str, warnings: list[str]) -> bool:
     try:
         await _bridge_call_recorded(session_id, "group_activate_page", {
@@ -5645,16 +5695,27 @@ async def _set_universal_report_quick_setting_by_titles(
     value: str,
     warnings: list[str],
 ) -> bool:
+    local_warnings: list[str] = []
     for title in titles:
         try:
-            await _bridge_call_recorded(session_id, "set_field_value", {
+            info = await _bridge_call_recorded(session_id, "field_info", {
                 "field_name": title,
-                "value": value,
                 "search_by_title": True,
+            }, timeout=10)
+            if not isinstance(info, dict) or not info.get("found"):
+                raise RuntimeError(f"Поле не найдено по заголовку: {title}")
+            current = str(info.get("data_text") or "").strip()
+            if current == value or (value and value in current):
+                return True
+            field_name = str(info.get("name") or title)
+            await _bridge_call_recorded(session_id, "set_field_value", {
+                "field_name": field_name,
+                "value": value,
             }, timeout=15)
             return True
         except Exception as exc:
-            warnings.append(f"Universal report quick setting {title!r} was not set by title: {exc}")
+            local_warnings.append(f"Universal report quick setting {title!r} was not set by title: {exc}")
+    warnings.extend(local_warnings)
     return False
 
 
@@ -5724,6 +5785,7 @@ async def _metadata_rows_from_universal_report(
     navigation_link = "e1cib/app/Отчет.УниверсальныйОтчет"
     try:
         await _bridge_call_recorded(session_id, "open_navigation_link", {"navigation_link": navigation_link})
+        await _close_universal_report_message_box_if_present(session_id, warnings)
         type_set = await _set_universal_report_quick_setting_by_titles(
             session_id,
             ["Тип объекта", "Тип данных", "Раздел"],
@@ -5733,7 +5795,7 @@ async def _metadata_rows_from_universal_report(
         object_set = await _set_universal_report_quick_setting_by_titles(
             session_id,
             ["Объект", "Справочник", "Имя объекта"],
-            "Идентификаторы объектов метаданных",
+            "ИдентификаторыОбъектовМетаданных",
             warnings,
         )
         if not type_set or not object_set:
@@ -5750,6 +5812,7 @@ async def _metadata_rows_from_universal_report(
         # available as a separate best-effort diagnostic helper, not as a
         # correctness-critical step of metadata cache building.
         warnings.append("Universal report settings UI skipped; filtering is applied after reading rows")
+        await _close_universal_report_message_box_if_present(session_id, warnings)
         await _bridge_call_recorded(session_id, "click_button", {"name": "СформироватьОтчет"}, timeout=30)
         ready, readiness_warnings, readiness = await _wait_tabular_document_ready(
             session_id,
@@ -6089,25 +6152,37 @@ def _metadata_query_is_exact_full_name(query: str) -> bool:
 
 
 async def _load_metadata_objects_from_catalog(session_id: str, limit: int, query: str = "", max_results: int = 200) -> dict[str, Any]:
-    """Build a full metadata object snapshot through Universal report.
+    """Build a metadata object snapshot through Universal report.
 
     Public search parameters are intentionally not pushed into the live 1C UI.
-    The first load reads one normalized non-deleted snapshot from the standard
-    Universal report, excludes roles/subsystems during normalization, stores it
-    in the per-session cache, and later calls search that cache in Python.
+    The Universal report is read with a live-safe row cap: very large reads in
+    web-client sessions can block the thin client for minutes.  The bounded
+    snapshot is still cached per session and searched in Python.
     """
     del query, max_results
     navigation_link = "e1cib/app/Отчет.УниверсальныйОтчет"
-    parsed_rows, warnings = await _metadata_rows_from_universal_report(session_id, limit)
+    requested_limit = max(1, int(limit or METADATA_UNIVERSAL_REPORT_SAFE_ROW_LIMIT))
+    safe_limit = max(1, METADATA_UNIVERSAL_REPORT_SAFE_ROW_LIMIT)
+    effective_limit = min(requested_limit, safe_limit)
+    parsed_rows, warnings = await _metadata_rows_from_universal_report(session_id, effective_limit)
+    if requested_limit > effective_limit:
+        warnings.append(
+            "Universal report metadata snapshot was capped at "
+            f"{effective_limit} rows (requested {requested_limit}) to avoid blocking the web client"
+        )
     if not parsed_rows:
         warnings.append("Universal report returned no metadata rows for cache build")
-    return _metadata_catalog_data_from_rows(
+    data = _metadata_catalog_data_from_rows(
         parsed_rows,
         warnings,
         navigation_link=navigation_link,
         source_method="universal_report",
-        limit=limit,
+        limit=effective_limit,
     )
+    data["requested_limit"] = requested_limit
+    data["effective_limit"] = effective_limit
+    data["snapshot_truncated_by_safe_limit"] = requested_limit > effective_limit
+    return data
 
 
 @mcp.tool()
@@ -6154,6 +6229,9 @@ async def _metadata_objects_from_catalog_impl(
         "source": catalog_data["source"],
         "source_method": catalog_data.get("source_method", ""),
         "loaded_at": catalog_data["loaded_at"],
+        "requested_limit": catalog_data.get("requested_limit", catalog_data.get("limit")),
+        "effective_limit": catalog_data.get("effective_limit", catalog_data.get("limit")),
+        "snapshot_truncated_by_safe_limit": bool(catalog_data.get("snapshot_truncated_by_safe_limit")),
         "warnings": warnings,
     }
 
@@ -6161,7 +6239,7 @@ async def _metadata_objects_from_catalog_impl(
 @mcp.tool()
 async def metadata_objects_from_catalog(
     query: Annotated[str, "Substring to search in presentation, full name, type, name or synonym"] = "",
-    limit: Annotated[int, "Maximum rows to read from the catalog when cache is refreshed"] = 5000,
+    limit: Annotated[int, "Maximum rows to read from the catalog when cache is refreshed (capped by live-safe Universal report limit)"] = 1000,
     max_results: Annotated[int, "Maximum matched objects to return"] = 200,
     refresh_cache: Annotated[bool, "Force rebuilding the Universal report snapshot instead of using the session cache"] = False,
     include_groups: Annotated[bool, "Include hierarchy group rows in results"] = False,
