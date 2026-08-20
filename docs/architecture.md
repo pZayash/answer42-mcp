@@ -109,7 +109,7 @@ class SessionState:
 
 ### `mcp_1c.window_control`
 
-Управление OS-окном тест-клиента: Linux (wmctrl → xdotool → python-xlib), Windows (WinAPI: EnumWindows, GetWindowRect, ShowWindow, MoveWindow). Также предоставляет `active_1c_window_geometry()` для скриншотов.
+OS-specific слой окна тест-клиента: Linux (`wmctrl`/`xdotool`/`python-xlib`, `xwininfo`), Windows (WinAPI). Допускается для подготовки геометрии окна и скриншотов (resize/maximize/geometry capture). Ввод, клики и результат действий 1С не определяются через X11/WinAPI; автоматизация 1С идёт через API клиента тестирования.
 
 ### `mcp_1c.runtime`
 

@@ -74,6 +74,17 @@ def test_bridge_timeout_error_includes_last_progress_event(monkeypatch):
     assert "elapsed_ms=1234" in text
     assert "last_progress_age=5.0s" in text
 
+
+def test_bridge_timeout_deadline_extends_after_recent_progress(monkeypatch):
+    from mcp_1c import bridge
+
+    monkeypatch.setattr(bridge, "PROGRESS_GRACE_TIMEOUT", 10.0)
+
+    assert bridge._effective_timeout_deadline(20.0, None) == 20.0
+    assert bridge._effective_timeout_deadline(20.0, {"received_monotonic": 5.0}) == 20.0
+    assert bridge._effective_timeout_deadline(20.0, {"received_monotonic": 16.4}) == 26.4
+
+
 def test_form_close_does_not_block_on_save_discard_message_box():
     module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
 
@@ -291,13 +302,20 @@ def test_dynamic_list_set_settings_filter_values_are_set_via_settings_table_edit
     assert "Quick-поля формы здесь не используем" in add_setting
     assert "Для отбора здесь только добавляем строку" in add_setting
     assert "ДозаполнитьТабличныеПоляОтборовНастройкиСпискаMCP(Параметры.filters)" in set_settings
-    assert "ПерейтиКСтрокеТаблицыMCP(ПараметрыПерехода)" in table_helper
+    assert "ПерейтиКСтрокеНастройкиСпискаПоПолюMCP(РабочаяТаблица, ПолеНастройки, 200, НомерСовпадения)" in table_helper
     assert "УстановитьПолеТаблицыMCP(ПараметрыКолонки)" in table_helper
+    set_table_field = _bsl_function_body(module, "УстановитьПолеТаблицыMCP")
+    assert "ОбеспечитьРедактированиеТекущейСтрокиТаблицыMCP(Таблица, ИмяТаблицы)" in set_table_field
+    assert "ВвестиТекстВВидимыйРедакторТаблицыБезРежимаMCP" in set_table_field
+    assert "РезультатНачалаРедактированияВыбора = ОбеспечитьРедактированиеТекущейСтрокиТаблицыMCP(Таблица, ИмяТаблицы)" in set_table_field
+    visible_fallback = _bsl_function_body(module, "ВвестиТекстВВидимыйРедакторТаблицыБезРежимаMCP")
+    assert "visible_table_editor_without_confirmed_edit_mode.ВыполнитьВыборИзСпискаВыбора" in visible_fallback
+    assert "visible_table_editor_without_confirmed_edit_mode.ОткрытьВыпадающийСписок+ВыполнитьВыборИзСпискаВыбора" in visible_fallback
+    assert "ВидимыйРедакторТаблицыДоступенMCP" in visible_fallback
     assert "АктивироватьРазделНастроекСпискаMCP(Раздел)" in table_helper
     assert "table_goto_row + table_set_field" in table_helper
     assert "ЗакончитьРедактированиеСтроки(Ложь)" in table_helper
     assert "ТекущаяСтрокаНастройкиУжеСодержитЗначениеMCP" in table_helper
-    assert 'Новый Структура("name,title,text,limit", ИмяТаблицы, "", ПолеНастройки, 200)' in table_helper
     assert "ДозаполнитьБыстрыеПоляОтборовНастройкиСпискаMCP(Параметры.filters)" not in set_settings
     assert "ДозаполнитьТабличныеПоляОтборовНастройкиСпискаMCP" in module
     assert "per-field quick-группы" not in set_settings
@@ -326,6 +344,33 @@ def test_dynamic_list_set_settings_repositions_to_added_setting_row_before_secti
     position_index = add_setting.index("ПозиционированиеСтроки = ПерейтиКСтрокеНастройкиСпискаПоПолюMCP")
     filter_index = add_setting.index("НомерЭлементаНастроекСпискаMCP(Раздел) = 0")
     assert position_index < filter_index
+
+
+def test_table_goto_row_supports_occurrence_for_duplicate_filter_rows():
+    module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
+    goto_row = _bsl_function_body(module, "ПерейтиКСтрокеТаблицыMCP")
+
+    assert 'СвойствоСтруктуры(Параметры, "occurrence", 1)' in goto_row
+    assert "НайденоСовпадений = НайденоСовпадений + 1" in goto_row
+    assert "НайденоСовпадений = ПорядковыйНомерСовпадения" in goto_row
+    assert 'Новый Структура("found,row,index,occurrence,matches"' in goto_row
+    assert 'Новый Структура("found,rows_checked,matches,occurrence"' in goto_row
+
+
+def test_dynamic_list_set_settings_uses_occurrence_when_post_filling_duplicate_filter_fields():
+    module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
+    fill_filters = _bsl_function_body(module, "ДозаполнитьТабличныеПоляОтборовНастройкиСпискаMCP")
+    table_helper = _bsl_function_body(module, "УстановитьКолонкуСтрокиНастройкиСпискаВТаблицеMCP")
+    wrapper = _bsl_function_body(module, "УстановитьКолонкуСтрокиНастройкиСпискаЧерезТаблицуMCP")
+
+    assert "СчетчикиПолей = Новый Соответствие" in fill_filters
+    assert "НомерСовпаденияПоля = НомерСовпаденияПоля + 1" in fill_filters
+    assert 'СчетчикиПолей.Вставить(ИмяПоляОтбора, НомерСовпаденияПоля)' in fill_filters
+    assert "ПерейтиКСтрокеНастройкиСпискаПоПолюMCP(РабочаяТаблица, ПолеНастройки, 200, НомерСовпадения)" in table_helper
+    assert "УстановитьКолонкуСтрокиНастройкиСпискаВТаблицеMCP(Неопределено" in wrapper
+    assert "НомерСовпадения" in wrapper
+    assert '"filter", ИмяПоляОтбора, "Вид сравнения", СравнениеОтбора, Истина, Ошибки, НомерСовпаденияПоля' in fill_filters
+    assert '"filter", ИмяПоляОтбора, "Значение", ЗначениеОтбора, Истина, Ошибки, НомерСовпаденияПоля' in fill_filters
 
 
 def test_dynamic_list_set_settings_order_direction_uses_settings_table_editor_not_quick_fallback():
@@ -375,6 +420,44 @@ def test_dynamic_list_set_settings_does_not_bypass_table_edit_guard_for_generic_
 
     assert 'Лев(ИмяТаблицы, СтрДлина("КомпоновщикНастроек")) = "КомпоновщикНастроек"' in setter
     assert "РазрешитьБезРежимаРедактирования" in module
+
+
+def test_tabular_document_save_does_not_use_unstable_exact_dialog_filter_indexes():
+    module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
+    save_body = _bsl_function_body(module, "СохранитьТабличныйДокументMCP")
+    index_body = _bsl_function_body(module, "ИндексФильтраДиалогаТабличногоДокументаMCP")
+
+    assert "ИндексТочногоФильтра > 0" in save_body
+    assert "НачальныйФильтр = 1" in save_body
+    assert "КонечныйФильтр = 30" in save_body
+    assert "перебора" in index_body
+    assert "Возврат 0;" in index_body
+    assert 'Возврат 2;' not in index_body
+    assert 'Возврат 7;' not in index_body
+    assert 'Возврат 6;' not in index_body
+
+
+
+def test_tabular_document_save_uses_last_dot_when_appending_attempt_suffix():
+    module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
+    body = _bsl_function_body(module, "ДобавитьСуффиксКПутиMCP")
+
+    assert "Пока Индекс >= 1 Цикл" in body
+    assert "Индекс = Индекс - 1;" in body
+    assert 'Возврат Лев(Путь, ПозицияТочки - 1) + Суффикс + Сред(Путь, ПозицияТочки);' in body
+
+def test_tabular_document_save_clears_file_dialog_result_queue_around_each_attempt():
+    module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
+    body = _bsl_function_body(module, "СохранитьТабличныйДокументMCP")
+
+    clear_call = "ТестируемоеПриложение.ОчиститьРезультатДиалогаВыбораФайла();"
+    set_call = "ТестируемоеПриложение.УстановитьРезультатДиалогаВыбораФайла(Истина, ПутьПопытки, ИндексФильтра);"
+    write_call = "Поле.ЗаписатьСодержимоеВФайл(СохранитьКак);"
+
+    assert clear_call in body
+    assert body.index(clear_call) < body.index(set_call) < body.index(write_call)
+    assert body.count(clear_call) >= 3
+    assert "ошибка очистки очереди результата диалога выбора файла" in body
 
 
 def test_client_diagnostics_collects_user_messages_via_test_application_api_and_clears_them():

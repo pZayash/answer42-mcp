@@ -14,7 +14,6 @@ from mcp_1c.server import (
     _SESSIONS,
     DEFAULT_SESSION,
     SessionState,
-    _active_x11_window_geometry,
     _append_available_users_to_auth_error,
     _cf_marker_matches,
     _configure_session_scope,
@@ -28,8 +27,12 @@ from mcp_1c.server import (
     _json_list,
     _load_global_registry_unlocked,
     _match_metadata_object,
+    _configure_universal_report_metadata_settings,
     _metadata_catalog_rows_from_tabular_cells,
+    _metadata_rows_from_direct_catalog_query,
+    _metadata_object_from_row,
     _metadata_objects_catalog_self_entry,
+    _metadata_universal_report_filter_specs,
     _normalize_connection_mode,
     _parse_users_plain_text,
     _rag_diagnostic,
@@ -87,6 +90,8 @@ EXPECTED_NEW_TOOLS = {
     "installed_extensions_from_catalog",
     "metadata_objects_from_catalog",
     "metadata_objects_catalog_cache_clear",
+    "client_busy_status",
+    "wait_client_idle",
     "table_select_all",
     "table_clear_selection",
     "table_delete_row",
@@ -349,6 +354,7 @@ def test_selected_new_tool_schemas():
     assert "search_depth" not in tools["field_dropdown_items"].input_schema["properties"]
     assert "max_depth" not in tools["toggle_field"].input_schema["properties"]
     assert "max_depth" not in tools["click_button"].input_schema["properties"]
+    assert tools["click_button"].input_schema["properties"]["watchdog_timeout"]["default"] == 20
     assert tools["decoration_click_link"].input_schema["properties"]["presentation"]["default"] == ""
     assert tools["command_interface_commands"].input_schema["properties"]["section"]["default"] == ""
     assert "max_depth" not in tools["command_interface_commands"].input_schema["properties"]
@@ -359,6 +365,7 @@ def test_selected_new_tool_schemas():
     assert tools["metadata_objects_from_catalog"].input_schema["properties"]["query"]["default"] == ""
     assert tools["metadata_objects_from_catalog"].input_schema["properties"]["refresh_cache"]["default"] is False
     assert tools["metadata_objects_from_catalog"].input_schema["properties"]["include_groups"]["default"] is False
+    assert tools["metadata_objects_from_catalog"].input_schema["properties"]["watchdog_timeout"]["default"] == 90
     assert "session_id" in tools["metadata_objects_catalog_cache_clear"].input_schema["properties"]
     assert tools["window_command_interface"].input_schema["properties"]["window_title"]["default"] == ""
     assert tools["start_session"].input_schema["properties"]["rag_enabled"]["default"] is True
@@ -377,6 +384,9 @@ def test_selected_new_tool_schemas():
     assert tools["credentials_save"].input_schema["required"] == ["url", "username", "password"]
     assert tools["credentials_remove"].input_schema["required"] == ["url"]
     assert tools["tabular_document_save"].input_schema["properties"]["format"]["default"] == "pdf"
+    assert tools["tabular_document_save"].input_schema["properties"]["watchdog_timeout"]["default"] == 20
+    assert tools["client_busy_status"].input_schema["properties"]["probe_timeout"]["default"] == 2
+    assert tools["wait_client_idle"].input_schema["properties"]["timeout"]["default"] == 60
     assert "max_depth" not in tools["tabular_document_state_display"].input_schema["properties"]
     assert tools["search_objects"].input_schema["properties"]["limit"]["default"] == 50
     assert "max_depth" not in tools["search_objects"].input_schema["properties"]
@@ -392,6 +402,14 @@ def test_metadata_objects_catalog_self_entry_is_searchable():
     assert _match_metadata_object(item, "metadata") is False
 
 
+def test_table_row_pairs_accepts_compact_values_rows():
+    from mcp_1c.server import _table_row_pairs
+
+    row = {"values": {"Поле": "Полное имя", "Использование": "Да"}}
+
+    assert _table_row_pairs(row) == {"Поле": "Полное имя", "Использование": "Да"}
+
+
 def test_metadata_catalog_rows_from_tabular_cells_with_headers():
     rows = _metadata_catalog_rows_from_tabular_cells([
         ["Идентификаторы объектов метаданных"],
@@ -400,6 +418,108 @@ def test_metadata_catalog_rows_from_tabular_cells_with_headers():
     ])
     assert rows == [{"Ссылка": "? Справочник.PL_СервисыМаркета", "Синоним": "Сервисы", "Полное имя": "Справочник.PL_СервисыМаркета"}]
 
+
+def test_metadata_universal_report_filter_specs_build_full_snapshot_filters():
+    expected = [
+        {"field": "Пометка удаления", "comparison": "Равно", "value": "Нет"},
+        {"field": "Полное имя", "comparison": "Не начинается с", "value": "Роль."},
+        {"field": "Полное имя", "comparison": "Не начинается с", "value": "Подсистема."},
+    ]
+    assert _metadata_universal_report_filter_specs("") == expected
+    assert _metadata_universal_report_filter_specs("Справочник.Номенклатура") == expected
+    assert _metadata_universal_report_filter_specs("Номенклатура") == expected
+
+
+def test_metadata_catalog_rows_from_universal_report_cells():
+    rows = _metadata_catalog_rows_from_tabular_cells([
+        ["Параметры:", "Тип объекта: Справочник", ""],
+        ["Отбор:", "Пометка удаления Равно \"Нет\"", ""],
+        ["Идентификатор объекта метаданных", "Имя", "Синоним", "Полное имя", "Полный синоним"],
+        [
+            "Номенклатура (Справочник)",
+            "Номенклатура",
+            "Номенклатура",
+            "Справочник.Номенклатура",
+            "Справочник. Номенклатура",
+        ],
+    ])
+    assert rows == [{
+        "Идентификатор объекта метаданных": "Номенклатура (Справочник)",
+        "Имя": "Номенклатура",
+        "Синоним": "Номенклатура",
+        "Полное имя": "Справочник.Номенклатура",
+        "Полный синоним": "Справочник. Номенклатура",
+    }]
+    item = _metadata_object_from_row(rows[0])
+    assert item["presentation"] == "Номенклатура (Справочник)"
+    assert item["full_name"] == "Справочник.Номенклатура"
+    assert item["type"] == "Справочник"
+    assert item["name"] == "Номенклатура"
+    assert item["synonym"] == "Номенклатура"
+    assert item["is_group"] == "Нет"
+
+
+
+
+def test_metadata_catalog_rows_from_xlsx(tmp_path):
+    import zipfile
+
+    from mcp_1c.server import _metadata_catalog_rows_from_xlsx
+
+    workbook = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+ xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+ <sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets>
+</workbook>
+"""
+    rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+ <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+</Relationships>
+"""
+    shared = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="10" uniqueCount="10">
+ <si><t>Параметры:</t></si>
+ <si><t>Идентификатор объекта метаданных</t></si>
+ <si><t>Имя</t></si>
+ <si><t>Синоним</t></si>
+ <si><t>Полное имя</t></si>
+ <si><t>Полный синоним</t></si>
+ <si><t>Номенклатура (Справочник)</t></si>
+ <si><t>Номенклатура</t></si>
+ <si><t>Справочник.Номенклатура</t></si>
+ <si><t>Справочник. Номенклатура</t></si>
+</sst>
+"""
+    sheet = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+ <sheetData>
+  <row r="1"><c r="A1" t="s"><v>0</v></c></row>
+  <row r="2">
+   <c r="A2" t="s"><v>1</v></c><c r="B2" t="s"><v>2</v></c><c r="C2" t="s"><v>3</v></c><c r="D2" t="s"><v>4</v></c><c r="E2" t="s"><v>5</v></c>
+  </row>
+  <row r="3">
+   <c r="A3" t="s"><v>6</v></c><c r="B3" t="s"><v>7</v></c><c r="C3" t="s"><v>7</v></c><c r="D3" t="s"><v>8</v></c><c r="E3" t="s"><v>9</v></c>
+  </row>
+ </sheetData>
+</worksheet>
+"""
+    xlsx = tmp_path / "metadata.xlsx"
+    with zipfile.ZipFile(xlsx, "w") as archive:
+        archive.writestr("xl/workbook.xml", workbook)
+        archive.writestr("xl/_rels/workbook.xml.rels", rels)
+        archive.writestr("xl/sharedStrings.xml", shared)
+        archive.writestr("xl/worksheets/sheet1.xml", sheet)
+
+    rows = _metadata_catalog_rows_from_xlsx(xlsx)
+
+    assert rows == [{
+        "Идентификатор объекта метаданных": "Номенклатура (Справочник)",
+        "Имя": "Номенклатура",
+        "Синоним": "Номенклатура",
+        "Полное имя": "Справочник.Номенклатура",
+        "Полный синоним": "Справочник. Номенклатура",
+    }]
 
 def test_metadata_catalog_rows_from_tabular_cells_without_headers():
     rows = _metadata_catalog_rows_from_tabular_cells([
@@ -685,14 +805,13 @@ def test_default_xvfb_resolution_is_large_enough_for_1c_windows():
 
 
 
-def test_active_x11_window_geometry_accepts_test_client_title_and_clamps_to_screen(monkeypatch):
+def test_external_window_geometry_accepts_test_client_title_and_clamps_to_screen(monkeypatch):
+    from mcp_1c import window_control
+
     def fake_run(args, **kwargs):
         class Result:
             pass
         result = Result()
-        if args[0] == "xdpyinfo":
-            result.stdout = "screen #0:\n  dimensions:    1280x1024 pixels\n"
-            return result
         if args[0] == "xwininfo":
             result.stdout = (
                 '0x100001 "Клиент тестирования (1С:Предприятие) - Бухгалтерия предприятия Marvin [42_19_3364]" '
@@ -701,9 +820,11 @@ def test_active_x11_window_geometry_accepts_test_client_title_and_clamps_to_scre
             return result
         raise AssertionError(args)
 
-    monkeypatch.setattr("mcp_1c.server.subprocess.run", fake_run)
+    monkeypatch.setattr("mcp_1c.window_control.os.name", "posix")
+    monkeypatch.setattr("mcp_1c.window_control.subprocess.run", fake_run)
+    monkeypatch.setattr(window_control, "_screen_size", lambda display, env: (1280, 1024))
 
-    geometry = _active_x11_window_geometry(":99")
+    geometry = window_control.active_1c_window_geometry(display=":99")
     assert geometry is not None
     assert geometry["title"] == "Клиент тестирования (1С:Предприятие) - Бухгалтерия предприятия Marvin [42_19_3364]"
     assert geometry["left"] == 0
@@ -1118,3 +1239,652 @@ def test_find_object_match_accepts_title_substring():
         title="Закрыть",
         type="ТестируемаяКнопкаФормы",
     )
+
+
+def test_tabular_state_busy_detection():
+    from mcp_1c.server import _tabular_state_looks_busy, _tabular_state_text
+
+    state = {"state_display": {"display_variant": "Text", "text": "Формирование отчета..."}}
+    assert "Формирование" in _tabular_state_text(state)
+    assert _tabular_state_looks_busy(state) is True
+    assert _tabular_state_looks_busy({"state_display": {"text": ""}}) is False
+
+
+def test_tabular_documents_dimensions_picks_requested_name():
+    from mcp_1c.server import _tabular_documents_dimensions
+
+    result = {"items": [
+        {"name": "Другой", "rows": 1, "columns": 2},
+        {"name": "ОтчетТабличныйДокумент", "rows": 6073, "columns": 9},
+    ]}
+    assert _tabular_documents_dimensions(result, "ОтчетТабличныйДокумент") == (6073, 9)
+
+
+def test_wait_tabular_document_ready_uses_state_and_dimensions(monkeypatch):
+    from mcp_1c.server import _wait_tabular_document_ready
+
+    calls = []
+
+    async def fake_bridge_call(session_id, method, params, *, timeout=None):
+        calls.append((method, params, timeout))
+        if method == "tabular_document_state_display":
+            if len([call for call in calls if call[0] == method]) == 1:
+                return {"state_display": {"text": "Формирование отчета..."}}
+            return {"state_display": {"text": ""}}
+        if method == "tabular_documents":
+            return {"items": [{"name": "ОтчетТабличныйДокумент", "rows": 10, "columns": 3}]}
+        raise AssertionError(method)
+
+    async def fake_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr("mcp_1c.server._bridge_call_recorded", fake_bridge_call)
+    monkeypatch.setattr("mcp_1c.server.asyncio.sleep", fake_sleep)
+
+    ready, warnings, diagnostics = asyncio.run(_wait_tabular_document_ready("unit", "ОтчетТабличныйДокумент", timeout_seconds=30, interval_seconds=1))
+
+    assert ready is True
+    assert warnings == []
+    assert diagnostics["rows"] == 10
+    assert diagnostics["columns"] == 3
+    assert [call[0] for call in calls] == ["tabular_document_state_display", "tabular_document_state_display", "tabular_documents"]
+
+
+def test_dangerous_bridge_call_returns_blocked_status_on_watchdog_timeout(monkeypatch, tmp_path):
+    from mcp_1c import server
+    from mcp_1c.bridge import BridgeError
+
+    sess = SessionState(
+        session_id="unit",
+        display=":99",
+        platform_dir=tmp_path / "platform",
+        ws_port=12345,
+        ibsrv_port=23456,
+        testclient_port=34567,
+        data_dir=tmp_path / "session-unit",
+    )
+    recorded = []
+
+    async def fake_ensure_restored_session(session_id):
+        assert session_id == "unit"
+        return sess
+
+    async def fake_bridge_call_recorded(session_id, method, params, *, timeout=None):
+        assert (session_id, method, params, timeout) == ("unit", "tabular_document_save", {"name": "TD"}, 5)
+        raise BridgeError("1C bridge command 'tabular_document_save' timed out after 5s without response")
+
+    screenshot = {"path": "build/screenshots/watchdog_unit_tabular_document_save_20260819_174000.png", "bytes": 123}
+
+    monkeypatch.setattr(server, "_ensure_restored_session", fake_ensure_restored_session)
+    monkeypatch.setattr(server, "_bridge_call_recorded", fake_bridge_call_recorded)
+    monkeypatch.setattr(server, "_capture_dangerous_action_timeout_screenshot", lambda sess, method: screenshot)
+    monkeypatch.setattr(server, "_persist_sessions", lambda: None)
+    monkeypatch.setattr(server, "_record_tool", lambda session_id, method, params, result: recorded.append((session_id, method, params, result)) or result)
+
+    result = asyncio.run(server._dangerous_bridge_call_recorded(
+        "unit",
+        "tabular_document_save",
+        {"name": "TD"},
+        timeout=5,
+        danger="unit_test_danger",
+    ))
+
+    assert result["started_long_action"] is True
+    assert result["interface_blocked"] is True
+    assert result["reason"] == "dangerous_action_watchdog_timeout"
+    assert result["blocked_action"]["danger"] == "unit_test_danger"
+    assert result["blocked_action"]["screenshot"] == screenshot
+    assert "base64" not in result["blocked_action"]["screenshot"]
+    assert sess.blocked_action is not None
+    assert recorded[0][1] == "tabular_document_save"
+
+
+def test_client_busy_status_clears_blocked_action_when_probe_succeeds(monkeypatch, tmp_path):
+    from mcp_1c import server
+
+    class DummyBridge:
+        def status(self):
+            return {"connected": True, "pending": 0}
+
+        async def call(self, method, params, timeout=None):
+            assert (method, params, timeout) == ("active_window", {}, 2)
+            return {"title": "1С:Предприятие"}
+
+    sess = SessionState(
+        session_id="unit",
+        display=":99",
+        platform_dir=tmp_path / "platform",
+        ws_port=12345,
+        ibsrv_port=23456,
+        testclient_port=34567,
+        data_dir=tmp_path / "session-unit",
+    )
+    sess.bridge = DummyBridge()
+    sess.blocked_action = {"method": "tabular_document_save", "started_time": server.time.time() - 3}
+
+    async def fake_ensure_restored_session(session_id):
+        assert session_id == "unit"
+        return sess
+
+    monkeypatch.setattr(server, "_ensure_restored_session", fake_ensure_restored_session)
+    monkeypatch.setattr(server, "_persist_sessions", lambda: None)
+
+    result = asyncio.run(server._client_busy_status_impl("unit", probe_timeout=2))
+
+    assert result["responsive"] is True
+    assert result["busy"] is False
+    assert result["can_continue"] is True
+    assert result["recovered_from_blocked_action"] is True
+    assert sess.blocked_action is None
+
+
+def test_client_busy_status_reports_blocked_action_when_probe_times_out(monkeypatch, tmp_path):
+    from mcp_1c import server
+    from mcp_1c.bridge import BridgeError
+
+    class DummyBridge:
+        def status(self):
+            return {"connected": True, "pending": 0}
+
+        async def call(self, method, params, timeout=None):
+            raise BridgeError("1C bridge command 'active_window' timed out after 2s without response")
+
+    sess = SessionState(
+        session_id="unit",
+        display=":99",
+        platform_dir=tmp_path / "platform",
+        ws_port=12345,
+        ibsrv_port=23456,
+        testclient_port=34567,
+        data_dir=tmp_path / "session-unit",
+    )
+    sess.bridge = DummyBridge()
+    sess.blocked_action = {"method": "tabular_document_save", "started_time": server.time.time() - 3}
+
+    async def fake_ensure_restored_session(session_id):
+        assert session_id == "unit"
+        return sess
+
+    monkeypatch.setattr(server, "_ensure_restored_session", fake_ensure_restored_session)
+
+    result = asyncio.run(server._client_busy_status_impl("unit", probe_timeout=2))
+
+    assert result["responsive"] is False
+    assert result["busy"] is True
+    assert result["reason"] == "bridge_probe_timeout"
+    assert result["blocked_action"]["method"] == "tabular_document_save"
+
+
+def test_metadata_objects_from_catalog_watchdog_returns_blocked_status(monkeypatch, tmp_path):
+    from mcp_1c import server
+
+    sess = SessionState(
+        session_id="unit",
+        display=":99",
+        platform_dir=tmp_path / "platform",
+        ws_port=12345,
+        ibsrv_port=23456,
+        testclient_port=34567,
+        data_dir=tmp_path / "session-unit",
+    )
+
+    async def fake_ensure_restored_session(session_id):
+        assert session_id == "unit"
+        return sess
+
+    async def fake_load(*_args, **_kwargs):
+        await asyncio.sleep(3600)
+        return {}
+
+    monkeypatch.setattr(server, "_ensure_restored_session", fake_ensure_restored_session)
+    monkeypatch.setattr(server, "_load_metadata_objects_from_catalog", fake_load)
+    monkeypatch.setattr(server, "_persist_sessions", lambda: None)
+
+    result = asyncio.run(server.metadata_objects_from_catalog(
+        query="Справочник.Номенклатура",
+        max_results=10,
+        refresh_cache=True,
+        watchdog_timeout=0.01,
+        session_id="unit",
+    ))
+
+    assert result["started_long_action"] is True
+    assert result["interface_blocked"] is True
+    assert result["reason"] == "metadata_objects_watchdog_timeout"
+    assert result["blocked_action"]["method"] == "metadata_objects_from_catalog"
+    assert result["blocked_action"]["danger"] == "metadata_objects_universal_report_may_block_thin_client"
+    assert sess.blocked_action is not None
+
+
+def test_direct_metadata_catalog_query_parses_non_deleted_rows(monkeypatch):
+    from mcp_1c import server
+
+    async def fake_bridge_call(session_id, method, params, *, timeout=None):
+        assert session_id == "unit"
+        assert method == "metadata_catalog_query"
+        assert params == {"query": "Справочник.Номенклатура", "limit": 10}
+        assert timeout == 20
+        return {
+            "non_deleted_filter": True,
+            "rows": [{
+                "Идентификатор объекта метаданных": "Номенклатура (Справочник)",
+                "Имя": "Номенклатура",
+                "Синоним": "Номенклатура",
+                "Полное имя": "Справочник.Номенклатура",
+                "Полный синоним": "Справочник. Номенклатура",
+                "Пометка удаления": "Нет",
+            }],
+        }
+
+    monkeypatch.setattr(server, "_bridge_call_recorded", fake_bridge_call)
+
+    rows, warnings = asyncio.run(_metadata_rows_from_direct_catalog_query("unit", 10, query="Справочник.Номенклатура"))
+
+    assert warnings == []
+    assert rows == [{
+        "Идентификатор объекта метаданных": "Номенклатура (Справочник)",
+        "Имя": "Номенклатура",
+        "Синоним": "Номенклатура",
+        "Полное имя": "Справочник.Номенклатура",
+        "Полный синоним": "Справочник. Номенклатура",
+        "Пометка удаления": "Нет",
+    }]
+
+
+
+
+def test_load_metadata_objects_uses_target_catalog_list_for_broad_cache(monkeypatch):
+    from mcp_1c import server
+
+    async def fake_target_list(session_id, limit):
+        assert session_id == "unit"
+        assert limit == 10
+        return [
+            {"Ссылка": "? Справочник.Номенклатура"},
+            {"Ссылка": "? Роль.ПолныеПрава"},
+            {"Ссылка": "? Подсистема.Продажи"},
+        ], []
+
+    async def fail_direct(*args, **kwargs):
+        raise AssertionError("direct catalog query must not be used when target list returns rows")
+
+    async def fail_universal_report(*args, **kwargs):
+        raise AssertionError("Universal report must not be used when target list returns rows")
+
+    monkeypatch.setattr(server, "_metadata_rows_from_target_catalog_list", fake_target_list)
+    monkeypatch.setattr(server, "_metadata_rows_from_direct_catalog_query", fail_direct)
+    monkeypatch.setattr(server, "_metadata_rows_from_universal_report", fail_universal_report)
+
+    result = asyncio.run(server._load_metadata_objects_from_catalog("unit", 10, query="", max_results=10))
+
+    assert result["source_method"] == "target_catalog_list"
+    assert result["navigation_link"] == "e1cib/list/Справочник.ИдентификаторыОбъектовМетаданных"
+    assert result["warnings"] == [
+        "Target metadata catalog list returned 3 rows; hierarchical/current-list view may be partial. Safe exact direct-query fallback may be used when available.",
+    ]
+    assert result["objects_count"] == 2  # matching object + explicit self-entry
+    assert [item["full_name"] for item in result["objects"]] == [
+        "Справочник.Номенклатура",
+        "Справочник.ИдентификаторыОбъектовМетаданных",
+    ]
+
+def test_load_metadata_objects_skips_dangerous_universal_report_when_list_and_direct_return_no_rows(monkeypatch):
+    from mcp_1c import server
+
+    async def fake_target_list(session_id, limit):
+        assert session_id == "unit"
+        assert limit == 10
+        return [], ["target list unavailable"]
+
+    async def fake_direct_catalog(session_id, limit, *, query=""):
+        assert session_id == "unit"
+        assert limit == 10
+        assert query == ""
+        return [], ["direct path unavailable"]
+
+    async def fail_universal_report(*args, **kwargs):
+        raise AssertionError("Universal report fallback must not run automatically after safe-path failure")
+
+    monkeypatch.setattr(server, "_metadata_rows_from_target_catalog_list", fake_target_list)
+    monkeypatch.setattr(server, "_metadata_rows_from_direct_catalog_query", fake_direct_catalog)
+    monkeypatch.setattr(server, "_metadata_rows_from_universal_report", fail_universal_report)
+
+    result = asyncio.run(server._load_metadata_objects_from_catalog("unit", 10, query="", max_results=10))
+
+    assert result["source_method"] == "target_catalog_list"
+    assert result["navigation_link"] == "e1cib/list/Справочник.ИдентификаторыОбъектовМетаданных"
+    assert result["warnings"] == [
+        "target list unavailable",
+        "direct path unavailable",
+        "Target metadata catalog list and direct query returned no rows; Universal report fallback is skipped because it can block the thin-client bridge",
+    ]
+    assert result["objects_count"] == 1  # explicit self-entry only
+    assert result["type_counts"] == {"Справочник": 1}
+    assert [item["full_name"] for item in result["objects"]] == [
+        "Справочник.ИдентификаторыОбъектовМетаданных",
+    ]
+
+
+
+def test_load_metadata_objects_prefers_exact_direct_query_without_ui(monkeypatch):
+    from mcp_1c import server
+
+    async def fail_target_list(*args, **kwargs):
+        raise AssertionError("exact full-name query must try server-side direct query before UI list")
+
+    async def fake_direct_catalog(session_id, limit, *, query=""):
+        assert session_id == "unit"
+        assert limit == 10
+        assert query == "Справочник.Номенклатура"
+        return [
+            {"ПолноеИмя": "Справочник.Номенклатура", "Синоним": "Номенклатура", "ПометкаУдаления": "Нет"},
+        ], ["exact direct path used"]
+
+    async def fail_universal_report(*args, **kwargs):
+        raise AssertionError("Universal report must not be used for exact direct lookup")
+
+    monkeypatch.setattr(server, "_metadata_rows_from_target_catalog_list", fail_target_list)
+    monkeypatch.setattr(server, "_metadata_rows_from_direct_catalog_query", fake_direct_catalog)
+    monkeypatch.setattr(server, "_metadata_rows_from_universal_report", fail_universal_report)
+
+    result = asyncio.run(server._load_metadata_objects_from_catalog(
+        "unit",
+        10,
+        query="Справочник.Номенклатура",
+        max_results=10,
+    ))
+
+    assert result["source_method"] == "metadata_catalog_query"
+    assert result["navigation_link"] == "metadata_catalog_query"
+    assert result["partial_for_query"] is True
+    assert result["warnings"] == ["exact direct path used"]
+    assert [item["full_name"] for item in result["objects"]] == [
+        "Справочник.Номенклатура",
+        "Справочник.ИдентификаторыОбъектовМетаданных",
+    ]
+
+def test_load_metadata_objects_uses_direct_catalog_query_after_target_list_returns_no_rows(monkeypatch):
+    from mcp_1c import server
+
+    async def fake_target_list(session_id, limit):
+        assert session_id == "unit"
+        assert limit == 10
+        return [], ["target list unavailable"]
+
+    async def fake_direct_catalog(session_id, limit, *, query=""):
+        assert session_id == "unit"
+        assert limit == 10
+        assert query == ""
+        return [
+            {"Полное имя": "Справочник.Номенклатура", "Синоним": "Номенклатура", "Пометка удаления": "Нет"},
+            {"Полное имя": "Роль.ПолныеПрава", "Синоним": "Полные права", "Пометка удаления": "Нет"},
+            {"Полное имя": "Подсистема.Продажи", "Синоним": "Продажи", "Пометка удаления": "Нет"},
+            {"Полное имя": "Документ.Старый", "Синоним": "Старый", "Пометка удаления": "Да"},
+        ], ["direct path used"]
+
+    async def fail_universal_report(*args, **kwargs):
+        raise AssertionError("Universal report must not be used when direct catalog query returns rows")
+
+    monkeypatch.setattr(server, "_metadata_rows_from_target_catalog_list", fake_target_list)
+    monkeypatch.setattr(server, "_metadata_rows_from_direct_catalog_query", fake_direct_catalog)
+    monkeypatch.setattr(server, "_metadata_rows_from_universal_report", fail_universal_report)
+
+    result = asyncio.run(server._load_metadata_objects_from_catalog("unit", 10, query="", max_results=10))
+
+    assert result["source_method"] == "metadata_catalog_query"
+    assert result["navigation_link"] == "metadata_catalog_query"
+    assert result["warnings"] == ["target list unavailable", "direct path used"]
+    assert result["objects_count"] == 2  # matching object + explicit self-entry
+    assert [item["full_name"] for item in result["objects"]] == [
+        "Справочник.Номенклатура",
+        "Справочник.ИдентификаторыОбъектовМетаданных",
+    ]
+
+
+
+
+def test_configure_universal_report_metadata_settings_filters_and_disables_extra_fields(monkeypatch):
+    calls = []
+
+    async def fake_bridge_call(session_id, method, params, *, timeout=None):
+        assert session_id == "unit"
+        calls.append((method, params, timeout))
+        if method == "table_rows" and params["name"] == "ВыбранныеПоля":
+            return {"rows": [
+                {"pairs": [{"key": "Поле", "value": "Авто"}, {"key": "Использование", "value": "Да"}]},
+                {"pairs": [{"key": "Поле", "value": "Синоним"}, {"key": "Использование", "value": "Да"}]},
+                {"pairs": [{"key": "Поле", "value": "Полное имя"}, {"key": "Использование", "value": "Да"}]},
+                {"pairs": [{"key": "Поле", "value": "Порядок коллекции"}, {"key": "Использование", "value": "Да"}]},
+            ]}
+        if method == "table_rows" and params["name"] == "Отборы":
+            return {"rows": []}
+        return {"ok": True}
+
+    monkeypatch.setattr("mcp_1c.server._bridge_call_recorded", fake_bridge_call)
+
+    warnings = asyncio.run(_configure_universal_report_metadata_settings("unit", "Справочник.Номенклатура"))
+
+    assert warnings == []
+    assert ("click_button", {"name": "ВсеНастройки"}, 30) in calls
+    assert not any(call[0] == "table_set_field" and call[1].get("table") == "ВыбранныеПоля" for call in calls)
+    assert not any(call == ("click_button", {"name": "ВыбранныеПоляВыбранныеПоля_СнятьФлажки"}, 20) for call in calls)
+    assert any(call == ("table_set_field", {
+        "table": "Отборы",
+        "field": "Значение",
+        "value": "Нет",
+        "search_by_title": True,
+    }, 15) for call in calls)
+    assert any(call == ("table_set_field", {
+        "table": "Отборы",
+        "field": "Условие",
+        "value": "Не начинается с",
+        "search_by_title": True,
+    }, 15) for call in calls)
+    assert any(call == ("table_set_field", {
+        "table": "Отборы",
+        "field": "Значение",
+        "value": "Роль.",
+        "search_by_title": True,
+    }, 15) for call in calls)
+    assert any(call == ("table_set_field", {
+        "table": "Отборы",
+        "field": "Значение",
+        "value": "Подсистема.",
+        "search_by_title": True,
+    }, 15) for call in calls)
+    assert ("table_goto_row", {"name": "Отборы", "text": "Полное имя", "limit": 50, "occurrence": 1}, 10) in calls
+    assert ("table_goto_row", {"name": "Отборы", "text": "Полное имя", "limit": 50, "occurrence": 2}, 10) in calls
+    assert not any(call == ("table_set_field", {
+        "table": "Отборы",
+        "field": "Значение",
+        "value": "Справочник.Номенклатура",
+        "search_by_title": True,
+    }, 15) for call in calls)
+    assert ("click_button", {"name": "ЗакрытьИСформировать"}, 35) in calls
+
+
+def test_table_goto_row_passes_occurrence_to_bridge(monkeypatch):
+    from mcp_1c import server
+
+    calls = []
+
+    async def fake_bridge_call(session_id, method, params, *, timeout=None):
+        calls.append((session_id, method, params, timeout))
+        return {"found": True}
+
+    monkeypatch.setattr(server, "_bridge_call_recorded", fake_bridge_call)
+
+    result = asyncio.run(server.table_goto_row("Полное имя", name="Отборы", limit=50, occurrence=2, session_id="unit"))
+
+    assert result == {"found": True}
+    assert calls == [("unit", "table_goto_row", {
+        "name": "Отборы",
+        "title": "",
+        "text": "Полное имя",
+        "limit": 50,
+        "occurrence": 2,
+    }, None)]
+
+
+def test_metadata_universal_report_primary_path_skips_settings_ui(monkeypatch):
+    from mcp_1c import server
+
+    calls = []
+
+    async def fake_bridge_call(session_id, method, params, *, timeout=None):
+        assert session_id == "unit"
+        calls.append((method, params, timeout))
+        return {"ok": True}
+
+    async def fail_configure(session_id, query=""):
+        raise AssertionError("primary metadata path must not open Universal report settings UI")
+
+    async def fake_ready(session_id, name, *, timeout_seconds=75.0, interval_seconds=3.0):
+        assert session_id == "unit"
+        assert name == "ОтчетТабличныйДокумент"
+        return True, [], {"rows": 2, "columns": 6}
+
+    async def fake_chunks(session_id, name, *, max_rows, total_rows, total_columns, query="", target_matches=0, chunk_size=1000):
+        assert session_id == "unit"
+        assert name == "ОтчетТабличныйДокумент"
+        assert max_rows == 10
+        assert total_rows == 2
+        assert total_columns == 6
+        return [{"Полное имя": "Справочник.Номенклатура", "Синоним": "Номенклатура"}], []
+
+    monkeypatch.setattr(server, "_bridge_call_recorded", fake_bridge_call)
+    monkeypatch.setattr(server, "_configure_universal_report_metadata_settings", fail_configure)
+    monkeypatch.setattr(server, "_wait_tabular_document_ready", fake_ready)
+    monkeypatch.setattr(server, "_metadata_rows_from_tabular_document_chunks", fake_chunks)
+
+    rows, warnings = asyncio.run(server._metadata_rows_from_universal_report("unit", 10))
+
+    assert rows == [{"Полное имя": "Справочник.Номенклатура", "Синоним": "Номенклатура"}]
+    assert any("settings UI skipped" in warning for warning in warnings)
+    assert ("click_button", {"name": "СформироватьОтчет"}, 30) in calls
+    assert not any(method == "click_button" and params.get("name") == "ВсеНастройки" for method, params, _timeout in calls)
+
+
+def test_metadata_universal_report_chunk_read_uses_query_early_stop(monkeypatch):
+    from mcp_1c import server
+
+    calls = []
+
+    async def fake_bridge_call(session_id, method, params, *, timeout=None):
+        assert session_id == "unit"
+        assert method == "tabular_document_text"
+        calls.append(params)
+        if params["row_start"] == 1:
+            return {
+                "cells": [
+                    ["Ссылка", "Имя", "Синоним", "Полное имя", "Полный синоним", "Это группа"],
+                    ["Номенклатура (Справочник)", "Номенклатура", "Номенклатура", "Справочник.Номенклатура", "Справочник. Номенклатура", "Нет"],
+                ]
+            }
+        raise AssertionError("chunk reader did not stop after first matching chunk")
+
+    monkeypatch.setattr(server, "_bridge_call_recorded", fake_bridge_call)
+
+    rows, warnings = asyncio.run(server._metadata_rows_from_tabular_document_chunks(
+        "unit",
+        "ОтчетТабличныйДокумент",
+        max_rows=5000,
+        total_rows=5000,
+        total_columns=9,
+        query="Справочник.Номенклатура",
+        target_matches=1,
+        chunk_size=250,
+    ))
+
+    assert len(calls) == 1
+    assert rows[0]["Полное имя"] == "Справочник.Номенклатура"
+    assert any("stopped after reaching requested matches" in warning for warning in warnings)
+
+
+def test_click_button_uses_dangerous_watchdog_by_default(monkeypatch):
+    from mcp_1c import server
+
+    calls = []
+
+    async def fake_dangerous_call(session_id, method, params, *, timeout, danger):
+        calls.append((session_id, method, params, timeout, danger))
+        return {"pressed": True}
+
+    monkeypatch.setattr(server, "_dangerous_bridge_call_recorded", fake_dangerous_call)
+
+    result = asyncio.run(server.click_button("СформироватьОтчет", session_id="unit"))
+
+    assert result == {"pressed": True}
+    assert calls == [(
+        "unit",
+        "click_button",
+        {"name": "СформироватьОтчет", "search_by_title": False},
+        20,
+        "click_button_may_start_long_ui_action",
+    )]
+
+
+def test_click_button_watchdog_can_be_disabled(monkeypatch):
+    from mcp_1c import server
+
+    calls = []
+
+    async def fake_bridge_call(session_id, method, params):
+        calls.append((session_id, method, params))
+        return {"pressed": True}
+
+    monkeypatch.setattr(server, "_bridge_call_recorded", fake_bridge_call)
+
+    result = asyncio.run(server.click_button("OK", watchdog_timeout=0, session_id="unit"))
+
+    assert result == {"pressed": True}
+    assert calls == [("unit", "click_button", {"name": "OK", "search_by_title": False})]
+
+
+def test_publish_tools_list_changed_uses_subscription_bus(monkeypatch):
+    from mcp.shared.subscriptions import ToolsListChanged
+    from mcp_1c import server
+
+    events = []
+
+    class DummySubscriptions:
+        async def publish(self, event):
+            events.append(event)
+
+    monkeypatch.setattr(server.mcp, "_subscriptions", DummySubscriptions())
+
+    asyncio.run(server._publish_tools_list_changed("unit"))
+
+    assert len(events) == 1
+    assert isinstance(events[0], ToolsListChanged)
+
+
+def test_startup_tools_changed_notifications_publish_after_configured_delays(monkeypatch):
+    from mcp_1c import server
+
+    calls = []
+
+    async def fake_sleep(delay):
+        calls.append(("sleep", delay))
+
+    async def fake_publish(reason):
+        calls.append(("publish", reason))
+
+    monkeypatch.setattr(server.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(server, "_publish_tools_list_changed", fake_publish)
+
+    asyncio.run(server._startup_tools_changed_notifications((0, 2)))
+
+    assert calls == [("publish", "startup"), ("sleep", 2), ("publish", "startup")]
+
+
+def test_enable_tools_list_changed_capability_sets_legacy_initialize_bit(monkeypatch):
+    from mcp_1c import server
+
+    monkeypatch.setattr(server, "_TOOLS_LIST_CHANGED_CAPABILITY_ENABLED", False)
+
+    server._enable_tools_list_changed_capability()
+    opts = server.mcp._lowlevel_server.create_initialization_options()
+
+    assert opts.capabilities.tools is not None
+    assert opts.capabilities.tools.list_changed is True
