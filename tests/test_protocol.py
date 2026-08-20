@@ -16,6 +16,12 @@ def _bsl_function_body(module: str, name: str) -> str:
     return module[start:end]
 
 
+def _bsl_procedure_body(module: str, name: str) -> str:
+    start = module.index(f"Процедура {name}")
+    end = module.index("КонецПроцедуры", start) + len("КонецПроцедуры")
+    return module[start:end]
+
+
 def test_manager_protocol_version_is_embedded_in_cf_sources():
     module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
     assert f'Возврат "{MANAGER_PROTOCOL_VERSION}"' in module
@@ -498,6 +504,28 @@ def test_manager_logs_click_button_search_stats():
     assert "click_button: search_done" in module
     assert "search_stats" in module
     assert "fast_platform_search" in module
+
+
+def test_click_button_confirm_buttons_skip_expensive_post_step_diagnostics():
+    module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
+    click_body = _bsl_function_body(module, "НажатьКнопку")
+
+    assert "НужноПропуститьДиагностикуПослеНажатияКнопкиMCP" in module
+    assert 'НормИмя = "ok"' in module
+    assert 'НормЗаголовок = "ок"' in module
+    assert "skip_post_step_diagnostics" in click_body
+    assert "ДобавитьСостояниеОкнаПослеДействияMCP" in click_body
+    assert "Если Не ПропуститьДиагностикуПослеШага Тогда" in click_body
+    assert "window_state_skipped" in click_body
+
+
+def test_bridge_request_handler_honors_skip_post_step_diagnostics_flag():
+    module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
+    handler_body = _bsl_procedure_body(module, "ПриПолученииСообщения")
+
+    assert "Результат.Свойство(\"skip_post_step_diagnostics\", ПропуститьДиагностикуПослеШага)" in handler_body
+    assert 'ДиагностикаКлиента = Новый Структура("skipped,reason"' in handler_body
+    assert "ПроверитьСостояниеКлиентаПослеШага(ЗаголовокОкнаДоКоманды, ИмяФормыОкнаДоКоманды)" in handler_body
     assert "dfs_fallback" in module
     assert "Статистика.buttons_checked" in module
     assert "Статистика.nodes" in module
