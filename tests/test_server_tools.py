@@ -1493,154 +1493,93 @@ def test_direct_metadata_catalog_query_parses_non_deleted_rows(monkeypatch):
 
 
 
-def test_load_metadata_objects_uses_target_catalog_list_for_broad_cache(monkeypatch):
+def test_load_metadata_objects_builds_full_cache_from_universal_report(monkeypatch):
     from mcp_1c import server
 
-    async def fake_target_list(session_id, limit):
+    async def fake_universal_report(session_id, limit, *, query="", target_matches=0):
         assert session_id == "unit"
         assert limit == 10
+        assert query == ""
+        assert target_matches == 0
         return [
-            {"Ссылка": "? Справочник.Номенклатура"},
-            {"Ссылка": "? Роль.ПолныеПрава"},
-            {"Ссылка": "? Подсистема.Продажи"},
+            {"Полное имя": "Справочник.Номенклатура", "Синоним": "Номенклатура", "Пометка удаления": "Нет"},
+            {"Полное имя": "Документ.РеализацияТоваров", "Синоним": "Реализация товаров", "Пометка удаления": "Нет"},
+            {"Полное имя": "Роль.ПолныеПрава", "Синоним": "Полные права", "Пометка удаления": "Нет"},
+            {"Полное имя": "Подсистема.Продажи", "Синоним": "Продажи", "Пометка удаления": "Нет"},
+            {"Полное имя": "Справочник.Старый", "Синоним": "Старый", "Пометка удаления": "Да"},
+        ], ["universal report used"]
+
+    async def fail_target_list(*args, **kwargs):
+        raise AssertionError("target catalog list must not be used for metadata cache build")
+
+    async def fail_direct(*args, **kwargs):
+        raise AssertionError("direct metadata catalog query must not be used for metadata cache build")
+
+    monkeypatch.setattr(server, "_metadata_rows_from_universal_report", fake_universal_report)
+    monkeypatch.setattr(server, "_metadata_rows_from_target_catalog_list", fail_target_list)
+    monkeypatch.setattr(server, "_metadata_rows_from_direct_catalog_query", fail_direct)
+
+    result = asyncio.run(server._load_metadata_objects_from_catalog("unit", 10, query="Номенклатура", max_results=10))
+
+    assert result["source_method"] == "universal_report"
+    assert result["navigation_link"] == "e1cib/app/Отчет.УниверсальныйОтчет"
+    assert result["warnings"] == ["universal report used"]
+    assert result["partial_for_query"] is False
+    assert result["rows_count"] == 5
+    assert result["non_deleted_rows_count"] == 2
+    assert result["objects_count"] == 3  # two real rows + explicit self-entry
+    assert result["type_counts"] == {"Документ": 1, "Справочник": 2}
+    assert [item["full_name"] for item in result["objects"]] == [
+        "Справочник.Номенклатура",
+        "Документ.РеализацияТоваров",
+        "Справочник.ИдентификаторыОбъектовМетаданных",
+    ]
+
+
+def test_metadata_objects_from_catalog_searches_cached_universal_report_snapshot(monkeypatch):
+    from mcp_1c import server
+
+    server._METADATA_OBJECTS_CACHE.pop("unit", None)
+    calls = []
+
+    async def fake_universal_report(session_id, limit, *, query="", target_matches=0):
+        calls.append((session_id, limit, query, target_matches))
+        return [
+            {"Полное имя": "Справочник.Номенклатура", "Синоним": "Номенклатура", "Пометка удаления": "Нет"},
+            {"Полное имя": "Документ.РеализацияТоваров", "Синоним": "Реализация товаров", "Пометка удаления": "Нет"},
         ], []
 
     async def fail_direct(*args, **kwargs):
-        raise AssertionError("direct catalog query must not be used when target list returns rows")
+        raise AssertionError("query must search the cache, not call direct catalog query")
 
-    async def fail_universal_report(*args, **kwargs):
-        raise AssertionError("Universal report must not be used when target list returns rows")
-
-    monkeypatch.setattr(server, "_metadata_rows_from_target_catalog_list", fake_target_list)
+    monkeypatch.setattr(server, "_metadata_rows_from_universal_report", fake_universal_report)
     monkeypatch.setattr(server, "_metadata_rows_from_direct_catalog_query", fail_direct)
-    monkeypatch.setattr(server, "_metadata_rows_from_universal_report", fail_universal_report)
 
-    result = asyncio.run(server._load_metadata_objects_from_catalog("unit", 10, query="", max_results=10))
-
-    assert result["source_method"] == "target_catalog_list"
-    assert result["navigation_link"] == "e1cib/list/Справочник.ИдентификаторыОбъектовМетаданных"
-    assert result["warnings"] == [
-        "Target metadata catalog list returned 3 rows; hierarchical/current-list view may be partial. Safe exact direct-query fallback may be used when available.",
-    ]
-    assert result["objects_count"] == 2  # matching object + explicit self-entry
-    assert [item["full_name"] for item in result["objects"]] == [
-        "Справочник.Номенклатура",
-        "Справочник.ИдентификаторыОбъектовМетаданных",
-    ]
-
-def test_load_metadata_objects_skips_dangerous_universal_report_when_list_and_direct_return_no_rows(monkeypatch):
-    from mcp_1c import server
-
-    async def fake_target_list(session_id, limit):
-        assert session_id == "unit"
-        assert limit == 10
-        return [], ["target list unavailable"]
-
-    async def fake_direct_catalog(session_id, limit, *, query=""):
-        assert session_id == "unit"
-        assert limit == 10
-        assert query == ""
-        return [], ["direct path unavailable"]
-
-    async def fail_universal_report(*args, **kwargs):
-        raise AssertionError("Universal report fallback must not run automatically after safe-path failure")
-
-    monkeypatch.setattr(server, "_metadata_rows_from_target_catalog_list", fake_target_list)
-    monkeypatch.setattr(server, "_metadata_rows_from_direct_catalog_query", fake_direct_catalog)
-    monkeypatch.setattr(server, "_metadata_rows_from_universal_report", fail_universal_report)
-
-    result = asyncio.run(server._load_metadata_objects_from_catalog("unit", 10, query="", max_results=10))
-
-    assert result["source_method"] == "target_catalog_list"
-    assert result["navigation_link"] == "e1cib/list/Справочник.ИдентификаторыОбъектовМетаданных"
-    assert result["warnings"] == [
-        "target list unavailable",
-        "direct path unavailable",
-        "Target metadata catalog list and direct query returned no rows; Universal report fallback is skipped because it can block the thin-client bridge",
-    ]
-    assert result["objects_count"] == 1  # explicit self-entry only
-    assert result["type_counts"] == {"Справочник": 1}
-    assert [item["full_name"] for item in result["objects"]] == [
-        "Справочник.ИдентификаторыОбъектовМетаданных",
-    ]
-
-
-
-def test_load_metadata_objects_prefers_exact_direct_query_without_ui(monkeypatch):
-    from mcp_1c import server
-
-    async def fail_target_list(*args, **kwargs):
-        raise AssertionError("exact full-name query must try server-side direct query before UI list")
-
-    async def fake_direct_catalog(session_id, limit, *, query=""):
-        assert session_id == "unit"
-        assert limit == 10
-        assert query == "Справочник.Номенклатура"
-        return [
-            {"ПолноеИмя": "Справочник.Номенклатура", "Синоним": "Номенклатура", "ПометкаУдаления": "Нет"},
-        ], ["exact direct path used"]
-
-    async def fail_universal_report(*args, **kwargs):
-        raise AssertionError("Universal report must not be used for exact direct lookup")
-
-    monkeypatch.setattr(server, "_metadata_rows_from_target_catalog_list", fail_target_list)
-    monkeypatch.setattr(server, "_metadata_rows_from_direct_catalog_query", fake_direct_catalog)
-    monkeypatch.setattr(server, "_metadata_rows_from_universal_report", fail_universal_report)
-
-    result = asyncio.run(server._load_metadata_objects_from_catalog(
-        "unit",
-        10,
+    first = asyncio.run(server._metadata_objects_from_catalog_impl(
         query="Справочник.Номенклатура",
+        limit=10,
         max_results=10,
+        refresh_cache=True,
+        include_groups=False,
+        session_id="unit",
+    ))
+    second = asyncio.run(server._metadata_objects_from_catalog_impl(
+        query="Реализация",
+        limit=10,
+        max_results=10,
+        refresh_cache=False,
+        include_groups=False,
+        session_id="unit",
     ))
 
-    assert result["source_method"] == "metadata_catalog_query"
-    assert result["navigation_link"] == "metadata_catalog_query"
-    assert result["partial_for_query"] is True
-    assert result["warnings"] == ["exact direct path used"]
-    assert [item["full_name"] for item in result["objects"]] == [
-        "Справочник.Номенклатура",
-        "Справочник.ИдентификаторыОбъектовМетаданных",
-    ]
-
-def test_load_metadata_objects_uses_direct_catalog_query_after_target_list_returns_no_rows(monkeypatch):
-    from mcp_1c import server
-
-    async def fake_target_list(session_id, limit):
-        assert session_id == "unit"
-        assert limit == 10
-        return [], ["target list unavailable"]
-
-    async def fake_direct_catalog(session_id, limit, *, query=""):
-        assert session_id == "unit"
-        assert limit == 10
-        assert query == ""
-        return [
-            {"Полное имя": "Справочник.Номенклатура", "Синоним": "Номенклатура", "Пометка удаления": "Нет"},
-            {"Полное имя": "Роль.ПолныеПрава", "Синоним": "Полные права", "Пометка удаления": "Нет"},
-            {"Полное имя": "Подсистема.Продажи", "Синоним": "Продажи", "Пометка удаления": "Нет"},
-            {"Полное имя": "Документ.Старый", "Синоним": "Старый", "Пометка удаления": "Да"},
-        ], ["direct path used"]
-
-    async def fail_universal_report(*args, **kwargs):
-        raise AssertionError("Universal report must not be used when direct catalog query returns rows")
-
-    monkeypatch.setattr(server, "_metadata_rows_from_target_catalog_list", fake_target_list)
-    monkeypatch.setattr(server, "_metadata_rows_from_direct_catalog_query", fake_direct_catalog)
-    monkeypatch.setattr(server, "_metadata_rows_from_universal_report", fail_universal_report)
-
-    result = asyncio.run(server._load_metadata_objects_from_catalog("unit", 10, query="", max_results=10))
-
-    assert result["source_method"] == "metadata_catalog_query"
-    assert result["navigation_link"] == "metadata_catalog_query"
-    assert result["warnings"] == ["target list unavailable", "direct path used"]
-    assert result["objects_count"] == 2  # matching object + explicit self-entry
-    assert [item["full_name"] for item in result["objects"]] == [
-        "Справочник.Номенклатура",
-        "Справочник.ИдентификаторыОбъектовМетаданных",
-    ]
-
-
+    assert calls == [("unit", 10, "", 0)]
+    assert first["cache_hit"] is False
+    assert first["found"] is True
+    assert [item["full_name"] for item in first["objects"]] == ["Справочник.Номенклатура"]
+    assert second["cache_hit"] is True
+    assert second["found"] is True
+    assert [item["full_name"] for item in second["objects"]] == ["Документ.РеализацияТоваров"]
+    assert second["source_method"] == "universal_report"
 
 
 def test_configure_universal_report_metadata_settings_filters_and_disables_extra_fields(monkeypatch):
