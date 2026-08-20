@@ -16,12 +16,6 @@ def _bsl_function_body(module: str, name: str) -> str:
     return module[start:end]
 
 
-def _bsl_procedure_body(module: str, name: str) -> str:
-    start = module.index(f"Процедура {name}")
-    end = module.index("КонецПроцедуры", start) + len("КонецПроцедуры")
-    return module[start:end]
-
-
 def test_manager_protocol_version_is_embedded_in_cf_sources():
     module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
     assert f'Возврат "{MANAGER_PROTOCOL_VERSION}"' in module
@@ -504,31 +498,52 @@ def test_manager_logs_click_button_search_stats():
     assert "click_button: search_done" in module
     assert "search_stats" in module
     assert "fast_platform_search" in module
-
-
-def test_click_button_confirm_buttons_skip_expensive_post_step_diagnostics():
-    module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
-    click_body = _bsl_function_body(module, "НажатьКнопку")
-
-    assert "НужноПропуститьДиагностикуПослеНажатияКнопкиMCP" in module
-    assert 'НормИмя = "ok"' in module
-    assert 'НормЗаголовок = "ок"' in module
-    assert "skip_post_step_diagnostics" in click_body
-    assert "ДобавитьСостояниеОкнаПослеДействияMCP" in click_body
-    assert "Если Не ПропуститьДиагностикуПослеШага Тогда" in click_body
-    assert "window_state_skipped" in click_body
-
-
-def test_bridge_request_handler_honors_skip_post_step_diagnostics_flag():
-    module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
-    handler_body = _bsl_procedure_body(module, "ПриПолученииСообщения")
-
-    assert "Результат.Свойство(\"skip_post_step_diagnostics\", ПропуститьДиагностикуПослеШага)" in handler_body
-    assert 'ДиагностикаКлиента = Новый Структура("skipped,reason"' in handler_body
-    assert "ПроверитьСостояниеКлиентаПослеШага(ЗаголовокОкнаДоКоманды, ИмяФормыОкнаДоКоманды)" in handler_body
     assert "dfs_fallback" in module
     assert "Статистика.buttons_checked" in module
     assert "Статистика.nodes" in module
+
+
+def test_post_step_diagnostics_are_not_skipped_for_confirm_buttons():
+    module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
+    click_body = _bsl_function_body(module, "НажатьКнопку")
+
+    assert "skip_post_step_diagnostics" not in module
+    assert "НужноПропуститьДиагностикуПослеНажатияКнопкиMCP" not in module
+    assert "ПропуститьДиагностикуПослеШага" not in click_body
+    assert "ДобавитьСостояниеОкнаПослеДействияMCP(Результат, ЗаголовокДоНажатия, ФормаДоНажатия, ОжидатьЗакрытияФормы)" in click_body
+
+
+def test_post_step_diagnostics_emit_progress_phases():
+    module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
+    body = _bsl_function_body(module, "ПроверитьСостояниеКлиентаПослеШага")
+
+    for phase in [
+        "post_step_active_window_start",
+        "post_step_active_window_done",
+        "post_step_user_messages_start",
+        "post_step_user_messages_done",
+        "post_step_error_info_start",
+        "post_step_error_info_done",
+        "post_step_validation_start",
+        "post_step_validation_done",
+        "post_step_window_summary_start",
+        "post_step_window_summary_done",
+        "post_step_error_window_check_start",
+        "post_step_error_window_check_done",
+        "post_step_modal_details_start",
+        "post_step_modal_details_done",
+    ]:
+        assert phase in body
+    assert "post_step_diagnostics_done" in module
+    assert "response_payload_ready" in module
+
+
+def test_post_step_diagnostics_do_not_scan_whole_window_for_error_window():
+    module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
+    body = _bsl_function_body(module, "ПроверитьСостояниеКлиентаПослеШага")
+
+    assert 'Результат.modal_is_error_window = ИмяФормыАктивногоОкна = "ErrorWindow"' in body
+    assert "ЕстьФормаОшибкиРекурсивно(АктивноеОкно, 0)" not in body
 
 
 def test_manager_uses_strict_match_for_form_command_names():
