@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -15,10 +16,30 @@ from websockets.server import WebSocketServer, WebSocketServerProtocol
 from .protocol import BridgeRequest, BridgeResponse
 
 LOGGER = logging.getLogger(__name__)
+PROGRESS_GRACE_TIMEOUT = float(os.getenv("ONEC_MCP_PROGRESS_GRACE_TIMEOUT", "10"))
 
 
 class BridgeError(RuntimeError):
     """Raised when the 1C bridge is not connected or returns an error."""
+
+
+class BridgeTimeoutError(BridgeError):
+    """Raised when a 1C bridge command does not return before its deadline."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        method: str,
+        timeout: float,
+        progress: dict[str, Any] | None = None,
+        progress_history: list[dict[str, Any]] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.method = method
+        self.timeout = timeout
+        self.progress = progress
+        self.progress_history = progress_history or []
 
 
 def _bridge_error_text(response: BridgeResponse, method: str) -> str:
@@ -33,6 +54,7 @@ class ConnectedBridge:
     peer: str
     pending: dict[str, asyncio.Future[BridgeResponse]] = field(default_factory=dict)
     progress: dict[str, dict[str, Any]] = field(default_factory=dict)
+    progress_history: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
 
 
 class OneCBridgeServer:
@@ -81,25 +103,66 @@ class OneCBridgeServer:
         future: asyncio.Future[BridgeResponse] = asyncio.get_running_loop().create_future()
         bridge.pending[request_id] = future
         bridge.progress.pop(request_id, None)
+        bridge.progress_history.pop(request_id, None)
         request = BridgeRequest(id=request_id, method=method, params=params or {})
 
         try:
             await bridge.websocket.send(json.dumps(request.to_json(), ensure_ascii=False))
-            try:
-                response = await asyncio.wait_for(future, timeout=request_timeout)
-            except TimeoutError as exc:
-                progress = bridge.progress.get(request_id)
-                suffix = _format_timeout_progress(progress)
-                raise BridgeError(
-                    f"1C bridge command {method!r} timed out after {request_timeout:g}s without response{suffix}"
-                ) from exc
+            response = await self._wait_response_with_progress_grace(
+                bridge,
+                request_id,
+                method,
+                future,
+                request_timeout,
+            )
         finally:
             bridge.pending.pop(request_id, None)
             bridge.progress.pop(request_id, None)
+            bridge.progress_history.pop(request_id, None)
 
         if not response.ok:
             raise BridgeError(_bridge_error_text(response, method))
         return response.result
+
+    async def _wait_response_with_progress_grace(
+        self,
+        bridge: ConnectedBridge,
+        request_id: str,
+        method: str,
+        future: asyncio.Future[BridgeResponse],
+        request_timeout: float,
+    ) -> BridgeResponse:
+        """Wait for a response, extending the deadline briefly after fresh progress.
+
+        1C-side handlers send progress events between expensive UI/test-client
+        steps.  The public watchdog timeout is a user-facing deadline for an
+        apparently silent operation, not a reason to cancel a request a few
+        seconds after the manager reported that it had just completed a step.
+        ``asyncio.wait_for`` cancels the future on timeout, so use ``shield``
+        and make the final timeout decision ourselves.
+        """
+        started = time.monotonic()
+        absolute_deadline = started + request_timeout
+        while True:
+            progress = bridge.progress.get(request_id)
+            deadline = _effective_timeout_deadline(absolute_deadline, progress)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                progress_history = list(bridge.progress_history.get(request_id) or [])
+                suffix = _format_timeout_progress(progress)
+                raise BridgeTimeoutError(
+                    f"1C bridge command {method!r} timed out after {request_timeout:g}s without response{suffix}",
+                    method=method,
+                    timeout=request_timeout,
+                    progress=progress,
+                    progress_history=progress_history,
+                )
+            try:
+                return await asyncio.wait_for(asyncio.shield(future), timeout=remaining)
+            except TimeoutError:
+                if future.done():
+                    return future.result()
+                continue
 
     async def _handler(self, websocket: WebSocketServerProtocol) -> None:
         peer = f"{websocket.remote_address}"
@@ -138,6 +201,10 @@ class OneCBridgeServer:
         progress = dict(data)
         progress["received_monotonic"] = time.monotonic()
         bridge.progress[request_id] = progress
+        history = bridge.progress_history.setdefault(request_id, [])
+        history.append(progress)
+        if len(history) > 20:
+            del history[:-20]
 
     async def _process_message(self, bridge: ConnectedBridge, raw_message: str | bytes) -> None:
         if isinstance(raw_message, bytes):
@@ -185,3 +252,15 @@ def _format_timeout_progress(progress: dict[str, Any] | None) -> str:
         parts.append(f"elapsed_ms={elapsed_ms}")
     parts.append(f"last_progress_age={age:.1f}s")
     return "; last progress: " + ", ".join(parts)
+
+
+def _effective_timeout_deadline(absolute_deadline: float, progress: dict[str, Any] | None) -> float:
+    if not progress:
+        return absolute_deadline
+    try:
+        received = float(progress.get("received_monotonic") or 0.0)
+    except (TypeError, ValueError):
+        received = 0.0
+    if received <= 0:
+        return absolute_deadline
+    return max(absolute_deadline, received + PROGRESS_GRACE_TIMEOUT)

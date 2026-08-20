@@ -24,6 +24,8 @@ from typing import Annotated, Any
 from urllib.parse import urlsplit, urlunsplit
 
 from mcp.server import MCPServer
+from mcp.server.lowlevel import NotificationOptions
+from mcp.server.subscriptions import ToolsListChanged
 
 from . import __version__, os_support, release_helper, runtime, skill_installer
 from . import platform as _platform
@@ -35,7 +37,7 @@ from .protocol import MANAGER_PROTOCOL_VERSION
 from .rag import RagService
 from .rag.dump import dump_all_extensions_to_xml, dump_cf_to_xml, dump_infobase_to_xml
 from .recorder import RecordingSession
-from .window_control import active_1c_window_geometry as _active_windows_1c_window_geometry
+from .window_control import active_1c_window_geometry as _active_external_1c_window_geometry
 from .window_control import maximize_test_client_window as _maximize_external_window
 
 mcp = MCPServer("Answer42")
@@ -55,6 +57,43 @@ GLOBAL_ORPHAN_TTL_SECONDS = int(os.getenv("ONEC_MCP_ORPHAN_TTL_SECONDS", "1800")
 AUTORELOAD_PID_FILE = os_support.runtime_path("ONEC_MCP_AUTORELOAD_PID_FILE", "answer42-autoreload.pid")
 AUTORELOAD_LOG_FILE = os_support.runtime_path("ONEC_MCP_AUTORELOAD_LOG_FILE", "answer42-autoreload.log")
 RAG_BINDINGS_FILE = os_support.runtime_path("ONEC_MCP_RAG_BINDINGS", "rag-bindings.json")
+NOTIFY_TOOLS_CHANGED_ON_STARTUP = os.getenv("ONEC_MCP_NOTIFY_TOOLS_CHANGED_ON_STARTUP", "1").strip().lower() not in {"0", "false", "no", "off"}
+TOOLS_CHANGED_STARTUP_DELAYS = tuple(
+    float(part)
+    for part in re.split(r"[,;\s]+", os.getenv("ONEC_MCP_TOOLS_CHANGED_STARTUP_DELAYS", "1,3,10,30").strip())
+    if part.strip()
+)
+_TOOLS_LIST_CHANGED_CAPABILITY_ENABLED = False
+
+
+def _enable_tools_list_changed_capability() -> None:
+    """Advertise tools/list_changed for handshake-era clients.
+
+    Modern 2026-07-28 clients derive list-changed support from
+    `subscriptions/listen`.  Older clients still look at the legacy
+    `tools.listChanged` capability bit in `initialize`, and the MCP SDK only
+    sets that bit when `NotificationOptions(tools_changed=True)` is supplied
+    to `create_initialization_options()`.  Answer42 normally delegates that
+    call to the SDK internals, so wrap the low-level method once and preserve
+    explicit caller-provided options.
+    """
+    global _TOOLS_LIST_CHANGED_CAPABILITY_ENABLED
+    if _TOOLS_LIST_CHANGED_CAPABILITY_ENABLED:
+        return
+    lowlevel = mcp._lowlevel_server
+    original = lowlevel.create_initialization_options
+
+    def create_initialization_options_with_tools_changed(
+        notification_options: NotificationOptions | None = None,
+        experimental_capabilities: dict[str, dict[str, Any]] | None = None,
+        extensions: dict[str, dict[str, Any]] | None = None,
+    ) -> Any:
+        if notification_options is None:
+            notification_options = NotificationOptions(tools_changed=True)
+        return original(notification_options, experimental_capabilities, extensions)
+
+    lowlevel.create_initialization_options = create_initialization_options_with_tools_changed  # type: ignore[method-assign]
+    _TOOLS_LIST_CHANGED_CAPABILITY_ENABLED = True
 
 _PORT_ALLOC_LOCK = os_support.runtime_path("ONEC_MCP_PORT_ALLOC_LOCK", "port-allocation.lock")
 _SHARED_FILE_SERVERS_FILE = os_support.runtime_path("ONEC_MCP_SHARED_FILE_SERVERS", "shared-file-servers.json")
@@ -69,6 +108,7 @@ TOOL_PROFILE_GROUPS: dict[str, set[str]] = {
     "windows": {"active_window", "windows_list", "activate_window", "goto_start_page", "goto_previous_window", "goto_next_window"},
     "forms": {
         "wait_object", "wait_form", "wait_window", "user_messages", "close_user_messages_panel", "current_error_info",
+        "client_busy_status", "wait_client_idle",
         "set_file_dialog_result", "clear_file_dialog_result", "field_info", "field_value_text", "field_tooltip",
         "field_dropdown_items", "form_next_element", "form_previous_element", "form_state", "form_default_button",
         "wait_form_closed", "object_command_panel", "object_context_menu", "window_command_interface",
@@ -102,6 +142,7 @@ TOOL_PROFILE_GROUPS: dict[str, set[str]] = {
 TOOL_PROFILE_CORE: set[str] = TOOL_PROFILE_GROUPS["sessions"] | {
     "active_window", "windows_list", "activate_window", "goto_start_page", "goto_previous_window", "goto_next_window",
     "wait_object", "wait_form", "wait_window", "user_messages", "close_user_messages_panel", "current_error_info",
+    "client_busy_status", "wait_client_idle",
     "field_info", "field_value_text", "field_dropdown_items", "field_dropdown_state", "field_dropdown_close",
     "toggle_field", "set_field_value", "activate_field", "choose_field_from_list", "choose_field_first_row", "choose_current_row",
     "form_state", "form_default_button", "wait_form_closed", "click_button", "find_object", "search_objects", "get_object",
@@ -466,6 +507,7 @@ class SessionState:
         self.rag_enabled: bool = True
         self.idle_timeout_seconds: int = 60 * 60
         self.last_activity_monotonic: float = time.monotonic()
+        self.blocked_action: dict[str, Any] | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -489,6 +531,7 @@ class SessionState:
             "idle_timeout_seconds": self.idle_timeout_seconds,
             "target_connection_mode": self.target_connection_mode,
             "target_connection_value": self.target_connection_value,
+            "blocked_action": self.blocked_action,
             "manager_pid": self.runtime.manager_process.pid if self.runtime and self.runtime.manager_process and self.runtime.manager_process.poll() is None else self.manager_pid,
             "ibsrv_pid": self.runtime.server_process.pid if self.runtime and self.runtime.server_process and self.runtime.server_process.poll() is None else self.ibsrv_pid,
             "test_client_pid": self.test_client_process.pid if self.test_client_process and self.test_client_process.poll() is None else self.test_client_pid,
@@ -517,6 +560,8 @@ class SessionState:
         sess.client_display = str(data.get("client_display", ""))
         sess.rag_enabled = bool(data.get("rag_enabled", True))
         sess.idle_timeout_seconds = int(data.get("idle_timeout_seconds") or 60 * 60)
+        blocked_action = data.get("blocked_action")
+        sess.blocked_action = blocked_action if isinstance(blocked_action, dict) else None
         sess.target_connection_mode = str(data.get("target_connection_mode") or "")
         sess.target_connection_value = str(data.get("target_connection_value") or "")
         sess.manager_pid = int(data.get("manager_pid") or 0)
@@ -1784,6 +1829,8 @@ async def _bridge_call_recorded(
     session_id: str,
     method: str,
     params: dict[str, Any],
+    *,
+    timeout: float | None = None,
 ) -> Any:
     sess = await _ensure_restored_session(session_id)
     await _wait_for_bridge_connected(sess, timeout=60.0)
@@ -1798,8 +1845,192 @@ async def _bridge_call_recorded(
     if method in method_timeouts:
         env_name, default_timeout = method_timeouts[method]
         request_timeout = float(os.getenv(env_name, str(default_timeout)))
+    if timeout is not None:
+        request_timeout = timeout
     result = await sess.bridge.call(method, params, timeout=request_timeout)
     return _record_tool(session_id, method, params, result)
+
+
+def _bridge_timeout_text(exc: BaseException) -> str:
+    text = str(exc).strip()
+    return text or type(exc).__name__
+
+
+def _looks_like_bridge_timeout(exc: BaseException) -> bool:
+    text = _bridge_timeout_text(exc).casefold()
+    return "timed out" in text or "timeout" in text or "истек" in text or "таймаут" in text
+
+
+def _blocked_action_elapsed(blocked_action: dict[str, Any] | None) -> float:
+    if not blocked_action:
+        return 0.0
+    try:
+        started_time = float(blocked_action.get("started_time") or 0.0)
+    except (TypeError, ValueError):
+        started_time = 0.0
+    if started_time:
+        return max(0.0, time.time() - started_time)
+    try:
+        started = float(blocked_action.get("started_monotonic") or 0.0)
+    except (TypeError, ValueError):
+        started = 0.0
+    return max(0.0, time.monotonic() - started) if started else 0.0
+
+
+def _public_blocked_action(blocked_action: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not blocked_action:
+        return None
+    public = {key: value for key, value in blocked_action.items() if key != "started_monotonic"}
+    public["elapsed_seconds"] = round(_blocked_action_elapsed(blocked_action), 3)
+    return public
+
+
+def _capture_dangerous_action_timeout_screenshot(sess: SessionState, method: str) -> dict[str, Any]:
+    safe_session = re.sub(r"[^A-Za-z0-9_.-]+", "-", sess.session_id).strip(".-") or "session"
+    safe_method = re.sub(r"[^A-Za-z0-9_.-]+", "-", method).strip(".-") or "method"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = f"build/screenshots/watchdog_{safe_session}_{safe_method}_{timestamp}.png"
+    try:
+        shot = screenshot(path=path, window=True, display="", session_id=sess.session_id)
+        if isinstance(shot, dict):
+            return {key: value for key, value in shot.items() if key != "base64"}
+    except Exception as exc:
+        return {"path": path, "error": str(exc)}
+    return {"path": path, "error": "screenshot did not return diagnostics"}
+
+
+def _mark_session_blocked_action(
+    sess: SessionState,
+    method: str,
+    params: dict[str, Any],
+    *,
+    timeout: float,
+    error: str,
+    danger: str,
+    screenshot_diagnostic: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    blocked_action = {
+        "method": method,
+        "params": params,
+        "danger": danger,
+        "started_at": datetime.now().isoformat(timespec="seconds"),
+        "started_time": time.time(),
+        "started_monotonic": time.monotonic(),
+        "watchdog_timeout_seconds": timeout,
+        "timeout_error": error,
+        "reason": "dangerous_action_blocked_interface",
+    }
+    if screenshot_diagnostic is not None:
+        blocked_action["screenshot"] = screenshot_diagnostic
+    sess.blocked_action = blocked_action
+    with suppress(Exception):
+        _persist_sessions()
+    return blocked_action
+
+
+def _clear_session_blocked_action(sess: SessionState) -> None:
+    if sess.blocked_action is None:
+        return
+    sess.blocked_action = None
+    with suppress(Exception):
+        _persist_sessions()
+
+
+async def _dangerous_bridge_call_recorded(
+    session_id: str,
+    method: str,
+    params: dict[str, Any],
+    *,
+    timeout: float,
+    danger: str,
+) -> Any:
+    sess = await _ensure_restored_session(session_id)
+    try:
+        result = await _bridge_call_recorded(session_id, method, params, timeout=timeout)
+    except (TimeoutError, BridgeError) as exc:
+        if not _looks_like_bridge_timeout(exc):
+            raise
+        error = _bridge_timeout_text(exc)
+        screenshot_diagnostic = _capture_dangerous_action_timeout_screenshot(sess, method)
+        blocked_action = _mark_session_blocked_action(
+            sess,
+            method,
+            params,
+            timeout=timeout,
+            error=error,
+            danger=danger,
+            screenshot_diagnostic=screenshot_diagnostic,
+        )
+        result = {
+            "ok": False,
+            "started_long_action": True,
+            "interface_blocked": True,
+            "reason": "dangerous_action_watchdog_timeout",
+            "message": (
+                "Dangerous 1C UI action did not return before the watchdog deadline. "
+                "The action may still be running in the thin client and blocking the automation interface. "
+                "Use client_busy_status or wait_client_idle before sending further UI commands."
+            ),
+            "method": method,
+            "params": params,
+            "watchdog_timeout_seconds": timeout,
+            "timeout_error": error,
+            "blocked_action": _public_blocked_action(blocked_action),
+        }
+        return _record_tool(session_id, method, params, result)
+    else:
+        _clear_session_blocked_action(sess)
+        return result
+
+
+async def _client_busy_status_impl(
+    session_id: str,
+    *,
+    probe_timeout: float = 2.0,
+) -> dict[str, Any]:
+    sess = await _ensure_restored_session(session_id)
+    bridge_status = sess.bridge.status()
+    blocked_before_probe = _public_blocked_action(sess.blocked_action)
+    result: dict[str, Any] = {
+        "session_id": session_id,
+        "responsive": False,
+        "busy": "unknown",
+        "reason": "not_checked",
+        "can_continue": False,
+        "bridge": bridge_status,
+        "blocked_action": blocked_before_probe,
+    }
+    if not bridge_status.get("connected"):
+        result.update({
+            "reason": "bridge_not_connected",
+            "suggested_action": "start_session_or_restore_bridge",
+        })
+        return result
+    try:
+        active = await sess.bridge.call("active_window", {}, timeout=probe_timeout)
+    except Exception as exc:
+        result.update({
+            "responsive": False,
+            "busy": True if blocked_before_probe else "unknown",
+            "reason": "bridge_probe_timeout" if _looks_like_bridge_timeout(exc) else "bridge_probe_failed",
+            "probe_error": _bridge_timeout_text(exc),
+            "can_continue": False,
+            "suggested_action": "wait_client_idle" if blocked_before_probe else "retry_or_inspect_session_status",
+        })
+        return result
+
+    if sess.blocked_action is not None:
+        _clear_session_blocked_action(sess)
+    result.update({
+        "responsive": True,
+        "busy": False,
+        "reason": "bridge_probe_ok",
+        "can_continue": True,
+        "active_window": active,
+    })
+    if blocked_before_probe:
+        result["recovered_from_blocked_action"] = True
+    return result
 
 
 _TOOL_LOG_MAX_VALUE = int(os.getenv("ONEC_MCP_TOOL_LOG_MAX_VALUE", "4096"))
@@ -2567,6 +2798,7 @@ def sessions_list() -> dict[str, Any]:
             "client_display": sess.client_display,
             "ws_port": sess.ws_port,
             "bridge_connected": bool(bridge_status.get("connected")),
+            "blocked_action": _public_blocked_action(sess.blocked_action),
             "manager_alive": bool((rt and rt.manager_process and rt.manager_process.poll() is None) or _pid_is_running(sess.manager_pid)),
             "ibsrv_alive": bool((rt and rt.server_process and rt.server_process.poll() is None) or _pid_is_running(sess.ibsrv_pid)),
             "testclient_port": sess.testclient_port,
@@ -2624,6 +2856,7 @@ def session_status(*,
         "display": sess.display,
         "client_display": sess.client_display,
         "bridge": bridge,
+        "blocked_action": _public_blocked_action(sess.blocked_action),
         "manager": None if rt is None else {
             "pid": rt.manager_process.pid if rt.manager_process else (sess.manager_pid or None),
             "alive": (rt.manager_process.poll() is None if rt.manager_process else _pid_is_running(sess.manager_pid)),
@@ -3869,6 +4102,57 @@ async def current_error_info(*,
 
 
 @mcp.tool()
+async def client_busy_status(
+    probe_timeout: Annotated[int, "Short probe timeout in seconds; keep small to avoid blocking on a busy thin client"] = 2,
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Check whether the 1C test client/bridge is responsive and whether a dangerous action is blocking the interface."""
+    result = await _client_busy_status_impl(session_id, probe_timeout=max(1, int(probe_timeout)))
+    return _record_tool(session_id, "client_busy_status", {"probe_timeout": probe_timeout}, result)
+
+
+@mcp.tool()
+async def wait_client_idle(
+    timeout: Annotated[int, "Maximum wait time in seconds"] = 60,
+    interval: Annotated[int, "Polling interval in seconds"] = 3,
+    probe_timeout: Annotated[int, "Short per-probe timeout in seconds"] = 2,
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Wait until the 1C test client/bridge becomes responsive after a long or blocking UI action."""
+    started = time.monotonic()
+    deadline = started + max(1, int(timeout))
+    attempts = 0
+    last_status: dict[str, Any] | None = None
+    sleep_seconds = max(1, int(interval))
+    while True:
+        attempts += 1
+        last_status = await _client_busy_status_impl(session_id, probe_timeout=max(1, int(probe_timeout)))
+        if last_status.get("responsive") and not last_status.get("busy"):
+            result = {
+                "idle": True,
+                "responsive": True,
+                "reason": "client_idle",
+                "attempts": attempts,
+                "elapsed_seconds": round(time.monotonic() - started, 3),
+                "status": last_status,
+            }
+            return _record_tool(session_id, "wait_client_idle", {"timeout": timeout, "interval": interval, "probe_timeout": probe_timeout}, result)
+        if time.monotonic() >= deadline:
+            result = {
+                "idle": False,
+                "responsive": bool(last_status.get("responsive")) if isinstance(last_status, dict) else False,
+                "reason": "timeout_waiting_for_client_idle",
+                "attempts": attempts,
+                "elapsed_seconds": round(time.monotonic() - started, 3),
+                "status": last_status,
+            }
+            return _record_tool(session_id, "wait_client_idle", {"timeout": timeout, "interval": interval, "probe_timeout": probe_timeout}, result)
+        await asyncio.sleep(min(sleep_seconds, max(0.0, deadline - time.monotonic())))
+
+
+@mcp.tool()
 async def set_file_dialog_result(
     paths: Annotated[str, "JSON array of file paths, or a single file path string"],
     *,
@@ -4216,11 +4500,21 @@ def _filter_search_objects_result(result: Any, name: str = "", title: str = "", 
 async def click_button(
     name: Annotated[str, "Button name or title text"],
     search_by_title: Annotated[bool, "If true, match visible title instead of object name"] = False,
+    watchdog_timeout: Annotated[int, "Deadline in seconds for button press before reporting blocked interface; 0 disables watchdog"] = 20,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
     """Find a button in the active UI tree and press it."""
-    return await _bridge_call_recorded(session_id, "click_button", {"name": name, "search_by_title": search_by_title})
+    params = {"name": name, "search_by_title": search_by_title}
+    if int(watchdog_timeout) <= 0:
+        return await _bridge_call_recorded(session_id, "click_button", params)
+    return await _dangerous_bridge_call_recorded(
+        session_id,
+        "click_button",
+        params,
+        timeout=max(1, int(watchdog_timeout)),
+        danger="click_button_may_start_long_ui_action",
+    )
 
 
 @mcp.tool()
@@ -4524,11 +4818,28 @@ async def tabular_document_save(
     title: Annotated[str, "Tabular document field visible title"] = "",
     path: Annotated[str, "Output file path; empty = auto-generated temp path"] = "",
     format: Annotated[str, "Output format: pdf | xlsx | xls | html | txt"] = "pdf",
+    exact_filter_only: Annotated[bool, "Deprecated: use only a trusted file-dialog filter instead of probing many filters; unstable formats ignore it"] = False,
+    watchdog_timeout: Annotated[int, "Deadline in seconds for dangerous UI save action before reporting blocked interface"] = 20,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
     """Save a tabular document field to a file in the selected format."""
-    result = await _bridge_call_recorded(session_id, "tabular_document_save", {"name": name, "title": title, "path": path, "format": format})
+    params = {
+        "name": name,
+        "title": title,
+        "path": path,
+        "format": format,
+        "exact_filter_only": exact_filter_only,
+    }
+    result = await _dangerous_bridge_call_recorded(
+        session_id,
+        "tabular_document_save",
+        params,
+        timeout=max(1, int(watchdog_timeout)),
+        danger="tabular_document_file_save_may_block_thin_client",
+    )
+    if isinstance(result, dict) and result.get("interface_blocked"):
+        return result
     return _select_saved_tabular_document_file(result, format)
 
 
@@ -4723,15 +5034,23 @@ async def table_rows(
 
 
 def _table_row_pairs(row: Any) -> dict[str, str]:
-    pairs = row.get("pairs", []) if isinstance(row, dict) else []
     result: dict[str, str] = {}
-    for pair in pairs:
-        if not isinstance(pair, dict):
-            continue
-        key = str(pair.get("key", ""))
-        value = str(pair.get("value", ""))
-        result[key] = value
-        normalized_key = re.sub(r"\\s+", " ", key).strip()
+    if not isinstance(row, dict):
+        return result
+    values = row.get("values")
+    if isinstance(values, dict):
+        for key, value in values.items():
+            result[str(key)] = str(value)
+    pairs = row.get("pairs", [])
+    if isinstance(pairs, list):
+        for pair in pairs:
+            if not isinstance(pair, dict):
+                continue
+            key = str(pair.get("key", ""))
+            value = str(pair.get("value", ""))
+            result[key] = value
+    for key, value in list(result.items()):
+        normalized_key = re.sub(r"\s+", " ", key).strip()
         if normalized_key and normalized_key != key:
             result.setdefault(normalized_key, value)
     return result
@@ -4755,6 +5074,13 @@ def _is_truthy_1c(value: str) -> bool:
 def _is_not_deleted_catalog_row(row: dict[str, str]) -> bool:
     delete_mark = _row_value(row, "Пометка удаления", "ПометкаУдаления", "Пометка\nудаления")
     return not _is_truthy_1c(delete_mark)
+
+
+def _is_metadata_full_name_included(full_name: str) -> bool:
+    normalized = (full_name or "").strip().casefold()
+    if not normalized:
+        return False
+    return not normalized.startswith(("роль.", "подсистема."))
 
 
 def _parse_1c_date_text(value: str) -> datetime:
@@ -4934,7 +5260,7 @@ def _metadata_cache_key(session_id: str) -> str:
 
 
 def _metadata_object_from_row(row: dict[str, str]) -> dict[str, str]:
-    presentation = _row_value(row, "Ссылка", "Наименование")
+    presentation = _row_value(row, "Ссылка", "Наименование", "Идентификатор объекта метаданных", "ИдентификаторОбъектаМетаданных")
     full_name = _row_value(row, "Полное имя", "ПолноеИмя", "СписокПолноеИмя")
     synonym = _row_value(row, "Синоним")
     if not full_name:
@@ -5004,6 +5330,469 @@ def _metadata_objects_catalog_self_entry() -> dict[str, str]:
     }
 
 
+def _tabular_state_text(state_result: Any) -> str:
+    if not isinstance(state_result, dict):
+        return ""
+    state_display = state_result.get("state_display")
+    if not isinstance(state_display, dict):
+        return ""
+    return " ".join(
+        str(state_display.get(key) or "")
+        for key in ("display_variant", "additional_show_mode", "command_name", "text")
+    ).strip()
+
+
+def _tabular_state_looks_busy(state_result: Any) -> bool:
+    text = _tabular_state_text(state_result).casefold()
+    if not text:
+        return False
+    busy_markers = (
+        "форм",
+        "ожидан",
+        "загруз",
+        "подготов",
+        "processing",
+        "loading",
+        "wait",
+    )
+    return any(marker in text for marker in busy_markers)
+
+
+def _tabular_documents_dimensions(result: Any, name: str) -> tuple[int, int]:
+    if not isinstance(result, dict):
+        return 0, 0
+    items = result.get("items") if isinstance(result.get("items"), list) else None
+    if items is None:
+        tabular_documents = result.get("tabular_documents")
+        if isinstance(tabular_documents, dict):
+            items = tabular_documents.get("items") if isinstance(tabular_documents.get("items"), list) else None
+    if not items:
+        return 0, 0
+    selected = None
+    for item in items:
+        if isinstance(item, dict) and item.get("name") == name:
+            selected = item
+            break
+    if selected is None:
+        selected = next((item for item in items if isinstance(item, dict)), None)
+    if not isinstance(selected, dict):
+        return 0, 0
+    return int(selected.get("rows") or 0), int(selected.get("columns") or 0)
+
+
+async def _wait_tabular_document_ready(
+    session_id: str,
+    name: str,
+    *,
+    timeout_seconds: float = 75.0,
+    interval_seconds: float = 3.0,
+) -> tuple[bool, list[str], dict[str, Any]]:
+    deadline = time.monotonic() + timeout_seconds
+    warnings: list[str] = []
+    diagnostics: dict[str, Any] = {"attempts": 0, "rows": 0, "columns": 0, "state_text": ""}
+    last_state_error = ""
+    last_dimensions_error = ""
+    while time.monotonic() < deadline:
+        diagnostics["attempts"] = int(diagnostics.get("attempts") or 0) + 1
+        state_result: Any = None
+        try:
+            state_result = await _bridge_call_recorded(
+                session_id,
+                "tabular_document_state_display",
+                {"name": name},
+                timeout=8,
+            )
+            diagnostics["state_display"] = state_result
+            diagnostics["state_text"] = _tabular_state_text(state_result)
+        except Exception as exc:
+            last_state_error = str(exc)
+            diagnostics["state_error"] = last_state_error
+        busy = _tabular_state_looks_busy(state_result)
+        if not busy:
+            try:
+                docs_result = await _bridge_call_recorded(
+                    session_id,
+                    "tabular_documents",
+                    {"include_text": False},
+                    timeout=10,
+                )
+                rows, columns = _tabular_documents_dimensions(docs_result, name)
+                diagnostics["rows"] = rows
+                diagnostics["columns"] = columns
+                if rows > 0 and columns > 0:
+                    return True, warnings, diagnostics
+            except Exception as exc:
+                last_dimensions_error = str(exc)
+                diagnostics["dimensions_error"] = last_dimensions_error
+        await asyncio.sleep(interval_seconds)
+    if last_state_error:
+        warnings.append(f"Last tabular document state-display error: {last_state_error}")
+    if last_dimensions_error:
+        warnings.append(f"Last tabular document dimensions error: {last_dimensions_error}")
+    warnings.append(
+        "Tabular document did not become ready"
+        f" after {diagnostics.get('attempts')} attempt(s);"
+        f" rows={diagnostics.get('rows')}; columns={diagnostics.get('columns')};"
+        f" state={diagnostics.get('state_text')!r}"
+    )
+    return False, warnings, diagnostics
+
+
+async def _metadata_rows_from_tabular_document_chunks(
+    session_id: str,
+    name: str,
+    *,
+    max_rows: int,
+    total_rows: int,
+    total_columns: int,
+    query: str = "",
+    target_matches: int = 0,
+    chunk_size: int = 1000,
+) -> tuple[list[dict[str, str]], list[str]]:
+    warnings: list[str] = []
+    cells: list[list[Any]] = []
+    rows_to_read = min(max(total_rows, 0), max_rows + 20)
+    # Universal report metadata rows in live BP expose useful fields as:
+    # 2=Имя, 3=Синоним, 4=Полное имя, 5=Полный синоним,
+    # 6=Без данных/Пометка удаления.  Reading the whole 9+ column report makes
+    # full-cache builds exceed common MCP request deadlines, so keep only the
+    # contiguous technical/synonym/delete-mark range needed for normalization.
+    column_start = 2 if total_columns >= 6 else 1
+    column_end = min(max(total_columns, 0), 6 if total_columns >= 6 else 20)
+    columns_to_read = max(column_end - column_start + 1, 0)
+    if rows_to_read <= 0 or columns_to_read <= 0:
+        return [], ["Universal report chunk read skipped because tabular document dimensions are empty"]
+    parsed_rows: list[dict[str, str]] = []
+    stop_by_query = bool(query and target_matches > 0)
+    for row_start in range(1, rows_to_read + 1, chunk_size):
+        row_end = min(rows_to_read, row_start + chunk_size - 1)
+        try:
+            chunk = await _bridge_call_recorded(session_id, "tabular_document_text", {
+                "name": name,
+                "row_start": row_start,
+                "row_end": row_end,
+                "column_start": column_start,
+                "column_end": column_end,
+                "max_rows": chunk_size,
+                "max_columns": columns_to_read,
+            }, timeout=45)
+        except Exception as exc:
+            warnings.append(f"Universal report chunk read failed at rows {row_start}-{row_end}: {exc}")
+            break
+        chunk_cells = chunk.get("cells", []) if isinstance(chunk, dict) else []
+        if not chunk_cells:
+            warnings.append(f"Universal report chunk read returned no cells at rows {row_start}-{row_end}")
+            break
+        cells.extend(chunk_cells)
+        parsed_rows = _metadata_catalog_rows_from_tabular_cells(cells)
+        if stop_by_query:
+            objects = [_metadata_object_from_row(row) for row in parsed_rows if _is_not_deleted_catalog_row(row)]
+            matches = [item for item in objects if _match_metadata_object(item, query)]
+            if len(matches) >= target_matches:
+                warnings.append(
+                    "Universal report chunk read stopped after reaching requested matches"
+                    f"; matches={len(matches)}; last_row={row_end}"
+                )
+                break
+    if not parsed_rows:
+        parsed_rows = _metadata_catalog_rows_from_tabular_cells(cells)
+    if parsed_rows:
+        warnings.append(
+            "Universal report tabular document chunks became parseable"
+            f"; chunks_cells={len(cells)}; rows_to_read={rows_to_read};"
+            f" columns={columns_to_read}; column_range={column_start}-{column_end}"
+        )
+    return parsed_rows[:max_rows], warnings
+
+
+def _metadata_universal_report_filter_specs(query: str = "") -> list[dict[str, str]]:
+    """Return report-level filters for a full metadata identifiers snapshot.
+
+    The cache must be built from one Universal report run, not from per-query
+    report/probe calls.  Keep the report small enough by excluding service-heavy
+    metadata classes and deleted rows before the tabular document is generated.
+    Public `query` is intentionally ignored here: search happens later against
+    the cached full snapshot.
+    """
+    del query
+    return [
+        {"field": "Пометка удаления", "comparison": "Равно", "value": "Нет"},
+        {"field": "Полное имя", "comparison": "Не начинается с", "value": "Роль."},
+        {"field": "Полное имя", "comparison": "Не начинается с", "value": "Подсистема."},
+    ]
+
+
+async def _add_universal_report_filter(
+    session_id: str,
+    spec: dict[str, str],
+    warnings: list[str],
+    field_occurrence: int = 1,
+) -> bool:
+    field = spec.get("field", "")
+    comparison = spec.get("comparison", "Равно")
+    value = spec.get("value", "")
+    if not field:
+        return False
+    try:
+        rows_result = await _bridge_call_recorded(session_id, "table_rows", {"name": "Отборы", "limit": 50}, timeout=10)
+        rows = rows_result.get("rows", []) if isinstance(rows_result, dict) else []
+        for row in rows:
+            row_pairs = _table_row_pairs(row)
+            if _row_value(row_pairs, "Поле") == field and _row_value(row_pairs, "Значение") == value:
+                return True
+    except Exception as exc:
+        warnings.append(f"Universal report existing filters inspection failed for {field}: {exc}")
+    try:
+        await _bridge_call_recorded(session_id, "group_activate_page", {
+            "name": "СтраницыНастроек",
+            "page_name": "СтраницаОтборы",
+            "page_title": "Фильтры",
+        }, timeout=15)
+    except Exception as exc:
+        warnings.append(f"Universal report filters page activation failed before adding {field}: {exc}")
+    try:
+        await _bridge_call_recorded(session_id, "click_button", {"name": "Отборы_Добавить", "watchdog_timeout": 8}, timeout=12)
+    except Exception:
+        try:
+            await _bridge_call_recorded(session_id, "click_button", {"name": "Добавить", "search_by_title": True, "watchdog_timeout": 8}, timeout=12)
+        except Exception as exc:
+            warnings.append(f"Universal report filter add button failed for {field}: {exc}")
+            return False
+    try:
+        await _bridge_call_recorded(session_id, "set_field_value", {
+            "field_name": "СтрокаПоискаДоступныеПоля",
+            "value": field,
+        }, timeout=10)
+        await _bridge_call_recorded(session_id, "choose_current_row", {"name": "ДоступныеПоля"}, timeout=15)
+    except Exception as exc:
+        warnings.append(f"Universal report filter {field!r} could not be selected; continuing without report-level filter: {exc}")
+        try:
+            active = await _bridge_call_recorded(session_id, "active_window", {}, timeout=5)
+            if isinstance(active, dict) and active.get("title") == "Выбор поля отчета":
+                await _bridge_call_recorded(session_id, "close_form", {}, timeout=10)
+        except Exception:
+            pass
+        return False
+    try:
+        await _bridge_call_recorded(session_id, "table_goto_row", {
+            "name": "Отборы",
+            "text": field,
+            "limit": 50,
+            "occurrence": field_occurrence,
+        }, timeout=10)
+    except Exception as exc:
+        warnings.append(f"Universal report filter row positioning failed for {field}: {exc}")
+    if comparison:
+        try:
+            await _bridge_call_recorded(session_id, "table_set_field", {
+                "table": "Отборы",
+                "field": "Условие",
+                "value": comparison,
+                "search_by_title": True,
+            }, timeout=15)
+        except Exception as exc:
+            warnings.append(f"Universal report filter comparison setup failed for {field}: {exc}")
+    if value:
+        try:
+            await _bridge_call_recorded(session_id, "table_goto_row", {
+                "name": "Отборы",
+                "text": field,
+                "limit": 50,
+                "occurrence": field_occurrence,
+            }, timeout=10)
+        except Exception:
+            pass
+        try:
+            await _bridge_call_recorded(session_id, "table_set_field", {
+                "table": "Отборы",
+                "field": "Значение",
+                "value": value,
+                "search_by_title": True,
+            }, timeout=15)
+        except Exception as exc:
+            warnings.append(f"Universal report filter value setup failed for {field}: {exc}")
+    return True
+
+
+async def _add_universal_report_selected_field(session_id: str, field: str, warnings: list[str]) -> bool:
+    try:
+        await _bridge_call_recorded(session_id, "group_activate_page", {
+            "name": "СтраницыНастроек",
+            "page_name": "СтраницаВыбранныеПоляИСортировки",
+            "page_title": "Поля и сортировки",
+        }, timeout=15)
+    except Exception as exc:
+        warnings.append(f"Universal report selected-fields page activation failed before adding {field}: {exc}")
+    try:
+        await _bridge_call_recorded(session_id, "click_button", {"name": "ВыбранныеПоля_Добавить"}, timeout=25)
+    except Exception:
+        await _bridge_call_recorded(session_id, "click_button", {"name": "Добавить", "search_by_title": True}, timeout=25)
+    try:
+        await _bridge_call_recorded(session_id, "set_field_value", {
+            "field_name": "СтрокаПоискаДоступныеПоля",
+            "value": field,
+        }, timeout=10)
+        await _bridge_call_recorded(session_id, "choose_current_row", {"name": "ДоступныеПоля"}, timeout=15)
+        return True
+    except Exception as exc:
+        warnings.append(f"Universal report selected field {field!r} could not be added: {exc}")
+        return False
+
+
+async def _configure_universal_report_metadata_settings(session_id: str, query: str = "") -> list[str]:
+    del query
+    warnings: list[str] = []
+    await _bridge_call_recorded(session_id, "click_button", {"name": "ВсеНастройки"}, timeout=30)
+    try:
+        await _bridge_call_recorded(session_id, "group_activate_page", {
+            "name": "СтраницыНастроек",
+            "page_name": "СтраницаВыбранныеПоляИСортировки",
+            "page_title": "Поля и сортировки",
+        }, timeout=15)
+    except Exception as exc:
+        warnings.append(f"Universal report selected-fields page activation failed: {exc}")
+    selected_fields = []
+    try:
+        rows_result = await _bridge_call_recorded(session_id, "table_rows", {"name": "ВыбранныеПоля", "limit": 80}, timeout=10)
+        rows = rows_result.get("rows", []) if isinstance(rows_result, dict) else []
+        for row in rows:
+            row_pairs = _table_row_pairs(row)
+            field = _row_value(row_pairs, "Поле")
+            use = _row_value(row_pairs, "Использование")
+            if field and field != "Поля":
+                selected_fields.append((field, use))
+    except Exception as exc:
+        warnings.append(f"Universal report selected fields inspection failed: {exc}")
+    required = {"Полное имя", "Синоним"}
+    selected_names = {field for field, _use in selected_fields}
+    enabled_names = {field for field, use in selected_fields if _is_truthy_1c(use)}
+    missing = sorted(required - selected_names)
+    disabled = sorted(required - enabled_names)
+    if missing:
+        warnings.append(
+            "Universal report selected fields were not detected in selected-fields table;"
+            f" automatic modal add skipped: {', '.join(missing)}"
+        )
+    if disabled:
+        warnings.append(
+            "Universal report selected fields are not enabled in UI settings;"
+            f" leaving report settings unchanged and relying on parse/post-filtering: {', '.join(disabled)}"
+        )
+    filter_occurrences: dict[str, int] = {}
+    for spec in _metadata_universal_report_filter_specs():
+        field = spec.get("field", "")
+        filter_occurrences[field] = filter_occurrences.get(field, 0) + 1
+        await _add_universal_report_filter(session_id, spec, warnings, filter_occurrences[field])
+    await _bridge_call_recorded(session_id, "click_button", {"name": "ЗакрытьИСформировать"}, timeout=35)
+    return warnings
+
+
+async def _metadata_rows_from_universal_report(
+    session_id: str,
+    max_rows: int,
+    *,
+    query: str = "",
+    target_matches: int = 0,
+) -> tuple[list[dict[str, str]], list[str]]:
+    """Read metadata identifiers through the standard Universal report.
+
+    The metadata-identifiers catalog list usually shows only its `Ссылка`
+    column.  The Universal report for the same catalog exposes technical fields
+    such as `Имя` and `Полное имя`, which are needed for precise navigation
+    hints without synonym-based guessing.
+    """
+    warnings: list[str] = []
+    navigation_link = "e1cib/app/Отчет.УниверсальныйОтчет"
+    try:
+        await _bridge_call_recorded(session_id, "open_navigation_link", {"navigation_link": navigation_link})
+        await _bridge_call_recorded(session_id, "set_field_value", {
+            "field_name": "КомпоновщикНастроекПользовательскиеНастройкиЭлемент0Значение",
+            "value": "Справочники",
+        })
+        await _bridge_call_recorded(session_id, "set_field_value", {
+            "field_name": "КомпоновщикНастроекПользовательскиеНастройкиЭлемент1Значение",
+            "value": "Идентификаторы объектов метаданных",
+        })
+        # Do not open the Universal report settings form in the primary path.
+        # Live thin-client/web sessions can visually open `ВсеНастройки` but
+        # leave the test bridge unresponsive for minutes; adding the first
+        # filter field can also end in `Потеряно соединение`.  The primary path
+        # must therefore form the report with the selected source and apply the
+        # mandatory filtering/normalization on the Python side.  Settings remain
+        # available as a separate best-effort diagnostic helper, not as a
+        # correctness-critical step of metadata cache building.
+        warnings.append("Universal report settings UI skipped; filtering is applied after reading rows")
+        await _bridge_call_recorded(session_id, "click_button", {"name": "СформироватьОтчет"}, timeout=30)
+        ready, readiness_warnings, readiness = await _wait_tabular_document_ready(
+            session_id,
+            "ОтчетТабличныйДокумент",
+            timeout_seconds=45,
+            interval_seconds=2,
+        )
+        warnings.extend(readiness_warnings)
+        if not ready:
+            return [], [
+                *warnings,
+                "Universal report tabular document was not ready for XLSX save"
+                f"; readiness={_truncate_value(readiness)}",
+            ]
+        rows: list[dict[str, str]] = []
+        read_warnings: list[str] = []
+        last_saved_path = ""
+        save_diagnostics: Any = {}
+        # Prefer bounded chunk reads from the already-ready tabular document.
+        # On web-client sessions `ЗаписатьСодержимоеВФайл()` can block the UI
+        # for a long time even with an exact file-dialog filter, so file save is
+        # a fallback after chunk reads, not the first read path.
+        chunk_rows, chunk_warnings = await _metadata_rows_from_tabular_document_chunks(
+            session_id,
+            "ОтчетТабличныйДокумент",
+            max_rows=max_rows,
+            total_rows=int(readiness.get("rows") or 0),
+            total_columns=int(readiness.get("columns") or 0),
+            query=query,
+            target_matches=target_matches,
+        )
+        warnings.extend(chunk_warnings)
+        rows = chunk_rows
+        if not rows:
+            report_path = Path("/tmp/answer42") / f"metadata_objects_{session_id}_{uuid.uuid4().hex}.xlsx"
+            try:
+                save_result = await _bridge_call_recorded(session_id, "tabular_document_save", {
+                    "name": "ОтчетТабличныйДокумент",
+                    "path": str(report_path),
+                    "format": "xlsx",
+                    "exact_filter_only": False,
+                }, timeout=12)
+                selected_result = _select_saved_tabular_document_file(save_result, "xlsx")
+                save_diagnostics = selected_result
+                selected = selected_result.get("selected") if isinstance(selected_result, dict) else None
+                selected_path = selected.get("copied_to") or selected.get("path") if isinstance(selected, dict) else ""
+                if selected_path:
+                    last_saved_path = str(selected_path)
+                    rows = _metadata_catalog_rows_from_xlsx(Path(selected_path))
+            except Exception as exc:
+                read_warnings.append(f"Universal report XLSX save/read failed: {exc}")
+                rows = []
+        if not rows:
+            warning = (
+                "Universal report returned no parseable metadata rows"
+                f" after ready state; last_saved_path={last_saved_path};"
+                f" readiness={_truncate_value(readiness)};"
+                f" save_result={_truncate_value(save_diagnostics)}"
+            )
+            return [], [*warnings, *read_warnings, warning]
+        warnings.extend(read_warnings)
+        if last_saved_path:
+            warnings.append(
+                "Universal report XLSX became parseable"
+                f"; rows={readiness.get('rows')}; columns={readiness.get('columns')}; path={last_saved_path}"
+            )
+        return rows[:max_rows], warnings
+    except Exception as exc:
+        return [], [f"Universal report metadata read failed: {exc}"]
+
+
 async def _metadata_catalog_rows_from_output(session_id: str, max_rows: int) -> tuple[list[dict[str, str]], list[str]]:
     """Try to read the metadata catalog via the standard dynamic-list output command.
 
@@ -5034,13 +5823,86 @@ async def _metadata_catalog_rows_from_output(session_id: str, max_rows: int) -> 
         return [], [f"dynamic_list_output metadata read failed: {exc}"]
 
 
+
+def _metadata_catalog_rows_from_xlsx(path: Path) -> list[dict[str, str]]:
+    import zipfile
+    import xml.etree.ElementTree as ET
+
+    ns = {"a": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+
+    def text_of(element: ET.Element) -> str:
+        return "".join(t.text or "" for t in element.findall(".//a:t", ns)).strip()
+
+    with zipfile.ZipFile(path) as archive:
+        shared_strings: list[str] = []
+        if "xl/sharedStrings.xml" in archive.namelist():
+            root = ET.fromstring(archive.read("xl/sharedStrings.xml"))
+            shared_strings = [text_of(si) for si in root.findall("a:si", ns)]
+
+        workbook = ET.fromstring(archive.read("xl/workbook.xml"))
+        rels = ET.fromstring(archive.read("xl/_rels/workbook.xml.rels"))
+        rel_ns = {"r": "http://schemas.openxmlformats.org/package/2006/relationships"}
+        rel_by_id = {rel.attrib.get("Id", ""): rel.attrib.get("Target", "") for rel in rels.findall("r:Relationship", rel_ns)}
+        first_sheet = workbook.find("a:sheets/a:sheet", ns)
+        if first_sheet is None:
+            return []
+        rel_id = first_sheet.attrib.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id", "")
+        target = rel_by_id.get(rel_id, "worksheets/sheet1.xml")
+        sheet_name = "xl/" + target.lstrip("/")
+        if sheet_name not in archive.namelist() and target.startswith("/xl/"):
+            sheet_name = target.lstrip("/")
+        sheet = ET.fromstring(archive.read(sheet_name))
+
+        cells: list[list[str]] = []
+        for row in sheet.findall(".//a:sheetData/a:row", ns):
+            row_values: list[str] = []
+            current_col = 1
+            for cell in row.findall("a:c", ns):
+                ref = cell.attrib.get("r", "")
+                match = re.match(r"([A-Z]+)", ref)
+                if match:
+                    col = 0
+                    for char in match.group(1):
+                        col = col * 26 + ord(char) - ord("A") + 1
+                    while current_col < col:
+                        row_values.append("")
+                        current_col += 1
+                value = ""
+                cell_type = cell.attrib.get("t")
+                if cell_type == "inlineStr":
+                    value = text_of(cell)
+                else:
+                    v = cell.find("a:v", ns)
+                    if v is not None and v.text is not None:
+                        if cell_type == "s":
+                            with suppress(Exception):
+                                value = shared_strings[int(v.text)]
+                        else:
+                            value = v.text
+                row_values.append(value.strip())
+                current_col += 1
+            cells.append(row_values)
+    return _metadata_catalog_rows_from_tabular_cells(cells)
+
+
 def _metadata_catalog_rows_from_tabular_cells(cells: list[list[Any]]) -> list[dict[str, str]]:
     if not cells:
         return []
     header_idx = -1
     headers: list[str] = []
-    known_headers = {"ссылка", "синоним", "полное имя", "полноеимя", "пометка удаления", "пометкаудаления"}
-    for i, row in enumerate(cells[:10]):
+    known_headers = {
+        "ссылка",
+        "наименование",
+        "идентификатор объекта метаданных",
+        "имя",
+        "синоним",
+        "полное имя",
+        "полноеимя",
+        "полный синоним",
+        "пометка удаления",
+        "пометкаудаления",
+    }
+    for i, row in enumerate(cells[:200]):
         normalized = [str(cell).strip() for cell in row]
         if any(cell.casefold() in known_headers for cell in normalized):
             header_idx = i
@@ -5069,27 +5931,93 @@ def _metadata_catalog_rows_from_tabular_cells(cells: list[list[Any]]) -> list[di
     return rows
 
 
-async def _load_metadata_objects_from_catalog(session_id: str, limit: int) -> dict[str, Any]:
-    navigation_link = "e1cib/list/Справочник.ИдентификаторыОбъектовМетаданных"
-    await _bridge_call_recorded(session_id, "open_navigation_link", {"navigation_link": navigation_link})
+async def _metadata_rows_from_direct_catalog_query(
+    session_id: str,
+    limit: int,
+    *,
+    query: str = "",
+) -> tuple[list[dict[str, str]], list[str]]:
     warnings: list[str] = []
     try:
-        await _bridge_call_recorded(session_id, "click_button", {"name": "ФормаСписок", "search_by_title": False})
+        result = await _bridge_call_recorded(
+            session_id,
+            "metadata_catalog_query",
+            {"query": query, "limit": limit},
+            timeout=20,
+        )
     except Exception as exc:
-        # Some configurations/forms do not expose the standard flat-list button
-        # (or are already in list mode).  The catalog reader is used in error
-        # hints, so absence of this convenience command must not make the whole
-        # tool unusable; continue with the currently displayed list.
-        warnings.append(f"Could not switch catalog to flat list via ФормаСписок: {exc}")
-    parsed_rows, output_warnings = await _metadata_catalog_rows_from_output(session_id, limit)
-    source_method = "dynamic_list_output"
-    warnings.extend(output_warnings)
+        return [], [f"Direct metadata catalog query failed: {exc}"]
+    rows = result.get("rows", []) if isinstance(result, dict) else []
+    parsed_rows: list[dict[str, str]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        parsed_rows.append({str(key): str(value) for key, value in row.items()})
+    if isinstance(result, dict):
+        if result.get("non_deleted_filter") is not True:
+            warnings.append("Direct metadata catalog query did not confirm non-deleted filter")
+        if not parsed_rows:
+            diagnostics = []
+            for key in ("source", "rows_count", "scanned_count", "query"):
+                if key in result:
+                    diagnostics.append(f"{key}={result.get(key)!r}")
+            if diagnostics:
+                warnings.append("Direct metadata catalog query returned no rows (" + ", ".join(diagnostics) + ")")
+    return parsed_rows, warnings
+
+
+async def _metadata_rows_from_target_catalog_list(
+    session_id: str,
+    limit: int,
+) -> tuple[list[dict[str, str]], list[str]]:
+    warnings: list[str] = []
+    navigation_link = "e1cib/list/Справочник.ИдентификаторыОбъектовМетаданных"
+    open_result = await _dangerous_bridge_call_recorded(
+        session_id,
+        "open_navigation_link",
+        {"navigation_link": navigation_link},
+        timeout=15,
+        danger="metadata_target_catalog_list_open_may_block_thin_client",
+    )
+    if isinstance(open_result, dict) and open_result.get("started_long_action"):
+        warnings.append("Target metadata catalog list open watchdog timeout")
+        return [], warnings
+    try:
+        result = await _bridge_call_recorded(
+            session_id,
+            "table_rows",
+            {"name": "Список", "limit": limit, "compact": True},
+            timeout=45,
+        )
+    except Exception as exc:
+        return [], [f"Target metadata catalog list read failed: {exc}"]
+    raw_rows = result.get("rows", []) if isinstance(result, dict) else []
+    parsed_rows: list[dict[str, str]] = []
+    for row in raw_rows:
+        row_pairs = _table_row_pairs(row)
+        if row_pairs:
+            parsed_rows.append(row_pairs)
     if not parsed_rows:
-        rows_result = await _bridge_call_recorded(session_id, "table_rows", {"name": "Список", "title": "", "limit": limit})
-        rows = rows_result.get("rows", []) if isinstance(rows_result, dict) else []
-        parsed_rows = [_table_row_pairs(row) for row in rows]
-        source_method = "table_rows"
-    actual_rows = [row for row in parsed_rows if _is_not_deleted_catalog_row(row)]
+        warnings.append("Target metadata catalog list returned no rows")
+    return parsed_rows, warnings
+
+
+def _metadata_catalog_data_from_rows(
+    parsed_rows: list[dict[str, str]],
+    warnings: list[str],
+    *,
+    navigation_link: str,
+    source_method: str,
+    limit: int,
+    partial_for_query: bool = False,
+) -> dict[str, Any]:
+    actual_rows = []
+    for row in parsed_rows:
+        if not _is_not_deleted_catalog_row(row):
+            continue
+        item = _metadata_object_from_row(row)
+        if _is_metadata_full_name_included(item.get("full_name", "")):
+            actual_rows.append(row)
     objects = [_metadata_object_from_row(row) for row in actual_rows]
     self_entry = _metadata_objects_catalog_self_entry()
     if not any(item.get("full_name") == self_entry["full_name"] for item in objects):
@@ -5119,38 +6047,91 @@ async def _load_metadata_objects_from_catalog(session_id: str, limit: int) -> di
         "loaded_at": datetime.now().isoformat(timespec="seconds"),
         "limit": limit,
         "warnings": warnings,
+        "partial_for_query": partial_for_query,
     }
 
 
-@mcp.tool()
-async def metadata_objects_from_catalog(
-    query: Annotated[str, "Substring to search in presentation, full name, type, name or synonym"] = "",
-    limit: Annotated[int, "Maximum rows to read from the catalog when cache is refreshed"] = 5000,
-    max_results: Annotated[int, "Maximum matched objects to return"] = 200,
-    refresh_cache: Annotated[bool, "Force rereading the hierarchical catalog instead of using the session cache"] = False,
-    include_groups: Annotated[bool, "Include hierarchy group rows in results"] = False,
-    *,
-    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
-) -> dict[str, Any]:
-    """Return/search metadata objects from the hierarchical catalog `Справочник.ИдентификаторыОбъектовМетаданных`.
+def _metadata_query_is_exact_full_name(query: str) -> bool:
+    if not query or "." not in query:
+        return False
+    metadata_type, metadata_name = query.split(".", 1)
+    return bool(metadata_type.strip() and metadata_name.strip())
 
-    The first call reads the catalog in flat list mode, skips rows marked for
-    deletion when that field is available in the form, normalizes objects to
-    `presentation/full_name/type/name/synonym`, and stores them in an in-memory
-    per-session cache. Later calls use the cache unless `refresh_cache=true`.
-    """
+
+async def _load_metadata_objects_from_catalog(session_id: str, limit: int, query: str = "", max_results: int = 200) -> dict[str, Any]:
+    del max_results
+    exact_query = query.strip() if _metadata_query_is_exact_full_name(query.strip()) else ""
+    if exact_query:
+        direct_rows, direct_warnings = await _metadata_rows_from_direct_catalog_query(session_id, limit, query=exact_query)
+        if direct_rows:
+            return _metadata_catalog_data_from_rows(
+                direct_rows,
+                direct_warnings,
+                navigation_link="metadata_catalog_query",
+                source_method="metadata_catalog_query",
+                limit=limit,
+                partial_for_query=True,
+            )
+        warnings = direct_warnings
+    else:
+        warnings = []
+
+    navigation_link = "e1cib/list/Справочник.ИдентификаторыОбъектовМетаданных"
+    target_rows, target_warnings = await _metadata_rows_from_target_catalog_list(session_id, limit)
+    warnings.extend(target_warnings)
+    parsed_rows = target_rows
+    source_method = "target_catalog_list"
+    if not parsed_rows:
+        direct_rows, direct_warnings = await _metadata_rows_from_direct_catalog_query(session_id, limit, query="")
+        warnings.extend(direct_warnings)
+        if direct_rows:
+            parsed_rows = direct_rows
+            navigation_link = "metadata_catalog_query"
+            source_method = "metadata_catalog_query"
+        else:
+            warnings.append(
+                "Target metadata catalog list and direct query returned no rows; "
+                "Universal report fallback is skipped because it can block the thin-client bridge"
+            )
+    elif len(parsed_rows) < min(limit, 1000):
+        warnings.append(
+            f"Target metadata catalog list returned {len(parsed_rows)} rows; "
+            "hierarchical/current-list view may be partial. Safe exact direct-query fallback may be used when available."
+        )
+    return _metadata_catalog_data_from_rows(
+        parsed_rows,
+        warnings,
+        navigation_link=navigation_link,
+        source_method=source_method,
+        limit=limit,
+    )
+
+
+@mcp.tool()
+async def _metadata_objects_from_catalog_impl(
+    *,
+    query: str,
+    limit: int,
+    max_results: int,
+    refresh_cache: bool,
+    include_groups: bool,
+    session_id: str,
+) -> dict[str, Any]:
     cache_key = _metadata_cache_key(session_id)
     cache_hit = cache_key in _METADATA_OBJECTS_CACHE and not refresh_cache
     if cache_hit:
         catalog_data = _METADATA_OBJECTS_CACHE[cache_key]
     else:
-        catalog_data = await _load_metadata_objects_from_catalog(session_id, limit)
-        _METADATA_OBJECTS_CACHE[cache_key] = catalog_data
+        catalog_data = await _load_metadata_objects_from_catalog(session_id, limit, query=query, max_results=max_results)
+        if not catalog_data.get("partial_for_query"):
+            _METADATA_OBJECTS_CACHE[cache_key] = catalog_data
 
     all_objects = catalog_data["objects"]
     searchable = all_objects if include_groups else [item for item in all_objects if item["is_group"] != "Да"]
     matches = [item for item in searchable if _match_metadata_object(item, query)]
     warnings = list(catalog_data.get("warnings", []))
+    fallback_search_used = False
+
     return {
         "found": bool(matches),
         "cache_hit": cache_hit,
@@ -5159,7 +6140,7 @@ async def metadata_objects_from_catalog(
         "matched_count": len(matches),
         "returned_count": min(len(matches), max_results),
         "truncated": len(matches) > max_results,
-        "fallback_search_used": False,
+        "fallback_search_used": fallback_search_used,
         "type_counts": catalog_data["type_counts"],
         "rows_count": catalog_data["rows_count"],
         "non_deleted_rows_count": catalog_data["non_deleted_rows_count"],
@@ -5172,6 +6153,88 @@ async def metadata_objects_from_catalog(
         "loaded_at": catalog_data["loaded_at"],
         "warnings": warnings,
     }
+
+
+@mcp.tool()
+async def metadata_objects_from_catalog(
+    query: Annotated[str, "Substring to search in presentation, full name, type, name or synonym"] = "",
+    limit: Annotated[int, "Maximum rows to read from the catalog when cache is refreshed"] = 5000,
+    max_results: Annotated[int, "Maximum matched objects to return"] = 200,
+    refresh_cache: Annotated[bool, "Force rereading the hierarchical catalog instead of using the session cache"] = False,
+    include_groups: Annotated[bool, "Include hierarchy group rows in results"] = False,
+    watchdog_timeout: Annotated[int, "Maximum seconds to wait for the metadata report/catalog read before returning busy diagnostics; 0 disables"] = 90,
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> dict[str, Any]:
+    """Return/search metadata objects from `Справочник.ИдентификаторыОбъектовМетаданных`.
+
+    The first call opens the target metadata-identifiers catalog list, reads a
+    lightweight snapshot, excludes deleted/role/subsystem rows when possible, normalizes rows to
+    `presentation/full_name/type/name/synonym`, and stores them in an in-memory
+    per-session cache. Later calls search that cache unless `refresh_cache=true`.
+    """
+    params = {
+        "query": query,
+        "limit": limit,
+        "max_results": max_results,
+        "refresh_cache": refresh_cache,
+        "include_groups": include_groups,
+    }
+    coroutine = _metadata_objects_from_catalog_impl(
+        query=query,
+        limit=limit,
+        max_results=max_results,
+        refresh_cache=refresh_cache,
+        include_groups=include_groups,
+        session_id=session_id,
+    )
+    if watchdog_timeout and watchdog_timeout > 0:
+        try:
+            return await asyncio.wait_for(coroutine, timeout=float(watchdog_timeout))
+        except TimeoutError as exc:
+            sess = await _ensure_restored_session(session_id)
+            blocked_action = _mark_session_blocked_action(
+                sess,
+                "metadata_objects_from_catalog",
+                params,
+                timeout=float(watchdog_timeout),
+                error=_bridge_timeout_text(exc),
+                danger="metadata_objects_universal_report_may_block_thin_client",
+            )
+            return {
+                "found": False,
+                "cache_hit": False,
+                "query": query,
+                "objects": [],
+                "matched_count": 0,
+                "returned_count": 0,
+                "truncated": False,
+                "fallback_search_used": False,
+                "started_long_action": True,
+                "interface_blocked": True,
+                "reason": "metadata_objects_watchdog_timeout",
+                "message": (
+                    "Metadata objects lookup did not finish before the watchdog deadline. "
+                    "The Universal report or catalog read may still be running in the thin client. "
+                    "Use client_busy_status or wait_client_idle before sending further UI commands."
+                ),
+                "watchdog_timeout_seconds": watchdog_timeout,
+                "blocked_action": _public_blocked_action(blocked_action),
+                "type_counts": {},
+                "rows_count": 0,
+                "non_deleted_rows_count": 0,
+                "objects_count": 0,
+                "groups_count": 0,
+                "metadata_objects_count": 0,
+                "navigation_link": "e1cib/app/Отчет.УниверсальныйОтчет",
+                "source": "Справочник.ИдентификаторыОбъектовМетаданных",
+                "source_method": "universal_report",
+                "loaded_at": datetime.now().isoformat(timespec="seconds"),
+                "warnings": [
+                    "metadata_objects_from_catalog watchdog timeout before lookup finished",
+                ],
+            }
+    return await coroutine
 
 
 @mcp.tool()
@@ -5342,11 +6405,18 @@ async def table_goto_row(
     name: Annotated[str, "Table technical name"] = "",
     title: Annotated[str, "Table visible title"] = "",
     limit: Annotated[int, "Maximum rows to scan"] = 200,
+    occurrence: Annotated[int, "1-based occurrence to select when multiple rows contain the same text"] = 1,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
-    """Move cursor to the first tested table row containing text."""
-    return await _bridge_call_recorded(session_id, "table_goto_row", {"name": name, "title": title, "text": text, "limit": limit})
+    """Move cursor to the Nth tested table row containing text."""
+    return await _bridge_call_recorded(session_id, "table_goto_row", {
+        "name": name,
+        "title": title,
+        "text": text,
+        "limit": limit,
+        "occurrence": occurrence,
+    })
 
 
 @mcp.tool()
@@ -5775,114 +6845,6 @@ async def close_form(*,
         return _record_tool(session_id, "close_form", {}, result)
 
 
-def _x11_screen_size(display: str | None = None) -> tuple[int, int] | None:
-    env = os.environ.copy()
-    if display:
-        env["DISPLAY"] = display
-    try:
-        out = subprocess.run(
-            ["xdpyinfo"],
-            env=env,
-            check=True,
-            text=True,
-            capture_output=True,
-            timeout=10,
-        ).stdout
-    except (subprocess.SubprocessError, FileNotFoundError):
-        return None
-    for line in out.splitlines():
-        if "dimensions:" not in line:
-            continue
-        try:
-            dimensions = line.split("dimensions:", 1)[1].strip().split()[0]
-            width, height = dimensions.split("x", 1)
-            return int(width), int(height)
-        except Exception:
-            return None
-    return None
-
-
-def _active_x11_window_geometry(display: str | None = None) -> dict[str, int] | None:
-    env = os.environ.copy()
-    if display:
-        env["DISPLAY"] = display
-    try:
-        tree = subprocess.run(
-            ["xwininfo", "-root", "-tree"],
-            env=env,
-            check=True,
-            text=True,
-            capture_output=True,
-            timeout=10,
-        ).stdout
-    except (subprocess.SubprocessError, FileNotFoundError):
-        return None
-
-    screen_size = _x11_screen_size(display)
-    screen_width = screen_size[0] if screen_size else None
-    screen_height = screen_size[1] if screen_size else None
-    candidates: list[tuple[int, dict[str, int]]] = []
-    for line in tree.splitlines():
-        if '("1cv8c" "1cv8c")' not in line and '("1cv8" "1cv8")' not in line:
-            continue
-        match = re.search(r'0x[0-9a-f]+ "([^"]*)".*?(\d+)x(\d+)\+(-?\d+)\+(-?\d+)', line)
-        if not match:
-            continue
-        title = match.group(1)
-        width, height, left, top = map(int, match.groups()[1:])
-        if width < 300 or height < 150:
-            continue
-        priority = 0
-        if title and title not in {"1cv8c", "1cv8", "Конфигурация"}:
-            priority += 100
-        if any(word in title for word in (
-            "1С:Предприятие",
-            "Бухгалтерия",
-            "Предприятие",
-            "Управление",
-            "Зарплата",
-            "ERP",
-            "Комплексная",
-            "Розница",
-        )):
-            priority += 50
-        if any(word in title for word in ("создание", "Инструменты", "Шаблон", "Сессия", "DEV-AREA")):
-            priority += 25
-        priority += min(width * height // 10000, 50)
-
-        # ``xwininfo -root -tree`` reports child coordinates relative to their
-        # parent.  For many 1C/X11 windows this means the client area appears as
-        # e.g. ``1280x1024+0+0`` even when the decorated top-level window is
-        # slightly larger or shifted.  mss needs root-relative, in-bounds
-        # monitor coordinates, so normalize the candidate to the virtual screen
-        # instead of discarding negative/off-screen decorations.
-        capture_left = max(0, left)
-        capture_top = max(0, top)
-        capture_width = width - max(0, -left)
-        capture_height = height - max(0, -top)
-        if screen_width is not None:
-            capture_width = min(capture_width, max(0, screen_width - capture_left))
-        if screen_height is not None:
-            capture_height = min(capture_height, max(0, screen_height - capture_top))
-        if capture_width < 300 or capture_height < 150:
-            continue
-        candidates.append((priority, {
-            "left": capture_left,
-            "top": capture_top,
-            "width": capture_width,
-            "height": capture_height,
-            "title": title,
-            "xwininfo_left": left,
-            "xwininfo_top": top,
-            "xwininfo_width": width,
-            "xwininfo_height": height,
-        }))
-    if not candidates:
-        return None
-    candidates.sort(key=lambda item: item[0], reverse=True)
-    return candidates[0][1]
-
-
 @mcp.tool()
 def recording_start(
     output_dir: Annotated[str, "Directory for frames/slides/media"] = "build/recordings/session",
@@ -5955,7 +6917,7 @@ def screenshot(
         import mss.tools  # type: ignore
 
         if os_support.IS_WINDOWS:
-            geometry = _active_windows_1c_window_geometry() if window else None
+            geometry = _active_external_1c_window_geometry() if window else None
             with mss.mss() as sct:
                 monitor = geometry or sct.monitors[0]
                 image = sct.grab(monitor)
@@ -5967,7 +6929,7 @@ def screenshot(
             previous_display = os.environ.get("DISPLAY")
             os.environ["DISPLAY"] = resolved_display
             try:
-                geometry = _active_x11_window_geometry(resolved_display) if window else None
+                geometry = _active_external_1c_window_geometry(display=resolved_display) if window else None
                 if window and geometry is None:
                     raise RuntimeError(
                         "Cannot capture 1C window screenshot: window geometry was not detected. "
@@ -5999,15 +6961,21 @@ def screenshot(
 
 async def _run(stale_scope_lock_existed: bool = False) -> None:
     reaper_task: asyncio.Task[Any] | None = None
+    tools_changed_task: asyncio.Task[Any] | None = None
     try:
         await _recover_scoped_sessions_if_needed(stale_scope_lock_existed)
         reaper_task = asyncio.create_task(_global_orphan_reaper_loop())
+        tools_changed_task = _schedule_startup_tools_changed_notifications()
         await mcp.run_stdio_async()
     finally:
         if reaper_task is not None:
             reaper_task.cancel()
             with suppress(asyncio.CancelledError):
                 await reaper_task
+        if tools_changed_task is not None:
+            tools_changed_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await tools_changed_task
         await _cleanup_sessions()
         _release_scope_lock()
 
@@ -6052,10 +7020,39 @@ async def _run_http(args: argparse.Namespace) -> None:
         log_level=logging.getLevelName(logging.getLogger().level).lower(),
     )
     server = uvicorn.Server(config_uvicorn)
+    tools_changed_task = _schedule_startup_tools_changed_notifications()
     try:
         await server.serve()
     finally:
+        if tools_changed_task is not None:
+            tools_changed_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await tools_changed_task
         await _cleanup_sessions()
+
+
+async def _publish_tools_list_changed(reason: str = "manual") -> None:
+    """Publish a standard MCP tools/list_changed event to active subscriptions/listen streams."""
+    try:
+        await mcp._subscriptions.publish(ToolsListChanged())
+        logging.info("Published MCP tools/list_changed notification (%s)", reason)
+    except Exception as exc:
+        logging.warning("Could not publish MCP tools/list_changed notification (%s): %s", reason, exc)
+
+
+async def _startup_tools_changed_notifications(delays: tuple[float, ...] = TOOLS_CHANGED_STARTUP_DELAYS) -> None:
+    for delay in delays:
+        if delay > 0:
+            await asyncio.sleep(delay)
+        await _publish_tools_list_changed("startup")
+
+
+def _schedule_startup_tools_changed_notifications() -> asyncio.Task[Any] | None:
+    if not NOTIFY_TOOLS_CHANGED_ON_STARTUP:
+        return None
+    if not TOOLS_CHANGED_STARTUP_DELAYS:
+        return None
+    return asyncio.create_task(_startup_tools_changed_notifications())
 
 
 async def _cleanup_sessions() -> None:
@@ -6278,6 +7275,7 @@ def main(argv: list[str] | None = None) -> None:
         logging.info("Built-in Answer42 RAG is disabled")
     profile_result = _apply_tool_profile(args.tool_profile)
     logging.info("Tool profile: %s (mode=%s, remaining=%d, removed=%d)", profile_result["profile"], profile_result["mode"], profile_result.get("remaining_count", 0), profile_result.get("removed_count", 0))
+    _enable_tools_list_changed_capability()
     _start_autoreload_watcher(args.dev, args.dev_restart_timeout)
     if args.session_scope:
         _configure_session_scope(args.session_scope)

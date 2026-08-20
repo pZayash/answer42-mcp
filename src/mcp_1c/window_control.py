@@ -4,6 +4,7 @@ import ctypes
 import ctypes.wintypes
 import logging
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -62,14 +63,79 @@ def maximize_test_client_window(
     return last.as_dict()
 
 
-def active_1c_window_geometry(title_contains: str = "") -> dict[str, int] | None:
-    """Return best visible 1C window geometry on Windows, or None elsewhere."""
-    if os.name != "nt":
-        return None
-    chosen = _find_windows_1c_window(title_contains)
+def active_1c_window_geometry(title_contains: str = "", display: str | None = None) -> dict[str, int] | None:
+    """Return best visible 1C window geometry for screenshots.
+
+    This inspects OS window geometry only.  It must not be used to click,
+    type, or decide whether a 1C UI command succeeded; UI automation goes
+    through the 1C test-client API.
+    """
+    chosen = _find_windows_1c_window(title_contains) if os.name == "nt" else _find_x11_1c_window(title_contains, display)
     if not chosen:
         return None
     return chosen.get("geometry")
+
+
+def _find_x11_1c_window(title_contains: str = "", display: str | None = None) -> dict[str, Any] | None:
+    env = os.environ.copy()
+    if display:
+        env["DISPLAY"] = display
+    try:
+        tree = subprocess.run(
+            ["xwininfo", "-root", "-tree"],
+            env=env,
+            check=True,
+            text=True,
+            capture_output=True,
+            timeout=10,
+        ).stdout
+    except (subprocess.SubprocessError, FileNotFoundError):
+        return None
+
+    screen_width, screen_height = _screen_size(env.get("DISPLAY", ""), env)
+    candidates: list[dict[str, Any]] = []
+    for line in tree.splitlines():
+        if '("1cv8c" "1cv8c")' not in line and '("1cv8" "1cv8")' not in line:
+            continue
+        match = re.search(r'0x[0-9a-f]+ "([^"]*)".*?(\d+)x(\d+)\+(-?\d+)\+(-?\d+)', line)
+        if not match:
+            continue
+        title = match.group(1)
+        if not _title_matches(title, title_contains):
+            continue
+        width, height, left, top = map(int, match.groups()[1:])
+        if width < 300 or height < 150:
+            continue
+        capture_left = max(0, left)
+        capture_top = max(0, top)
+        capture_width = min(width - max(0, -left), max(0, screen_width - capture_left))
+        capture_height = min(height - max(0, -top), max(0, screen_height - capture_top))
+        if capture_width < 300 or capture_height < 150:
+            continue
+        priority = min(capture_width * capture_height // 10000, 50)
+        if "1С:Предприятие" in title:
+            priority += 50
+        if title and title not in {"1cv8c", "1cv8", "Конфигурация"}:
+            priority += 100
+        candidates.append({
+            "title": title,
+            "priority": priority,
+            "geometry": {
+                "left": capture_left,
+                "top": capture_top,
+                "width": capture_width,
+                "height": capture_height,
+                "title": title,
+                "xwininfo_left": left,
+                "xwininfo_top": top,
+                "xwininfo_width": width,
+                "xwininfo_height": height,
+            },
+        })
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: int(item.get("priority") or 0), reverse=True)
+    return candidates[0]
 
 
 def _screen_size(display: str, env: dict[str, str]) -> tuple[int, int]:
