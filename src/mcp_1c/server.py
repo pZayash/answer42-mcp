@@ -6061,50 +6061,23 @@ def _metadata_query_is_exact_full_name(query: str) -> bool:
 
 
 async def _load_metadata_objects_from_catalog(session_id: str, limit: int, query: str = "", max_results: int = 200) -> dict[str, Any]:
-    del max_results
-    exact_query = query.strip() if _metadata_query_is_exact_full_name(query.strip()) else ""
-    if exact_query:
-        direct_rows, direct_warnings = await _metadata_rows_from_direct_catalog_query(session_id, limit, query=exact_query)
-        if direct_rows:
-            return _metadata_catalog_data_from_rows(
-                direct_rows,
-                direct_warnings,
-                navigation_link="metadata_catalog_query",
-                source_method="metadata_catalog_query",
-                limit=limit,
-                partial_for_query=True,
-            )
-        warnings = direct_warnings
-    else:
-        warnings = []
+    """Build a full metadata object snapshot through Universal report.
 
-    navigation_link = "e1cib/list/Справочник.ИдентификаторыОбъектовМетаданных"
-    target_rows, target_warnings = await _metadata_rows_from_target_catalog_list(session_id, limit)
-    warnings.extend(target_warnings)
-    parsed_rows = target_rows
-    source_method = "target_catalog_list"
+    Public search parameters are intentionally not pushed into the live 1C UI.
+    The first load reads one normalized non-deleted snapshot from the standard
+    Universal report, excludes roles/subsystems during normalization, stores it
+    in the per-session cache, and later calls search that cache in Python.
+    """
+    del query, max_results
+    navigation_link = "e1cib/app/Отчет.УниверсальныйОтчет"
+    parsed_rows, warnings = await _metadata_rows_from_universal_report(session_id, limit)
     if not parsed_rows:
-        direct_rows, direct_warnings = await _metadata_rows_from_direct_catalog_query(session_id, limit, query="")
-        warnings.extend(direct_warnings)
-        if direct_rows:
-            parsed_rows = direct_rows
-            navigation_link = "metadata_catalog_query"
-            source_method = "metadata_catalog_query"
-        else:
-            warnings.append(
-                "Target metadata catalog list and direct query returned no rows; "
-                "Universal report fallback is skipped because it can block the thin-client bridge"
-            )
-    elif len(parsed_rows) < min(limit, 1000):
-        warnings.append(
-            f"Target metadata catalog list returned {len(parsed_rows)} rows; "
-            "hierarchical/current-list view may be partial. Safe exact direct-query fallback may be used when available."
-        )
+        warnings.append("Universal report returned no metadata rows for cache build")
     return _metadata_catalog_data_from_rows(
         parsed_rows,
         warnings,
         navigation_link=navigation_link,
-        source_method=source_method,
+        source_method="universal_report",
         limit=limit,
     )
 
@@ -6162,7 +6135,7 @@ async def metadata_objects_from_catalog(
     query: Annotated[str, "Substring to search in presentation, full name, type, name or synonym"] = "",
     limit: Annotated[int, "Maximum rows to read from the catalog when cache is refreshed"] = 5000,
     max_results: Annotated[int, "Maximum matched objects to return"] = 200,
-    refresh_cache: Annotated[bool, "Force rereading the hierarchical catalog instead of using the session cache"] = False,
+    refresh_cache: Annotated[bool, "Force rebuilding the Universal report snapshot instead of using the session cache"] = False,
     include_groups: Annotated[bool, "Include hierarchy group rows in results"] = False,
     watchdog_timeout: Annotated[int, "Maximum seconds to wait for the metadata report/catalog read before returning busy diagnostics; 0 disables"] = 90,
     *,
@@ -6170,9 +6143,9 @@ async def metadata_objects_from_catalog(
 ) -> dict[str, Any]:
     """Return/search metadata objects from `Справочник.ИдентификаторыОбъектовМетаданных`.
 
-    The first call opens the target metadata-identifiers catalog list, reads a
-    lightweight snapshot, excludes deleted/role/subsystem rows when possible, normalizes rows to
-    `presentation/full_name/type/name/synonym`, and stores them in an in-memory
+    The first call opens the standard Universal report for the metadata-identifiers
+    catalog, reads a normalized snapshot with metadata names/synonyms, excludes
+    deleted rows plus roles/subsystems, and stores the result in an in-memory
     per-session cache. Later calls search that cache unless `refresh_cache=true`.
     """
     params = {
