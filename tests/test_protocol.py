@@ -427,9 +427,10 @@ def test_tabular_document_save_fast_mode_returns_after_first_successful_attempt(
     save_body = _bsl_function_body(module, "СохранитьТабличныйДокументMCP")
     index_body = _bsl_function_body(module, "ИндексФильтраДиалогаТабличногоДокументаMCP")
 
-    assert 'БыстроеСохранение = СвойствоСтруктуры(Параметры, "exact_filter_only", Ложь)' in save_body
+    assert 'ИндексФильтраПараметр = СвойствоСтруктуры(Параметры, "file_dialog_filter_index", 0)' in save_body
+    assert 'БыстроеСохранение = СвойствоСтруктуры(Параметры, "exact_filter_only", Ложь) Или ИндексФильтраПараметр > 0' in save_body
     assert "Если БыстроеСохранение Тогда" in save_body
-    assert "НачальныйФильтр = Макс(ИндексТочногоФильтра, 1)" in save_body
+    assert "НачальныйФильтр = Макс(ИндексФильтраПараметр, Макс(ИндексТочногоФильтра, 1))" in save_body
     assert "КонечныйФильтр = НачальныйФильтр" in save_body
     assert "write_content_to_file_dialog_filters_fast" in save_body
     assert "Возврат Новый Структура" in save_body

@@ -46,6 +46,18 @@ _RAG_ENABLED = os.getenv("ONEC_MCP_DISABLE_RAG", "").strip().lower() not in {"1"
 _CREDENTIAL_STORE_ENABLED = os.getenv("ONEC_MCP_DISABLE_CREDENTIAL_STORE", "").strip().lower() not in {"1", "true", "yes", "on"}
 _DEV_TOOLS_ENABLED = os.getenv("ONEC_MCP_DEV_TOOLS", "").strip().lower() in {"1", "true", "yes", "on"}
 DEFAULT_SESSION = os.getenv("ONEC_MCP_DEFAULT_SESSION", f"default-{os.getpid()}")
+# Ordered, empirically preferred 1C file-dialog filter indexes for
+# tabular-document saves.  The Python side validates the produced file
+# signature after every single-index save attempt; these values only choose the
+# first likely attempts, then the remaining indexes are tried without duplicates.
+TABULAR_DOCUMENT_SAVE_PREFERRED_FILTER_INDEXES: dict[str, list[int]] = {
+    "xlsx": [1],  # Verified on live BP Universal report.
+    "pdf": [2],  # Verified on live dynamic-list output.
+    "xls": [3],
+    "html": [4],
+    "htm": [4],
+    "txt": [5],
+}
 SESSION_SCOPE_ID = os.getenv("ONEC_MCP_SESSION_SCOPE_ID") or os.getenv("ONEC_MCP_SESSION_SCOPE") or ""
 STATE_FILE = os_support.runtime_path("ONEC_MCP_SESSION_STATE", "sessions.json")
 SCOPE_DIR: Path | None = None
@@ -4831,6 +4843,13 @@ async def tabular_document_save(
         "format": format,
         "exact_filter_only": exact_filter_only,
     }
+    if exact_filter_only:
+        return await _tabular_document_save_filter_by_filter(
+            session_id,
+            params,
+            format,
+            timeout=max(1, int(watchdog_timeout)),
+        )
     result = await _dangerous_bridge_call_recorded(
         session_id,
         "tabular_document_save",
@@ -4841,6 +4860,65 @@ async def tabular_document_save(
     if isinstance(result, dict) and result.get("interface_blocked"):
         return result
     return _select_saved_tabular_document_file(result, format)
+
+
+async def _tabular_document_save_filter_by_filter(
+    session_id: str,
+    params: dict[str, Any],
+    format: str,
+    *,
+    timeout: int,
+    danger: str = "tabular_document_file_save_may_block_thin_client",
+    max_filter_index: int = 30,
+) -> Any:
+    """Try file-dialog filters one bridge call at a time until a valid file appears."""
+    attempts: list[Any] = []
+    filter_indexes = _tabular_document_save_filter_order(format, max_filter_index=max_filter_index)
+    for filter_index in filter_indexes:
+        attempt_params = dict(params)
+        attempt_params["exact_filter_only"] = True
+        attempt_params["file_dialog_filter_index"] = filter_index
+        result = await _dangerous_bridge_call_recorded(
+            session_id,
+            "tabular_document_save",
+            attempt_params,
+            timeout=timeout,
+            danger=danger,
+        )
+        if isinstance(result, dict) and result.get("interface_blocked"):
+            result["attempts"] = attempts
+            result["last_filter_index"] = filter_index
+            return result
+        selected = _select_saved_tabular_document_file(result, format)
+        attempts.append(dict(selected) if isinstance(selected, dict) else selected)
+        if isinstance(selected, dict) and selected.get("saved") is True:
+            final_result = dict(selected)
+            final_result["attempts"] = attempts
+            final_result["attempted_filter_indexes"] = filter_indexes[: len(attempts)]
+            final_result["fallback_used"] = len(attempts) > 1
+            final_result["method"] = "write_content_to_file_dialog_filters_one_by_one"
+            return final_result
+    return {
+        "saved": False,
+        "path": params.get("path", ""),
+        "format": format,
+        "method": "write_content_to_file_dialog_filters_one_by_one",
+        "attempts": attempts,
+        "attempted_filter_indexes": filter_indexes,
+        "error": f"No produced file matches requested tabular document format after {max_filter_index} file-dialog filters: {format.lower()}",
+    }
+
+
+def _tabular_document_save_filter_order(format: str, *, max_filter_index: int = 30) -> list[int]:
+    """Return configured likely file-dialog filter indexes first, then the rest."""
+    wanted = format.strip().lower()
+    seen: set[int] = set()
+    ordered: list[int] = []
+    for index in [*TABULAR_DOCUMENT_SAVE_PREFERRED_FILTER_INDEXES.get(wanted, []), *range(1, max_filter_index + 1)]:
+        if 1 <= index <= max_filter_index and index not in seen:
+            ordered.append(index)
+            seen.add(index)
+    return ordered
 
 
 @mcp.tool()
@@ -5614,6 +5692,40 @@ async def _add_universal_report_filter(
     return True
 
 
+async def _close_message_box_from_command_diagnostics(
+    session_id: str,
+    command_result: Any,
+    warnings: list[str],
+) -> bool:
+    """Close a safe MessageBox reported in command diagnostics without probing active_window."""
+    diagnostics = command_result.get("client_diagnostics") if isinstance(command_result, dict) else None
+    if not isinstance(diagnostics, dict):
+        return False
+    modal_form = str(diagnostics.get("modal_form_name") or "")
+    has_dialog = bool(diagnostics.get("has_dialog")) or modal_form == "MessageBox"
+    is_error_window = bool(diagnostics.get("modal_is_error_window"))
+    buttons = diagnostics.get("modal_buttons") if isinstance(diagnostics.get("modal_buttons"), list) else []
+    has_ok = any(
+        isinstance(button, dict)
+        and (str(button.get("title") or "").strip().casefold() == "ok" or str(button.get("name") or "").strip().casefold() == "ok")
+        for button in buttons
+    )
+    if not has_dialog or is_error_window or not has_ok:
+        return False
+    try:
+        await _bridge_call_recorded(
+            session_id,
+            "click_button",
+            {"name": "OK", "search_by_title": True, "watchdog_timeout": 30},
+            timeout=35,
+        )
+        warnings.append("Universal report informational MessageBox was closed before forming the report")
+        return True
+    except Exception as exc:
+        warnings.append(f"Universal report informational MessageBox could not be closed from command diagnostics: {exc}")
+        return False
+
+
 async def _close_universal_report_message_box_if_present(
     session_id: str,
     warnings: list[str],
@@ -5783,25 +5895,18 @@ async def _metadata_rows_from_universal_report(
     warnings: list[str] = []
     navigation_link = "e1cib/app/Отчет.УниверсальныйОтчет"
     try:
-        await _bridge_call_recorded(session_id, "open_navigation_link", {"navigation_link": navigation_link})
-        await _close_universal_report_message_box_if_present(session_id, warnings, wait_seconds=90)
-        type_set = await _set_universal_report_quick_setting_by_titles(
-            session_id,
-            ["Тип объекта", "Тип данных", "Раздел"],
-            "Справочники",
-            warnings,
+        open_result = await _bridge_call_recorded(session_id, "open_navigation_link", {"navigation_link": navigation_link})
+        await _close_message_box_from_command_diagnostics(session_id, open_result, warnings)
+        # Do not probe or mutate Universal report quick settings in the primary path.
+        # On some live web/thin-client sessions the report opens already on the
+        # required metadata-identifiers source, but title-based `field_info`
+        # probing of quick settings makes the bridge unresponsive before the
+        # report can be formed.  Prefer the stable navigation-link source and
+        # validate the produced XLSX contents after save.
+        warnings.append(
+            "Universal report quick settings probing skipped;"
+            " using the source opened by the navigation link and validating XLSX rows"
         )
-        object_set = await _set_universal_report_quick_setting_by_titles(
-            session_id,
-            ["Объект", "Справочник", "Имя объекта"],
-            "ИдентификаторыОбъектовМетаданных",
-            warnings,
-        )
-        if not type_set or not object_set:
-            return [], [
-                *warnings,
-                "Universal report metadata source quick settings were not found by visible labels",
-            ]
         # Do not open the Universal report settings form in the primary path.
         # Live thin-client/web sessions can visually open `ВсеНастройки` but
         # leave the test bridge unresponsive for minutes; adding the first
@@ -5811,13 +5916,28 @@ async def _metadata_rows_from_universal_report(
         # available as a separate best-effort diagnostic helper, not as a
         # correctness-critical step of metadata cache building.
         warnings.append("Universal report settings UI skipped; filtering is applied after reading rows")
-        await _close_universal_report_message_box_if_present(session_id, warnings, wait_seconds=45)
-        await _bridge_call_recorded(session_id, "click_button", {"name": "СформироватьОтчет"}, timeout=30)
+        # Avoid active_window probes before forming the report: on live web/thin
+        # sessions they can make the bridge unresponsive even when the report
+        # form is visually ready.  If navigation returned no safe MessageBox
+        # diagnostics, go straight to the form command.
+        form_result = await _dangerous_bridge_call_recorded(
+            session_id,
+            "click_button",
+            {"name": "СформироватьОтчет"},
+            timeout=180,
+            danger="metadata_objects_universal_report_form_may_block_thin_client",
+        )
+        if isinstance(form_result, dict) and form_result.get("started_long_action"):
+            warnings.append(
+                "Universal report form action is still running or blocked the interface;"
+                f" form_result={_truncate_value(form_result)}"
+            )
+            return [], warnings
         ready, readiness_warnings, readiness = await _wait_tabular_document_ready(
             session_id,
             "ОтчетТабличныйДокумент",
-            timeout_seconds=45,
-            interval_seconds=2,
+            timeout_seconds=75,
+            interval_seconds=3,
         )
         warnings.extend(readiness_warnings)
         if not ready:
@@ -5834,25 +5954,24 @@ async def _metadata_rows_from_universal_report(
         save_diagnostics: Any = {}
         report_path = Path("/tmp/answer42") / f"metadata_objects_{session_id}_{uuid.uuid4().hex}.xlsx"
         try:
-            save_result = await _dangerous_bridge_call_recorded(
+            selected_result = await _tabular_document_save_filter_by_filter(
                 session_id,
-                "tabular_document_save",
                 {
                     "name": "ОтчетТабличныйДокумент",
                     "path": str(report_path),
                     "format": "xlsx",
                     "exact_filter_only": True,
                 },
+                "xlsx",
                 timeout=180,
                 danger="metadata_objects_universal_report_file_save_may_block_thin_client",
             )
-            if isinstance(save_result, dict) and save_result.get("interface_blocked"):
+            if isinstance(selected_result, dict) and selected_result.get("interface_blocked"):
                 read_warnings.append(
                     "Universal report XLSX save is still running or blocked the interface;"
-                    f" save_result={_truncate_value(save_result)}"
+                    f" save_result={_truncate_value(selected_result)}"
                 )
                 return [], [*warnings, *read_warnings]
-            selected_result = _select_saved_tabular_document_file(save_result, "xlsx")
             save_diagnostics = selected_result
             selected = selected_result.get("selected") if isinstance(selected_result, dict) else None
             selected_path = selected.get("copied_to") or selected.get("path") if isinstance(selected, dict) else ""
