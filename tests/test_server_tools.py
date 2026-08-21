@@ -1005,6 +1005,63 @@ def test_effective_dump_connection_rejects_web_without_direct_target(tmp_path):
         _effective_dump_connection(sess, "auto", "", "")
 
 
+def test_tabular_document_save_exact_mode_falls_back_filter_by_filter(monkeypatch):
+    from mcp_1c import server
+
+    calls = []
+
+    async def fake_dangerous_bridge_call(session_id, method, params, *, timeout, danger):
+        assert session_id == "unit"
+        assert method == "tabular_document_save"
+        assert timeout == 7
+        assert danger == "tabular_document_file_save_may_block_thin_client"
+        calls.append(dict(params))
+        return {
+            "saved": True,
+            "path": params["path"],
+            "format": params["format"],
+            "files": [{"path": f"{params['path']}.filter{params['file_dialog_filter_index']}"}],
+        }
+
+    def fake_select_saved_file(result, format):
+        filter_index = int(result["files"][0]["path"].rsplit("filter", 1)[1])
+        selected = dict(result)
+        selected["selected"] = result["files"][0]
+        selected["saved"] = filter_index == 2
+        if filter_index != 2:
+            selected["error"] = "No produced file matches requested tabular document format: xlsx"
+        return selected
+
+    monkeypatch.setattr(server, "_dangerous_bridge_call_recorded", fake_dangerous_bridge_call)
+    monkeypatch.setattr(server, "_select_saved_tabular_document_file", fake_select_saved_file)
+
+    result = asyncio.run(server._tabular_document_save_filter_by_filter(
+        "unit",
+        {"name": "TD", "path": "out.xlsx", "format": "xlsx", "exact_filter_only": True},
+        "xlsx",
+        timeout=7,
+        max_filter_index=3,
+    ))
+
+    assert result["saved"] is True
+    assert result["fallback_used"] is True
+    assert result["attempted_filter_indexes"] == [1, 2]
+    assert [call["file_dialog_filter_index"] for call in calls] == [1, 2]
+    assert all(call["exact_filter_only"] is True for call in calls)
+    assert len(result["attempts"]) == 2
+    assert result["attempts"][0]["saved"] is False
+    assert result["attempts"][1]["saved"] is True
+
+
+def test_tabular_document_save_filter_order_uses_likely_format_index_first():
+    from mcp_1c.server import _tabular_document_save_filter_order
+
+    assert _tabular_document_save_filter_order("xlsx", max_filter_index=5) == [1, 2, 3, 4, 5]
+    assert _tabular_document_save_filter_order("pdf", max_filter_index=5) == [2, 1, 3, 4, 5]
+    assert _tabular_document_save_filter_order("html", max_filter_index=5) == [4, 1, 2, 3, 5]
+    assert _tabular_document_save_filter_order("unknown", max_filter_index=3) == [1, 2, 3]
+
+
 def test_tabular_document_file_selection_reports_format_mismatch(tmp_path):
     from mcp_1c.server import _select_saved_tabular_document_file
 
@@ -1702,7 +1759,13 @@ def test_metadata_universal_report_primary_path_skips_settings_ui(monkeypatch):
         assert session_id == "unit"
         calls.append((method, params, timeout))
         if method == "field_info":
-            return {"found": True, "name": f"КомпоновщикНастроекПользовательскиеНастройки{params['field_name']}Значение"}
+            raise AssertionError("primary metadata path must not probe Universal report quick settings")
+        if method == "set_field_value":
+            raise AssertionError("primary metadata path must not mutate Universal report quick settings")
+        if method == "active_window":
+            raise AssertionError("primary metadata path must not probe active_window before forming the report")
+        if method == "open_navigation_link":
+            return {"opened": True, "client_diagnostics": {"has_dialog": False, "modal_form_name": "ОбщаяФорма.ФормаОтчета"}}
         return {"ok": True}
 
     async def fail_configure(session_id, query=""):
@@ -1716,6 +1779,11 @@ def test_metadata_universal_report_primary_path_skips_settings_ui(monkeypatch):
     async def fake_dangerous_bridge_call(session_id, method, params, *, timeout, danger):
         assert session_id == "unit"
         calls.append((method, params, timeout, danger))
+        if method == "click_button":
+            assert params == {"name": "СформироватьОтчет"}
+            assert timeout == 180
+            assert danger == "metadata_objects_universal_report_form_may_block_thin_client"
+            return {"pressed": True}
         assert method == "tabular_document_save"
         assert params["name"] == "ОтчетТабличныйДокумент"
         assert params["format"] == "xlsx"
@@ -1727,7 +1795,7 @@ def test_metadata_universal_report_primary_path_skips_settings_ui(monkeypatch):
     def fake_select_saved_file(result, format):
         assert format == "xlsx"
         assert result["files"][0]["path"].endswith(".xlsx")
-        return {"selected": {"path": result["files"][0]["path"]}}
+        return {"saved": True, "selected": {"path": result["files"][0]["path"]}}
 
     def fake_rows_from_xlsx(path):
         assert str(path).endswith(".xlsx")
@@ -1747,14 +1815,12 @@ def test_metadata_universal_report_primary_path_skips_settings_ui(monkeypatch):
     rows, warnings = asyncio.run(server._metadata_rows_from_universal_report("unit", 10))
 
     assert rows == [{"Полное имя": "Справочник.Номенклатура", "Синоним": "Номенклатура"}]
+    assert any("quick settings probing skipped" in warning for warning in warnings)
     assert any("settings UI skipped" in warning for warning in warnings)
-    assert ("field_info", {"field_name": "Тип объекта", "search_by_title": True}, 10) in calls
-    assert ("field_info", {"field_name": "Объект", "search_by_title": True}, 10) in calls
-    assert any(
-        method == "set_field_value" and str(params.get("field_name", "")).startswith("КомпоновщикНастроек")
-        for method, params, _timeout in calls
-    )
-    assert ("click_button", {"name": "СформироватьОтчет"}, 30) in calls
+    assert not any(method == "field_info" for method, *_rest in calls)
+    assert not any(method == "set_field_value" for method, *_rest in calls)
+    assert not any(method == "active_window" for method, *_rest in calls)
+    assert ("click_button", {"name": "СформироватьОтчет"}, 180, "metadata_objects_universal_report_form_may_block_thin_client") in calls
     assert not any(call[0] == "click_button" and call[1].get("name") == "ВсеНастройки" for call in calls)
 
 
