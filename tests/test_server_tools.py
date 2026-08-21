@@ -1713,18 +1713,36 @@ def test_metadata_universal_report_primary_path_skips_settings_ui(monkeypatch):
         assert name == "ОтчетТабличныйДокумент"
         return True, [], {"rows": 2, "columns": 6}
 
-    async def fake_chunks(session_id, name, *, max_rows, total_rows, total_columns, query="", target_matches=0, chunk_size=1000):
+    async def fake_dangerous_bridge_call(session_id, method, params, *, timeout, danger):
         assert session_id == "unit"
-        assert name == "ОтчетТабличныйДокумент"
-        assert max_rows == 10
-        assert total_rows == 2
-        assert total_columns == 6
-        return [{"Полное имя": "Справочник.Номенклатура", "Синоним": "Номенклатура"}], []
+        calls.append((method, params, timeout, danger))
+        assert method == "tabular_document_save"
+        assert params["name"] == "ОтчетТабличныйДокумент"
+        assert params["format"] == "xlsx"
+        assert params["exact_filter_only"] is True
+        assert timeout == 180
+        assert danger == "metadata_objects_universal_report_file_save_may_block_thin_client"
+        return {"files": [{"path": params["path"]}]}
+
+    def fake_select_saved_file(result, format):
+        assert format == "xlsx"
+        assert result["files"][0]["path"].endswith(".xlsx")
+        return {"selected": {"path": result["files"][0]["path"]}}
+
+    def fake_rows_from_xlsx(path):
+        assert str(path).endswith(".xlsx")
+        return [{"Полное имя": "Справочник.Номенклатура", "Синоним": "Номенклатура"}]
+
+    async def fail_chunks(*args, **kwargs):
+        raise AssertionError("primary metadata path must save XLSX, not read UI chunks")
 
     monkeypatch.setattr(server, "_bridge_call_recorded", fake_bridge_call)
+    monkeypatch.setattr(server, "_dangerous_bridge_call_recorded", fake_dangerous_bridge_call)
+    monkeypatch.setattr(server, "_select_saved_tabular_document_file", fake_select_saved_file)
     monkeypatch.setattr(server, "_configure_universal_report_metadata_settings", fail_configure)
     monkeypatch.setattr(server, "_wait_tabular_document_ready", fake_ready)
-    monkeypatch.setattr(server, "_metadata_rows_from_tabular_document_chunks", fake_chunks)
+    monkeypatch.setattr(server, "_metadata_catalog_rows_from_xlsx", fake_rows_from_xlsx)
+    monkeypatch.setattr(server, "_metadata_rows_from_tabular_document_chunks", fail_chunks)
 
     rows, warnings = asyncio.run(server._metadata_rows_from_universal_report("unit", 10))
 
@@ -1737,7 +1755,7 @@ def test_metadata_universal_report_primary_path_skips_settings_ui(monkeypatch):
         for method, params, _timeout in calls
     )
     assert ("click_button", {"name": "СформироватьОтчет"}, 30) in calls
-    assert not any(method == "click_button" and params.get("name") == "ВсеНастройки" for method, params, _timeout in calls)
+    assert not any(call[0] == "click_button" and call[1].get("name") == "ВсеНастройки" for call in calls)
 
 
 def test_metadata_universal_report_quick_settings_try_labels_in_order(monkeypatch):
@@ -1813,7 +1831,7 @@ def test_metadata_universal_report_quick_settings_keep_warnings_local_until_all_
     ]
 
 
-def test_load_metadata_objects_caps_universal_report_limit(monkeypatch):
+def test_load_metadata_objects_uses_requested_limit_for_saved_report(monkeypatch):
     from mcp_1c import server
 
     calls = []
@@ -1825,16 +1843,15 @@ def test_load_metadata_objects_caps_universal_report_limit(monkeypatch):
         ], []
 
     monkeypatch.setattr(server, "_metadata_rows_from_universal_report", fake_universal_report)
-    monkeypatch.setattr(server, "METADATA_UNIVERSAL_REPORT_SAFE_ROW_LIMIT", 1000)
 
     result = asyncio.run(server._load_metadata_objects_from_catalog("unit", 10000, query="Номенклатура", max_results=20))
 
-    assert calls == [("unit", 1000, "", 0)]
+    assert calls == [("unit", 10000, "", 0)]
     assert result["requested_limit"] == 10000
-    assert result["effective_limit"] == 1000
-    assert result["limit"] == 1000
-    assert result["snapshot_truncated_by_safe_limit"] is True
-    assert any("capped at 1000 rows" in warning for warning in result["warnings"])
+    assert result["effective_limit"] == 10000
+    assert result["limit"] == 10000
+    assert result["snapshot_truncated_by_safe_limit"] is False
+    assert not any("capped" in warning for warning in result["warnings"])
 
 
 def test_metadata_universal_report_chunk_read_uses_query_early_stop(monkeypatch):

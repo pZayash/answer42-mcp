@@ -422,12 +422,17 @@ def test_dynamic_list_set_settings_does_not_bypass_table_edit_guard_for_generic_
     assert "РазрешитьБезРежимаРедактирования" in module
 
 
-def test_tabular_document_save_does_not_use_unstable_exact_dialog_filter_indexes():
+def test_tabular_document_save_fast_mode_returns_after_first_successful_attempt():
     module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
     save_body = _bsl_function_body(module, "СохранитьТабличныйДокументMCP")
     index_body = _bsl_function_body(module, "ИндексФильтраДиалогаТабличногоДокументаMCP")
 
-    assert "ИндексТочногоФильтра > 0" in save_body
+    assert 'БыстроеСохранение = СвойствоСтруктуры(Параметры, "exact_filter_only", Ложь)' in save_body
+    assert "Если БыстроеСохранение Тогда" in save_body
+    assert "НачальныйФильтр = Макс(ИндексТочногоФильтра, 1)" in save_body
+    assert "КонечныйФильтр = НачальныйФильтр" in save_body
+    assert "write_content_to_file_dialog_filters_fast" in save_body
+    assert "Возврат Новый Структура" in save_body
     assert "НачальныйФильтр = 1" in save_body
     assert "КонечныйФильтр = 30" in save_body
     assert "перебора" in index_body

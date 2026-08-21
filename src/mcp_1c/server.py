@@ -46,7 +46,6 @@ _RAG_ENABLED = os.getenv("ONEC_MCP_DISABLE_RAG", "").strip().lower() not in {"1"
 _CREDENTIAL_STORE_ENABLED = os.getenv("ONEC_MCP_DISABLE_CREDENTIAL_STORE", "").strip().lower() not in {"1", "true", "yes", "on"}
 _DEV_TOOLS_ENABLED = os.getenv("ONEC_MCP_DEV_TOOLS", "").strip().lower() in {"1", "true", "yes", "on"}
 DEFAULT_SESSION = os.getenv("ONEC_MCP_DEFAULT_SESSION", f"default-{os.getpid()}")
-METADATA_UNIVERSAL_REPORT_SAFE_ROW_LIMIT = int(os.getenv("ONEC_MCP_METADATA_UNIVERSAL_REPORT_SAFE_ROW_LIMIT", "1000"))
 SESSION_SCOPE_ID = os.getenv("ONEC_MCP_SESSION_SCOPE_ID") or os.getenv("ONEC_MCP_SESSION_SCOPE") or ""
 STATE_FILE = os_support.runtime_path("ONEC_MCP_SESSION_STATE", "sessions.json")
 SCOPE_DIR: Path | None = None
@@ -4681,7 +4680,7 @@ async def _navigation_link_suggestions(session_id: str, navigation_link: str, li
             cache_key = _metadata_cache_key(session_id)
             catalog_data = _METADATA_OBJECTS_CACHE.get(cache_key)
             if catalog_data is None:
-                catalog_data = await _load_metadata_objects_from_catalog(session_id, 5000)
+                catalog_data = await _load_metadata_objects_from_catalog(session_id, 10000)
                 _METADATA_OBJECTS_CACHE[cache_key] = catalog_data
             for item in catalog_data.get("objects", []):
                 if item.get("is_group") == "Да":
@@ -5785,7 +5784,7 @@ async def _metadata_rows_from_universal_report(
     navigation_link = "e1cib/app/Отчет.УниверсальныйОтчет"
     try:
         await _bridge_call_recorded(session_id, "open_navigation_link", {"navigation_link": navigation_link})
-        await _close_universal_report_message_box_if_present(session_id, warnings)
+        await _close_universal_report_message_box_if_present(session_id, warnings, wait_seconds=90)
         type_set = await _set_universal_report_quick_setting_by_titles(
             session_id,
             ["Тип объекта", "Тип данных", "Раздел"],
@@ -5812,7 +5811,7 @@ async def _metadata_rows_from_universal_report(
         # available as a separate best-effort diagnostic helper, not as a
         # correctness-critical step of metadata cache building.
         warnings.append("Universal report settings UI skipped; filtering is applied after reading rows")
-        await _close_universal_report_message_box_if_present(session_id, warnings)
+        await _close_universal_report_message_box_if_present(session_id, warnings, wait_seconds=45)
         await _bridge_call_recorded(session_id, "click_button", {"name": "СформироватьОтчет"}, timeout=30)
         ready, readiness_warnings, readiness = await _wait_tabular_document_ready(
             session_id,
@@ -5833,40 +5832,35 @@ async def _metadata_rows_from_universal_report(
         read_warnings: list[str] = []
         last_saved_path = ""
         save_diagnostics: Any = {}
-        # Prefer bounded chunk reads from the already-ready tabular document.
-        # On web-client sessions `ЗаписатьСодержимоеВФайл()` can block the UI
-        # for a long time even with an exact file-dialog filter, so file save is
-        # a fallback after chunk reads, not the first read path.
-        chunk_rows, chunk_warnings = await _metadata_rows_from_tabular_document_chunks(
-            session_id,
-            "ОтчетТабличныйДокумент",
-            max_rows=max_rows,
-            total_rows=int(readiness.get("rows") or 0),
-            total_columns=int(readiness.get("columns") or 0),
-            query=query,
-            target_matches=target_matches,
-        )
-        warnings.extend(chunk_warnings)
-        rows = chunk_rows
-        if not rows:
-            report_path = Path("/tmp/answer42") / f"metadata_objects_{session_id}_{uuid.uuid4().hex}.xlsx"
-            try:
-                save_result = await _bridge_call_recorded(session_id, "tabular_document_save", {
+        report_path = Path("/tmp/answer42") / f"metadata_objects_{session_id}_{uuid.uuid4().hex}.xlsx"
+        try:
+            save_result = await _dangerous_bridge_call_recorded(
+                session_id,
+                "tabular_document_save",
+                {
                     "name": "ОтчетТабличныйДокумент",
                     "path": str(report_path),
                     "format": "xlsx",
-                    "exact_filter_only": False,
-                }, timeout=12)
-                selected_result = _select_saved_tabular_document_file(save_result, "xlsx")
-                save_diagnostics = selected_result
-                selected = selected_result.get("selected") if isinstance(selected_result, dict) else None
-                selected_path = selected.get("copied_to") or selected.get("path") if isinstance(selected, dict) else ""
-                if selected_path:
-                    last_saved_path = str(selected_path)
-                    rows = _metadata_catalog_rows_from_xlsx(Path(selected_path))
-            except Exception as exc:
-                read_warnings.append(f"Universal report XLSX save/read failed: {exc}")
-                rows = []
+                    "exact_filter_only": True,
+                },
+                timeout=180,
+                danger="metadata_objects_universal_report_file_save_may_block_thin_client",
+            )
+            if isinstance(save_result, dict) and save_result.get("interface_blocked"):
+                read_warnings.append(
+                    "Universal report XLSX save is still running or blocked the interface;"
+                    f" save_result={_truncate_value(save_result)}"
+                )
+                return [], [*warnings, *read_warnings]
+            selected_result = _select_saved_tabular_document_file(save_result, "xlsx")
+            save_diagnostics = selected_result
+            selected = selected_result.get("selected") if isinstance(selected_result, dict) else None
+            selected_path = selected.get("copied_to") or selected.get("path") if isinstance(selected, dict) else ""
+            if selected_path:
+                last_saved_path = str(selected_path)
+                rows = _metadata_catalog_rows_from_xlsx(Path(selected_path))
+        except Exception as exc:
+            read_warnings.append(f"Universal report XLSX save/read failed: {exc}")
         if not rows:
             warning = (
                 "Universal report returned no parseable metadata rows"
@@ -6155,21 +6149,15 @@ async def _load_metadata_objects_from_catalog(session_id: str, limit: int, query
     """Build a metadata object snapshot through Universal report.
 
     Public search parameters are intentionally not pushed into the live 1C UI.
-    The Universal report is read with a live-safe row cap: very large reads in
-    web-client sessions can block the thin client for minutes.  The bounded
-    snapshot is still cached per session and searched in Python.
+    The Universal report tabular document is saved to XLSX and parsed on the
+    Python side.  This path deliberately avoids reading thousands of tabular
+    document cells through the test-client API, because that can block
+    web/thin-client sessions.
     """
     del query, max_results
     navigation_link = "e1cib/app/Отчет.УниверсальныйОтчет"
-    requested_limit = max(1, int(limit or METADATA_UNIVERSAL_REPORT_SAFE_ROW_LIMIT))
-    safe_limit = max(1, METADATA_UNIVERSAL_REPORT_SAFE_ROW_LIMIT)
-    effective_limit = min(requested_limit, safe_limit)
-    parsed_rows, warnings = await _metadata_rows_from_universal_report(session_id, effective_limit)
-    if requested_limit > effective_limit:
-        warnings.append(
-            "Universal report metadata snapshot was capped at "
-            f"{effective_limit} rows (requested {requested_limit}) to avoid blocking the web client"
-        )
+    requested_limit = max(1, int(limit or 1))
+    parsed_rows, warnings = await _metadata_rows_from_universal_report(session_id, requested_limit)
     if not parsed_rows:
         warnings.append("Universal report returned no metadata rows for cache build")
     data = _metadata_catalog_data_from_rows(
@@ -6177,11 +6165,11 @@ async def _load_metadata_objects_from_catalog(session_id: str, limit: int, query
         warnings,
         navigation_link=navigation_link,
         source_method="universal_report",
-        limit=effective_limit,
+        limit=requested_limit,
     )
     data["requested_limit"] = requested_limit
-    data["effective_limit"] = effective_limit
-    data["snapshot_truncated_by_safe_limit"] = requested_limit > effective_limit
+    data["effective_limit"] = requested_limit
+    data["snapshot_truncated_by_safe_limit"] = False
     return data
 
 
@@ -6239,7 +6227,7 @@ async def _metadata_objects_from_catalog_impl(
 @mcp.tool()
 async def metadata_objects_from_catalog(
     query: Annotated[str, "Substring to search in presentation, full name, type, name or synonym"] = "",
-    limit: Annotated[int, "Maximum rows to read from the catalog when cache is refreshed (capped by live-safe Universal report limit)"] = 1000,
+    limit: Annotated[int, "Maximum rows to parse from the saved Universal report when cache is refreshed"] = 10000,
     max_results: Annotated[int, "Maximum matched objects to return"] = 200,
     refresh_cache: Annotated[bool, "Force rebuilding the Universal report snapshot instead of using the session cache"] = False,
     include_groups: Annotated[bool, "Include hierarchy group rows in results"] = False,
