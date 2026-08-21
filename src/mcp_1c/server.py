@@ -57,6 +57,7 @@ TABULAR_DOCUMENT_SAVE_PREFERRED_FILTER_INDEXES: dict[str, list[int]] = {
     "html": [4],
     "htm": [4],
     "txt": [5],
+    "mxl": [1],
 }
 SESSION_SCOPE_ID = os.getenv("ONEC_MCP_SESSION_SCOPE_ID") or os.getenv("ONEC_MCP_SESSION_SCOPE") or ""
 STATE_FILE = os_support.runtime_path("ONEC_MCP_SESSION_STATE", "sessions.json")
@@ -4829,7 +4830,7 @@ async def tabular_document_save(
     name: Annotated[str, "Tabular document field technical name"] = "",
     title: Annotated[str, "Tabular document field visible title"] = "",
     path: Annotated[str, "Output file path; empty = auto-generated temp path"] = "",
-    format: Annotated[str, "Output format: pdf | xlsx | xls | html | txt"] = "pdf",
+    format: Annotated[str, "Output format: pdf | xlsx | xls | html | txt | mxl"] = "pdf",
     exact_filter_only: Annotated[bool, "Deprecated: use only a trusted file-dialog filter instead of probing many filters; unstable formats ignore it"] = False,
     watchdog_timeout: Annotated[int, "Deadline in seconds for dangerous UI save action before reporting blocked interface"] = 20,
     *,
@@ -4999,6 +5000,8 @@ def _find_saved_tabular_document_file(files: list[Any], format: str) -> dict[str
             return item
         if wanted == "txt" and _looks_like_plain_text(data):
             return item
+        if wanted == "mxl" and _looks_like_mxl(data):
+            return item
     return None
 
 
@@ -5028,6 +5031,10 @@ def _looks_like_plain_text(data: bytes) -> bool:
         return True
     except UnicodeDecodeError:
         return False
+
+
+def _looks_like_mxl(data: bytes) -> bool:
+    return data.startswith(b"MOXCEL") or data.lstrip(b"\xef\xbb\xbf").startswith(b"{8,")
 
 
 
@@ -5952,6 +5959,42 @@ async def _metadata_rows_from_universal_report(
         read_warnings: list[str] = []
         last_saved_path = ""
         save_diagnostics: Any = {}
+        mxl_path = Path("/tmp/answer42") / f"metadata_objects_{session_id}_{uuid.uuid4().hex}.mxl"
+        try:
+            selected_result = await _tabular_document_save_filter_by_filter(
+                session_id,
+                {
+                    "name": "ОтчетТабличныйДокумент",
+                    "path": str(mxl_path),
+                    "format": "mxl",
+                    "exact_filter_only": True,
+                },
+                "mxl",
+                timeout=120,
+                danger="metadata_objects_universal_report_file_save_may_block_thin_client",
+            )
+            if isinstance(selected_result, dict) and selected_result.get("interface_blocked"):
+                read_warnings.append(
+                    "Universal report MXL save is still running or blocked the interface;"
+                    f" save_result={_truncate_value(selected_result)}"
+                )
+                return [], [*warnings, *read_warnings]
+            save_diagnostics = selected_result
+            selected = selected_result.get("selected") if isinstance(selected_result, dict) else None
+            selected_path = selected.get("copied_to") or selected.get("path") if isinstance(selected, dict) else ""
+            if selected_path:
+                last_saved_path = str(selected_path)
+                rows = _metadata_catalog_rows_from_mxl(Path(selected_path))
+        except Exception as exc:
+            read_warnings.append(f"Universal report MXL save/read failed: {exc}")
+        if rows:
+            warnings.extend(read_warnings)
+            warnings.append(
+                "Universal report MXL became parseable"
+                f"; rows={readiness.get('rows')}; columns={readiness.get('columns')}; path={last_saved_path}"
+            )
+            return rows[:max_rows], warnings
+
         report_path = Path("/tmp/answer42") / f"metadata_objects_{session_id}_{uuid.uuid4().hex}.xlsx"
         try:
             selected_result = await _tabular_document_save_filter_by_filter(
@@ -6090,6 +6133,110 @@ def _metadata_catalog_rows_from_xlsx(path: Path) -> list[dict[str, str]]:
             cells.append(row_values)
     return _metadata_catalog_rows_from_tabular_cells(cells)
 
+
+def _metadata_catalog_rows_from_mxl(path: Path) -> list[dict[str, str]]:
+    """Parse the textual MOXCEL stream saved by 1C tabular documents.
+
+    1C native MXL files are not XLSX-like archives.  For Universal report output
+    they contain a MOXCEL header followed by a text stream with cell literals in
+    forms like `{"#","Синоним"}`.  The metadata identifiers report used by
+    `metadata_objects_from_catalog` exposes a repeated six-text-field row
+    layout: presentation/name/synonym/full_name/full_synonym/no_data.  Some
+    rows are followed by a numeric collection-order value.  Keep the parser
+    intentionally narrow and let callers fall back to XLSX if a particular MXL
+    layout is different.
+    """
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return []
+    if not _looks_like_mxl(data):
+        return []
+    text = data.decode("utf-8", errors="ignore")
+    values = [
+        match.group(1).replace('""', '"').strip()
+        for match in re.finditer(r'\{"#","((?:""|[^\"])*)"\}', text, re.S)
+    ]
+    if not values:
+        return []
+    header_idx = -1
+    for index in range(len(values) - 5):
+        header_window = [value.casefold() for value in values[index : index + 6]]
+        if header_window[:5] == [
+            "идентификатор объекта метаданных",
+            "имя",
+            "синоним",
+            "полное имя",
+            "полный синоним",
+        ]:
+            header_idx = index
+            break
+    if header_idx < 0:
+        return []
+
+    technical_types = (
+        "БизнесПроцесс",
+        "Документ",
+        "ЖурналДокументов",
+        "Задача",
+        "Константа",
+        "Обработка",
+        "Отчет",
+        "ПланВидовРасчета",
+        "ПланВидовХарактеристик",
+        "ПланОбмена",
+        "ПланСчетов",
+        "РегистрБухгалтерии",
+        "РегистрНакопления",
+        "РегистрСведений",
+        "Справочник",
+        "Роль",
+        "Подсистема",
+    )
+    technical_type_pattern = "|".join(re.escape(item) for item in technical_types)
+    full_name_re = re.compile(
+        r"^\??\s*(?:" + technical_type_pattern + r")"
+        r"\.[A-Za-zА-Яа-яЁё_][\wА-Яа-яЁё]*"
+        r"(?:\.[A-Za-zА-Яа-яЁё_][\wА-Яа-яЁё]*)*"
+        r"(?:\s+\([0-9a-fA-F-]{36}\))?$"
+    )
+
+    def normalize_mxl_full_name(value: str) -> str:
+        candidate = value.strip()
+        if not full_name_re.match(candidate) or re.search(r"\.\s", candidate):
+            return ""
+        return re.sub(r"\s+\([0-9a-fA-F-]{36}\)$", "", candidate).strip()
+
+    rows: list[dict[str, str]] = []
+    index = header_idx + 6
+    while index + 5 < len(values):
+        no_data = values[index + 5].strip()
+        if no_data.casefold() not in {"да", "нет"}:
+            index += 1
+            continue
+        raw_full_name = values[index + 3].strip()
+        full_name = normalize_mxl_full_name(raw_full_name)
+        if not full_name and raw_full_name and "." not in raw_full_name and not raw_full_name.startswith("?"):
+            # Universal report also contains section/group rows such as
+            # `Справочники`, `Документы`, `Роли`.  The XLSX path keeps them as
+            # <unknown> rows, so preserve them for parity; metadata-object
+            # filtering later still excludes roles/subsystems by full name.
+            full_name = raw_full_name
+        if full_name:
+            rows.append({
+                "Идентификатор объекта метаданных": values[index].strip(),
+                "Имя": values[index + 1].strip(),
+                "Синоним": values[index + 2].strip(),
+                "Полное имя": full_name,
+                "Полный синоним": values[index + 4].strip(),
+                "Без данных": no_data,
+            })
+            index += 6
+            if index < len(values) and values[index].strip().isdigit():
+                index += 1
+            continue
+        index += 1
+    return rows
 
 def _metadata_catalog_rows_from_tabular_cells(cells: list[list[Any]]) -> list[dict[str, str]]:
     if not cells:
