@@ -521,6 +521,94 @@ def test_metadata_catalog_rows_from_xlsx(tmp_path):
         "Полный синоним": "Справочник. Номенклатура",
     }]
 
+
+def test_metadata_catalog_rows_from_mxl(tmp_path):
+    from mcp_1c.server import _metadata_catalog_rows_from_mxl
+
+    mxl = tmp_path / "metadata.mxl"
+    mxl.write_bytes(
+        b"MOXCEL\x00\x08\x00\x01\x00\x0c\x00"
+        + """
+{16,3,
+{1,1,
+{"#","Идентификатор объекта метаданных"}
+},0},1,
+{16,3,
+{1,1,
+{"#","Имя"}
+},0},1,
+{16,3,
+{1,1,
+{"#","Синоним"}
+},0},1,
+{16,3,
+{1,1,
+{"#","Полное имя"}
+},0},7,0,2,0,
+{16,3,
+{1,1,
+{"#","Полный синоним"}
+},0},7,0,2,0,
+{16,3,
+{1,1,
+{"#","Без данных"}
+},0},7,0,2,0,
+{20,4,
+{"#",3031edd8-c3df-47b2-98ca-47f628d4ec18,
+{2}
+},
+{1,1,
+{"#","Номенклатура (Справочник)"}
+},0},1,
+{20,4,
+{"#",3031edd8-c3df-47b2-98ca-47f628d4ec18,
+{2}
+},
+{1,1,
+{"#","Номенклатура"}
+},0},1,
+{20,4,
+{"#",3031edd8-c3df-47b2-98ca-47f628d4ec18,
+{2}
+},
+{1,1,
+{"#","Номенклатура"}
+},0},1,
+{20,5,
+{"#",3031edd8-c3df-47b2-98ca-47f628d4ec18,
+{3}
+},
+{1,1,
+{"#","Справочник.Номенклатура"}
+},0},8,0,2,0,
+{20,5,
+{"#",3031edd8-c3df-47b2-98ca-47f628d4ec18,
+{3}
+},
+{1,1,
+{"#","Справочник. Номенклатура"}
+},0},8,0,2,0,
+{20,5,
+{"#",3031edd8-c3df-47b2-98ca-47f628d4ec18,
+{3}
+},
+{1,1,
+{"#","Нет"}
+},0},8,0,2,0,
+""".encode()
+    )
+
+    rows = _metadata_catalog_rows_from_mxl(mxl)
+
+    assert rows == [{
+        "Идентификатор объекта метаданных": "Номенклатура (Справочник)",
+        "Имя": "Номенклатура",
+        "Синоним": "Номенклатура",
+        "Полное имя": "Справочник.Номенклатура",
+        "Полный синоним": "Справочник. Номенклатура",
+        "Без данных": "Нет",
+    }]
+
 def test_metadata_catalog_rows_from_tabular_cells_without_headers():
     rows = _metadata_catalog_rows_from_tabular_cells([
         ["? Константа.Test"],
@@ -1057,6 +1145,7 @@ def test_tabular_document_save_filter_order_uses_likely_format_index_first():
     from mcp_1c.server import _tabular_document_save_filter_order
 
     assert _tabular_document_save_filter_order("xlsx", max_filter_index=5) == [1, 2, 3, 4, 5]
+    assert _tabular_document_save_filter_order("mxl", max_filter_index=5) == [1, 2, 3, 4, 5]
     assert _tabular_document_save_filter_order("pdf", max_filter_index=5) == [2, 1, 3, 4, 5]
     assert _tabular_document_save_filter_order("html", max_filter_index=5) == [4, 1, 2, 3, 5]
     assert _tabular_document_save_filter_order("unknown", max_filter_index=3) == [1, 2, 3]
@@ -1786,20 +1875,23 @@ def test_metadata_universal_report_primary_path_skips_settings_ui(monkeypatch):
             return {"pressed": True}
         assert method == "tabular_document_save"
         assert params["name"] == "ОтчетТабличныйДокумент"
-        assert params["format"] == "xlsx"
+        assert params["format"] == "mxl"
         assert params["exact_filter_only"] is True
-        assert timeout == 180
+        assert timeout == 120
         assert danger == "metadata_objects_universal_report_file_save_may_block_thin_client"
         return {"files": [{"path": params["path"]}]}
 
     def fake_select_saved_file(result, format):
-        assert format == "xlsx"
-        assert result["files"][0]["path"].endswith(".xlsx")
+        assert format == "mxl"
+        assert result["files"][0]["path"].endswith(".mxl")
         return {"saved": True, "selected": {"path": result["files"][0]["path"]}}
 
-    def fake_rows_from_xlsx(path):
-        assert str(path).endswith(".xlsx")
+    def fake_rows_from_mxl(path):
+        assert str(path).endswith(".mxl")
         return [{"Полное имя": "Справочник.Номенклатура", "Синоним": "Номенклатура"}]
+
+    def fake_rows_from_xlsx(path):
+        raise AssertionError("primary metadata path must prefer MXL before XLSX fallback")
 
     async def fail_chunks(*args, **kwargs):
         raise AssertionError("primary metadata path must save XLSX, not read UI chunks")
@@ -1809,6 +1901,7 @@ def test_metadata_universal_report_primary_path_skips_settings_ui(monkeypatch):
     monkeypatch.setattr(server, "_select_saved_tabular_document_file", fake_select_saved_file)
     monkeypatch.setattr(server, "_configure_universal_report_metadata_settings", fail_configure)
     monkeypatch.setattr(server, "_wait_tabular_document_ready", fake_ready)
+    monkeypatch.setattr(server, "_metadata_catalog_rows_from_mxl", fake_rows_from_mxl)
     monkeypatch.setattr(server, "_metadata_catalog_rows_from_xlsx", fake_rows_from_xlsx)
     monkeypatch.setattr(server, "_metadata_rows_from_tabular_document_chunks", fail_chunks)
 
@@ -1821,7 +1914,61 @@ def test_metadata_universal_report_primary_path_skips_settings_ui(monkeypatch):
     assert not any(method == "set_field_value" for method, *_rest in calls)
     assert not any(method == "active_window" for method, *_rest in calls)
     assert ("click_button", {"name": "СформироватьОтчет"}, 180, "metadata_objects_universal_report_form_may_block_thin_client") in calls
+    assert any(call[0] == "tabular_document_save" and call[1].get("format") == "mxl" for call in calls)
+    assert any("MXL became parseable" in warning for warning in warnings)
     assert not any(call[0] == "click_button" and call[1].get("name") == "ВсеНастройки" for call in calls)
+
+
+def test_metadata_universal_report_falls_back_to_xlsx_when_mxl_has_no_rows(monkeypatch):
+    from mcp_1c import server
+
+    save_formats = []
+
+    async def fake_bridge_call(session_id, method, params, *, timeout=None):
+        assert session_id == "unit"
+        if method == "open_navigation_link":
+            return {"opened": True, "client_diagnostics": {"has_dialog": False}}
+        if method in {"field_info", "set_field_value", "active_window"}:
+            raise AssertionError(f"primary metadata path must not call {method}")
+        return {"ok": True}
+
+    async def fake_ready(session_id, name, *, timeout_seconds=75.0, interval_seconds=3.0):
+        assert session_id == "unit"
+        assert name == "ОтчетТабличныйДокумент"
+        return True, [], {"rows": 6202, "columns": 9}
+
+    async def fake_dangerous_bridge_call(session_id, method, params, *, timeout, danger):
+        assert session_id == "unit"
+        if method == "click_button":
+            return {"pressed": True}
+        assert method == "tabular_document_save"
+        assert danger == "metadata_objects_universal_report_file_save_may_block_thin_client"
+        save_formats.append(params["format"])
+        return {"files": [{"path": params["path"]}]}
+
+    def fake_select_saved_file(result, format):
+        return {"saved": True, "selected": {"path": result["files"][0]["path"]}}
+
+    def fake_rows_from_mxl(path):
+        assert str(path).endswith(".mxl")
+        return []
+
+    def fake_rows_from_xlsx(path):
+        assert str(path).endswith(".xlsx")
+        return [{"Полное имя": "Справочник.Номенклатура", "Синоним": "Номенклатура"}]
+
+    monkeypatch.setattr(server, "_bridge_call_recorded", fake_bridge_call)
+    monkeypatch.setattr(server, "_dangerous_bridge_call_recorded", fake_dangerous_bridge_call)
+    monkeypatch.setattr(server, "_select_saved_tabular_document_file", fake_select_saved_file)
+    monkeypatch.setattr(server, "_wait_tabular_document_ready", fake_ready)
+    monkeypatch.setattr(server, "_metadata_catalog_rows_from_mxl", fake_rows_from_mxl)
+    monkeypatch.setattr(server, "_metadata_catalog_rows_from_xlsx", fake_rows_from_xlsx)
+
+    rows, warnings = asyncio.run(server._metadata_rows_from_universal_report("unit", 10))
+
+    assert rows == [{"Полное имя": "Справочник.Номенклатура", "Синоним": "Номенклатура"}]
+    assert save_formats == ["mxl", "xlsx"]
+    assert any("XLSX became parseable" in warning for warning in warnings)
 
 
 def test_metadata_universal_report_quick_settings_try_labels_in_order(monkeypatch):
