@@ -6155,7 +6155,7 @@ def _metadata_catalog_rows_from_mxl(path: Path) -> list[dict[str, str]]:
     text = data.decode("utf-8", errors="ignore")
     values = [
         match.group(1).replace('""', '"').strip()
-        for match in re.finditer(r'\{"#","((?:""|[^\"])*)"\}', text, re.S)
+        for match in re.finditer(r'\{"#","((?:""|[^\"])*)"\}', text, re.DOTALL)
     ]
     if not values:
         return []
