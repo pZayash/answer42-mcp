@@ -107,6 +107,74 @@ def test_set_field_value_suggests_creating_missing_reference_values():
     assert "создайте элемент справочника/вида/единицы" in module
 
 
+def test_set_field_value_closes_missing_dropdown_variant_before_fallbacks():
+    module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
+    setter = _bsl_function_body(module, "УстановитьЗначениеПоля")
+
+    assert "ЗакрытьВыпадающийСписокПоляИАктуализироватьMCP" in module
+    assert "Это не доказывает, что" in setter
+    assert "web-клиент 8.5 может зависнуть" in setter
+    assert "настоящий элемент формы" in module
+    assert "ЗакрытьВсеВыпадающиеСпискиMCP" in module
+    assert "Предыдущий неудачный ввод мог оставить открытые dropdown-ы" in setter
+    assert setter.index("ЗакрытьВсеВыпадающиеСпискиMCP(АктивноеОкно);") < setter.index("Поле = НайтиОбъектРекурсивно")
+    assert setter.index("ЗакрытьВсеВыпадающиеСпискиMCP(ТестируемоеПриложение.ПолучитьАктивноеОкно())") < setter.index('ВызватьИсключение "Не удалось установить поле ')
+    explicit_open = setter[setter.index("ЗаголовокОкнаДоВыбора"):setter.index("// Последние fallback-варианты")]
+    cleanup_call = "Поле = ЗакрытьВыпадающийСписокПоляИАктуализироватьMCP(Поле, ИмяПоля, ЗаголовокПоля);"
+    assert cleanup_call in explicit_open
+    assert "Поле.ВыполнитьВыборИзСпискаВыбора(Значение);" not in explicit_open
+    assert explicit_open.index("ИндексВыбора = Неопределено") < explicit_open.index(cleanup_call)
+    assert setter.index(cleanup_call) < setter.index("Поле.Значение = Значение")
+    assert "оставить фокус на временном редакторе" in setter
+    assert setter.index("Поле.Активизировать();") < setter.index("Поле.ВвестиТекст(Значение);")
+    assert "СписокВыбораПроверенИЗначениеНеНайдено" in setter
+    assert "Если Не СписокВыбораПроверенИЗначениеНеНайдено Тогда" in setter
+    assert "Fallback-и выбора из списка пропущены" in setter
+    assert setter.index("СписокВыбораПроверенИЗначениеНеНайдено = Истина") < setter.index("Если Не СписокВыбораПроверенИЗначениеНеНайдено Тогда")
+    assert "retry_after_exception" in setter
+    assert "НайтиОбъектРекурсивно(АктивноеОкноПослеОшибкиВвода, ИмяПоля, ЗаголовокПоля, \"\", 0)" in setter
+    assert "ФормаПоля.ПерейтиКСледующемуЭлементу()" in module
+    assert "ВосстановитьПолеПослеНеудачногоВводаMCP" in module
+    assert "У ТестируемоеПолеФормы нет отдельного метода ОтменитьРедактирование" in module
+    assert "Поле.ВвестиТекст(ПредставлениеВосстановления);" in module
+    assert "восстановление редактора" in setter
+    assert setter.index("РезультатВосстановленияРедактора = ВосстановитьПолеПослеНеудачногоВводаMCP") < setter.index("Fallback-и выбора из списка пропущены")
+
+
+
+def test_set_field_value_restores_previous_editor_value_after_missing_dropdown():
+    module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
+    setter = _bsl_function_body(module, "УстановитьЗначениеПоля")
+    restore = _bsl_function_body(module, "ВосстановитьПолеПослеНеудачногоВводаMCP")
+
+    assert "ВосстановитьПолеПослеНеудачногоВводаMCP" in module
+    assert "У ТестируемоеПолеФормы нет отдельного метода ОтменитьРедактирование" in restore
+    assert "ПредставлениеВосстановления = Строка(ПредставлениеДоВвода);" in restore
+    assert "Поле.ВвестиТекст(ПредставлениеВосстановления);" in restore
+    assert "Поле.ЗакрытьВыпадающийСписок();" in restore
+    assert "ФормаПоля.ПерейтиКСледующемуЭлементу();" in restore
+    assert 'НайтиОбъектРекурсивно(АктивноеОкноПослеВосстановления, ИмяПоля, ЗаголовокПоля, "", 0)' in restore
+    assert 'Результат.Вставить("diagnostic"' in restore
+    assert "внешние клавиши" in restore
+
+    assert "ТекущееПредставлениеДоВвода = ПредставлениеДанныхПоля(Поле);" in setter
+    assert "ПолеПослеВосстановленияРедактора = Неопределено;" in setter
+    first_missing = setter.index("СписокВыбораПроверенИЗначениеНеНайдено = Истина")
+    restore_call = setter.index("ВосстановитьПолеПослеНеудачногоВводаMCP(Поле, ИмяПоля, ЗаголовокПоля, ТекущееПредставлениеДоВвода)")
+    skip_list_fallbacks = setter.index("Fallback-и выбора из списка пропущены")
+    assert first_missing < restore_call < skip_list_fallbacks
+    assert "восстановление редактора" in setter
+
+
+def test_set_field_value_has_no_new_python_x11_editor_reset():
+    server = Path("src/mcp_1c/server.py").read_text(encoding="utf-8")
+
+    assert "needs_x11_editor_reset" not in server
+    assert "_x11_reset_test_client_editor" not in server
+    assert "ONEC_MCP_DISABLE_X11_EDITOR_RESET" not in server
+    assert 'xdotool", "key' not in server
+
+
 def test_table_set_field_suggests_missing_reference_when_value_not_confirmed():
     module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
 
