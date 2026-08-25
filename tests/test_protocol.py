@@ -644,9 +644,11 @@ def test_manager_find_object_has_fast_path_and_search_stats():
     module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
 
     assert "НайтиОбъектБыстроMCP" in module
+    assert "ТипТестируемогоОбъектаMCP" in module
     assert "fast_platform_search" in module
     assert "dfs_fallback" in module
     assert "search_stats" in module
+    assert "ПустаяСтрока(Имя) И ПустаяСтрока(Заголовок) И ПустаяСтрока(ТипОбъектаСтрокой)" in module
     assert "НайтиОбъектРекурсивно(АктивноеОкно, Имя, Заголовок, ТипОбъекта, 0, СчетчикУзлов, КешПоиска)" in module
     assert "СтрНайти(НормализованныйЗаголовок, НРег(ИскомыйЗаголовокСтрокой))" in module
 
@@ -655,9 +657,13 @@ def test_manager_search_objects_serializes_matches_shallow_by_default():
     module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
 
     assert 'ВключатьДетей = СвойствоСтруктуры(Параметры, "include_children", Ложь)' in module
+    assert "НайтиВсеОбъектыБыстроMCP" in module
+    assert "РодительскийОбъект.НайтиОбъекты(ТипОбъекта, Заголовок, Имя, 0)" in module
+    assert "fast_platform_search_objects" in module
     assert "ОбъектВСтруктуру(РодительскийОбъект, 0, Истина, Истина, Истина, Ложь, КешПоиска, Истина, ВключатьДетей)" in module
     assert "ПостФильтрНайденныхОбъектовMCP" in module
     assert "СтрНайти(ЗаголовокОбъекта, ИскомыйЗаголовокСтрокой)" in module
+    assert "СтрНайти(ТипОбъекта, ИскомыйТипНорм)" in module
 
 
 def test_ui_tree_current_page_is_shallow_and_command_panels_can_be_disabled():
