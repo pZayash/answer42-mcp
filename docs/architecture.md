@@ -220,3 +220,25 @@ machine-readable code and remediation message for the agent.
 | `ONEC_MCP_RAG_SOURCE_PREFIX` | Prefix for auto-discovered source names | пусто |
 | `ONEC_MCP_RAG_SOURCE_MAX_DEPTH` | Discovery depth for RAG source dirs | `4` |
 | `DISPLAY` | X11 display | `:99` |
+
+
+## `ui_tree` output profiles
+
+`ui_tree` is intended for UI structure diagnostics, not bulk data extraction.
+The default `profile="navigation"` returns visible UI structure with compact fields,
+`include_data=false`, `include_rag_types=false`, and command panels excluded. The tree
+has no depth limit. Use targeted tools such as `field_value_text`, `table_rows`,
+`tabular_document_text`, or `tabular_document_save` when values/report data are
+needed.
+
+Supported presentation controls:
+
+- `profile="navigation"` — lightweight default for navigating forms.
+- `profile="diagnostic"` — includes command panels and diagnostic state, without data.
+- `profile="data"` — includes data presentations; use sparingly on large forms.
+- `profile="full"` — closest to the historical verbose behavior, including RAG when available.
+- `profile="command_panels"` or `command_panels="only"` — returns command-panel nodes as a flat list.
+- `include_command_panels` / `command_panels` — explicitly include, exclude, or return only command panels.
+- `name`, `title`, `type` — filter nodes; active filters return a flat `objects` list.
+- `group_mode="include|flatten|exclude"` — controls whether group nodes are returned as regular nodes.
+- `format="json|outline|yaml|yml"` — JSON remains the structured default; outline/YAML are readable text views wrapped in a structured result.
