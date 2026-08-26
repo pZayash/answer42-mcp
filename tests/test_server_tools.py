@@ -641,8 +641,8 @@ def test_ui_tree_summary_reports_truncation_and_hidden_children():
                 "visible": True,
                 "hidden_children_count": 5,
                 "children": [
-                    {"truncated": True, "truncated_reason": "max_depth", "type": "ТестируемаяКнопкаФормы", "name": "Button1", "title": "Кнопка"},
-                    {"truncated": True, "truncated_reason": "max_depth", "type": "ТестируемоеПолеФормы", "name": "Field1", "title": "Поле"},
+                    {"truncated": True, "truncated_reason": "node_limit", "type": "ТестируемаяКнопкаФормы", "name": "Button1", "title": "Кнопка"},
+                    {"truncated": True, "truncated_reason": "node_limit", "type": "ТестируемоеПолеФормы", "name": "Field1", "title": "Поле"},
                 ],
             },
             {
@@ -1265,6 +1265,106 @@ def test_compact_ui_node_keeps_actionable_fields_and_omits_noise():
     compact = _compact_ui_node(node)
 
     assert compact == {"type": "button", "name": "Ok", "title": "OK", "children": [{"type": "field", "name": "F", "value": "42"}]}
+
+
+def test_ui_tree_tool_schema_defaults_and_new_arguments():
+    tools = _tools_by_name()
+    props = tools["ui_tree"].input_schema["properties"]
+
+    assert props["include_data"]["default"] is False
+    assert props["include_rag_types"]["default"] is False
+    assert props["profile"]["default"] == "navigation"
+    assert props["format"]["default"] == "json"
+    assert props["command_panels"]["default"] == "auto"
+    assert props["group_mode"]["default"] == "include"
+    assert props["name"]["default"] == ""
+    assert props["type"]["default"] == ""
+    assert props["title"]["default"] == ""
+    assert "max_depth" not in props
+
+
+def test_ui_tree_filtering_and_presentations():
+    from mcp_1c.server import _flat_ui_nodes, _outline_ui_tree, _to_simple_yaml, _transform_ui_groups
+
+    tree = {
+        "type": "Тестируемая форма",
+        "name": "",
+        "title": "Форма",
+        "visible": True,
+        "available": True,
+        "children": [
+            {
+                "type": "Тестируемая группа формы",
+                "name": "Группа",
+                "title": "Группа",
+                "visible": True,
+                "available": True,
+                "children": [
+                    {"type": "Тестируемая таблица формы", "name": "Товары", "title": "Товары", "visible": True, "available": True},
+                    {"type": "Тестируемая кнопка формы", "name": "ФормаЗаписать", "title": "Записать", "visible": True, "available": True},
+                ],
+            }
+        ],
+    }
+
+    assert [node["name"] for node in _flat_ui_nodes(tree, type="Тестируемая таблица формы")] == ["Товары"]
+    assert [node["name"] for node in _flat_ui_nodes(tree, name="Товары")] == ["Товары"]
+    assert [node["name"] for node in _flat_ui_nodes(tree, title="вар") ] == ["Товары"]
+    flattened = _transform_ui_groups(tree, "flatten")
+    assert flattened["children"][0]["name"] == "Товары"
+    outline = _outline_ui_tree(flattened)
+    assert "Тестируемая таблица формы Товары" in outline
+    yaml_text = _to_simple_yaml({"objects": _flat_ui_nodes(tree, name="Товары")})
+    assert "objects:" in yaml_text
+    assert "name: Товары" in yaml_text
+
+
+def test_ui_tree_default_params_and_filtered_flat_result(monkeypatch):
+    from mcp_1c.server import ui_tree
+
+    calls = []
+
+    async def fake_bridge_call(session_id, method, params):
+        calls.append((session_id, method, params))
+        return {
+            "type": "Тестируемое окно клиентского приложения",
+            "title": "Окно",
+            "visible": True,
+            "available": True,
+            "children": [
+                {"type": "Тестируемая форма", "title": "Форма", "visible": True, "available": True, "children": [
+                    {"type": "Тестируемая таблица формы", "name": "Товары", "title": "Товары", "visible": True, "available": True},
+                    {"type": "Тестируемая группа формы", "name": "Группа", "title": "Группа", "visible": True, "available": True},
+                ]}
+            ],
+        }
+
+    monkeypatch.setattr("mcp_1c.server._bridge_call_recorded", fake_bridge_call)
+
+    result = asyncio.run(ui_tree(name="Товары", session_id="unit"))
+
+    assert calls == [("unit", "ui_tree", {"include_hidden": False, "include_data": False, "include_command_panels": False})]
+    assert result["found"] is True
+    assert result["count"] == 1
+    assert result["objects"] == [{"type": "Тестируемая таблица формы", "name": "Товары", "title": "Товары", "visible": True, "available": True}]
+    assert result["filter"] == {"name": "Товары", "title": "", "type": ""}
+
+
+def test_ui_tree_profile_full_enables_expensive_options(monkeypatch):
+    from mcp_1c.server import ui_tree
+
+    calls = []
+
+    async def fake_bridge_call(session_id, method, params):
+        calls.append(params)
+        return {"type": "Тестируемое окно клиентского приложения", "children": []}
+
+    monkeypatch.setattr("mcp_1c.server._bridge_call_recorded", fake_bridge_call)
+
+    result = asyncio.run(ui_tree(profile="full", include_rag_types=False, session_id="unit"))
+
+    assert calls == [{"include_hidden": False, "include_data": True, "include_command_panels": True}]
+    assert result["type"] == "Тестируемое окно клиентского приложения"
 
 
 def test_redact_value_masks_secrets():
