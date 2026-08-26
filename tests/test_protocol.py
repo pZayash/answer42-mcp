@@ -678,6 +678,10 @@ def test_ui_tree_current_page_is_shallow_and_command_panels_can_be_disabled():
     assert 'ПлоскийРежим = БулевоИзЗначенияMCP(СвойствоСтруктуры(Параметры, "flat", Ложь), Ложь)' in module
     assert 'ПлоскоеДеревоИнтерфейсаMCP' in module
     assert 'НайтиУзлыДереваИнтерфейсаПлоскоMCP' in module
+    assert 'НайтиУзлыДереваИнтерфейсаБыстроMCP' in module
+    assert 'Метод = "fast_platform_search_objects"' in module
+    assert 'СвойствоСтруктуры(Параметры, "limit"' not in _bsl_function_body(module, "ДеревоИнтерфейса")
+    assert 'СвойствоСтруктуры(Параметры, "limit"' not in _bsl_function_body(module, "ПлоскоеДеревоИнтерфейсаMCP")
     assert 'Результат.Вставить("current_page_name", ИмяТекущейСтраницы)' in module
     assert "КешСериализации, ВключатьДанные, Ложь, СчетчикУзлов, Ложь" in module
     assert "Если ВключатьКомандныеПанели И (ТипОбъекта" in module

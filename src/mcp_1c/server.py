@@ -1529,6 +1529,60 @@ def _compact_ui_node(node: Any) -> Any:
     return result
 
 
+_UI_TREE_FIELD_PRESETS: dict[str, set[str] | None] = {
+    "auto": None,
+    "full": None,
+    "minimal": {"type", "name", "title"},
+    "navigation": {
+        "type", "name", "title", "visible", "available", "read_only", "enabled", "main", "home", "current", "selected",
+    },
+    "diagnostic": {
+        "type", "name", "title", "form_name", "navigation_url", "visible", "available", "read_only", "enabled",
+        "main", "home", "current", "selected", "data_path", "current_page_name", "current_page", "pages",
+        "hidden_children_count", "_tree_ms", "_nodes_serialized", "_nodes_visited", "metrics", "flat", "source",
+    },
+    "data": {
+        "type", "name", "title", "form_name", "navigation_url", "text", "value", "presentation", "data",
+        "visible", "available", "read_only", "enabled", "current", "selected", "data_path", "current_page_name",
+        "current_page", "pages", "hidden_children_count", "rag_type", "rag", "metrics", "flat",
+    },
+}
+
+
+def _ui_tree_field_names(fields: str, profile: str) -> set[str] | None:
+    raw = (fields or "auto").strip().lower()
+    if not raw or raw == "auto":
+        raw = "full" if profile == "full" else "diagnostic" if profile == "diagnostic" else "data" if profile == "data" else "navigation"
+    if raw in _UI_TREE_FIELD_PRESETS:
+        return _UI_TREE_FIELD_PRESETS[raw]
+    if "," in raw:
+        parsed = {item.strip() for item in fields.split(",") if item.strip()}
+        if parsed:
+            parsed.add("children")
+            return parsed
+    allowed = ", ".join(sorted(_UI_TREE_FIELD_PRESETS)) + ", or a comma-separated field list"
+    raise ValueError(f"Unsupported ui_tree fields: {fields!r}. Expected one of: {allowed}.")
+
+
+def _apply_ui_fields(value: Any, allowed: set[str] | None) -> Any:
+    if allowed is None:
+        return value
+    if isinstance(value, list):
+        return [_apply_ui_fields(item, allowed) for item in value]
+    if not isinstance(value, dict):
+        return value
+    always = {
+        "children", "objects", "filter", "tree_summary", "profile", "fields", "command_panels", "parent_name",
+        "found", "count", "reason", "format", "text", "yaml", "metrics", "flat", "rag_diagnostic",
+        "method", "supports", "warnings",
+    }
+    result: dict[str, Any] = {}
+    for key, item in value.items():
+        if key in always or key in allowed:
+            result[key] = _apply_ui_fields(item, allowed) if key in {"children", "objects", "current_page", "pages"} else item
+    return result
+
+
 def _ui_node_type_key(value: Any) -> str:
     return re.sub(r"\s+", "", str(value or "").casefold())
 
@@ -4716,7 +4770,7 @@ async def ui_tree(
     type: Annotated[str, "Optional UI object type filter. When name, title or type filter is set, ui_tree returns a flat matches list"] = "",
     name: Annotated[str, "Optional exact technical name filter. When name, title or type filter is set, ui_tree returns a flat matches list"] = "",
     title: Annotated[str, "Optional title substring filter. When name, title or type filter is set, ui_tree returns a flat matches list"] = "",
-    limit: Annotated[int, "Maximum number of matched objects returned for flat filtered output or command_panels=only"] = 200,
+    fields: Annotated[str, "Field-set profile: auto, minimal, navigation, diagnostic, data, full, or comma-separated field names"] = "auto",
     group_mode: Annotated[str, "Group handling mode: include, flatten, flatten_layout, exclude, exclude_empty, or pages_only"] = "include",
     format: Annotated[str, "Response format: json (structured), outline (readable text outline), yaml/yml (readable YAML text)"] = "json",
     rag_snapshot: Annotated[str, "Optional RAG snapshot name/id used for type enrichment"] = "",
@@ -4729,6 +4783,8 @@ async def ui_tree(
     presentations, no RAG enrichment, and command panels excluded unless requested.
     The tree has no depth limit. Use `include_hidden=true` for hidden pages/elements.
     Pass `parent_name` to serialize only the subtree rooted at a specific form element.
+    Use `fields=minimal|navigation|diagnostic|data|full` (or a comma-separated
+    field list) to control returned node fields without changing traversal.
 
     `include_data=true` may call 1C `ПолучитьПредставлениеДанных()` for many nodes;
     do not enable it casually on large forms. Prefer targeted tools for data:
@@ -4744,7 +4800,7 @@ async def ui_tree(
     command_mode = _validate_ui_tree_choice("command_panels", command_panels, _UI_TREE_COMMAND_PANEL_MODES)
     group_mode_key = _validate_ui_tree_choice("group_mode", group_mode, _UI_TREE_GROUP_MODES)
     fmt = _validate_ui_tree_choice("format", format, _UI_TREE_FORMATS)
-    limit = max(1, min(int(limit or 200), 10000))
+    field_names = _ui_tree_field_names(fields, profile_key)
     if profile_key in {"full", "diagnostic", "data"}:
         profile_include_command_panels = True
     elif profile_key == "command_panels":
@@ -4776,9 +4832,9 @@ async def ui_tree(
     if parent_name:
         bridge_params["parent_name"] = parent_name
     if filtered:
-        bridge_params.update({"flat": True, "name": name, "title": title, "type": type, "limit": limit})
+        bridge_params.update({"flat": True, "name": name, "title": title, "type": type})
     elif command_mode == "only":
-        bridge_params.update({"flat": True, "name": "", "title": "", "type": "", "command_panels_only": True, "limit": limit})
+        bridge_params.update({"flat": True, "name": "", "title": "", "type": "", "command_panels_only": True})
     bridge_start = time.monotonic()
     tree = await _bridge_call_recorded(session_id, "ui_tree", bridge_params)
     bridge_ms = (time.monotonic() - bridge_start) * 1000
@@ -4806,10 +4862,12 @@ async def ui_tree(
         python_transform_ms = (time.monotonic() - transform_start) * 1000
         if fmt == "outline":
             response = {"format": "outline", "text": "", "tree_summary": tree.get("tree_summary"), "profile": profile_key, "parent_name": parent_name, "found": False, "reason": "parent_not_found"}
+            response = _apply_ui_fields(response, field_names)
             return _attach_ui_tree_metrics(response, _ui_tree_metrics(tree, bridge_ms=bridge_ms, python_transform_ms=python_transform_ms, result=response))
         if fmt == "yaml":
             response = {"format": "yaml", "yaml": _to_simple_yaml(tree), "tree_summary": tree.get("tree_summary"), "profile": profile_key, "parent_name": parent_name}
             return _attach_ui_tree_metrics(response, _ui_tree_metrics(tree, bridge_ms=bridge_ms, python_transform_ms=python_transform_ms, result=response))
+        tree = _apply_ui_fields(tree, field_names)
         return _attach_ui_tree_metrics(tree, _ui_tree_metrics(tree, bridge_ms=bridge_ms, python_transform_ms=python_transform_ms, result=tree))
 
     summary = tree.get("tree_summary") if isinstance(tree, dict) else None
@@ -4819,7 +4877,6 @@ async def ui_tree(
             objects = [obj for obj in tree["objects"] if isinstance(obj, dict)]
         else:
             objects = _flat_ui_nodes(tree, name=name, title=title, type=type)
-        objects = objects[:limit]
         if _compact_enabled(compact):
             objects = [_compact_ui_node(obj) for obj in objects]
         result: Any = {
@@ -4829,16 +4886,19 @@ async def ui_tree(
             "filter": {"name": name, "title": title, "type": type},
             "tree_summary": summary,
             "profile": profile_key,
+            "fields": fields,
             "command_panels": "only" if command_mode == "only" else ("include" if include_command_panels_effective else "exclude"),
             "flat": True,
         }
+        if isinstance(tree, dict) and tree.get("method"):
+            result["method"] = tree["method"]
         if parent_name:
             result["parent_name"] = parent_name
     elif command_mode == "only":
         if isinstance(tree, dict) and isinstance(tree.get("objects"), list):
-            objects = _dedupe_ui_nodes([obj for obj in tree["objects"] if isinstance(obj, dict)])[:limit]
+            objects = _dedupe_ui_nodes([obj for obj in tree["objects"] if isinstance(obj, dict)])
         else:
-            objects = _dedupe_ui_nodes(_collect_command_panel_nodes(tree))[:limit]
+            objects = _dedupe_ui_nodes(_collect_command_panel_nodes(tree))
         if _compact_enabled(compact):
             objects = [_compact_ui_node(obj) for obj in objects]
         result = {
@@ -4847,8 +4907,11 @@ async def ui_tree(
             "objects": objects,
             "tree_summary": summary,
             "profile": profile_key,
+            "fields": fields,
             "command_panels": "only",
         }
+        if isinstance(tree, dict) and tree.get("method"):
+            result["method"] = tree["method"]
         if parent_name:
             result["parent_name"] = parent_name
     else:
@@ -4867,18 +4930,19 @@ async def ui_tree(
                 compact_tree["rag_diagnostic"] = tree["rag_diagnostic"]
             result = compact_tree
 
+    result = _apply_ui_fields(result, field_names)
     python_transform_ms = (time.monotonic() - transform_start) * 1000
     if fmt == "outline":
         format_start = time.monotonic()
         text = _outline_ui_nodes(result.get("objects", [])) if isinstance(result, dict) and "objects" in result else _outline_ui_tree(result)
-        response = {"format": "outline", "text": text, "tree_summary": summary, "profile": profile_key}
+        response = {"format": "outline", "text": text, "tree_summary": summary, "profile": profile_key, "fields": fields}
         if parent_name:
             response["parent_name"] = parent_name
         metrics = _ui_tree_metrics(tree, bridge_ms=bridge_ms, python_transform_ms=python_transform_ms, format_ms=(time.monotonic() - format_start) * 1000, result=response)
         return _attach_ui_tree_metrics(response, metrics)
     if fmt == "yaml":
         format_start = time.monotonic()
-        response = {"format": "yaml", "yaml": _to_simple_yaml(result), "tree_summary": summary, "profile": profile_key}
+        response = {"format": "yaml", "yaml": _to_simple_yaml(result), "tree_summary": summary, "profile": profile_key, "fields": fields}
         if parent_name:
             response["parent_name"] = parent_name
         metrics = _ui_tree_metrics(tree, bridge_ms=bridge_ms, python_transform_ms=python_transform_ms, format_ms=(time.monotonic() - format_start) * 1000, result=response)
