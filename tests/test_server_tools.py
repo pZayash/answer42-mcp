@@ -1288,9 +1288,9 @@ def test_ui_tree_tool_schema_defaults_and_new_arguments():
 
 def test_ui_tree_filtering_and_presentations():
     from mcp_1c.server import (
+        _apply_ui_fields,
         _dedupe_ui_nodes,
         _flat_ui_nodes,
-        _apply_ui_fields,
         _outline_ui_tree,
         _to_simple_yaml,
         _transform_ui_groups,
