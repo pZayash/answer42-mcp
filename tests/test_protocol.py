@@ -650,6 +650,7 @@ def test_manager_find_object_has_fast_path_and_search_stats():
     assert "search_stats" in module
     assert "ПустаяСтрока(Имя) И ПустаяСтрока(Заголовок) И ПустаяСтрока(ТипОбъектаСтрокой)" in module
     assert "НайтиОбъектРекурсивно(АктивноеОкно, Имя, Заголовок, ТипОбъекта, 0, СчетчикУзлов, КешПоиска)" in module
+    assert "Кандидат = РодительскийОбъект.НайтиОбъект(ТипОбъекта, ПараметрЗаголовок, ПараметрИмя, 0)" in module
     assert "СтрНайти(НормализованныйЗаголовок, НРег(ИскомыйЗаголовокСтрокой))" in module
 
 
@@ -658,7 +659,8 @@ def test_manager_search_objects_serializes_matches_shallow_by_default():
 
     assert 'ВключатьДетей = СвойствоСтруктуры(Параметры, "include_children", Ложь)' in module
     assert "НайтиВсеОбъектыБыстроMCP" in module
-    assert "РодительскийОбъект.НайтиОбъекты(ТипОбъекта, Заголовок, Имя, 0)" in module
+    assert "ПараметрПоискаТестируемогоОбъектаMCP" in module
+    assert "Кандидаты = РодительскийОбъект.НайтиОбъекты(ТипОбъекта, ПараметрЗаголовок, ПараметрИмя, 0)" in module
     assert "fast_platform_search_objects" in module
     assert "ОбъектВСтруктуру(РодительскийОбъект, 0, Истина, Истина, Истина, Ложь, КешПоиска, Истина, ВключатьДетей)" in module
     assert "ПостФильтрНайденныхОбъектовMCP" in module
