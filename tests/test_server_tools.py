@@ -1280,6 +1280,7 @@ def test_ui_tree_tool_schema_defaults_and_new_arguments():
     assert props["name"]["default"] == ""
     assert props["type"]["default"] == ""
     assert props["title"]["default"] == ""
+    assert props["parent_name"]["default"] == ""
     assert "max_depth" not in props
 
 
@@ -1353,6 +1354,53 @@ def test_ui_tree_default_params_and_filtered_flat_result(monkeypatch):
     assert result["count"] == 1
     assert result["objects"] == [{"type": "Тестируемая таблица формы", "name": "Товары", "title": "Товары", "visible": True, "available": True}]
     assert result["filter"] == {"name": "Товары", "title": "", "type": ""}
+
+
+def test_ui_tree_parent_name_is_passed_to_bridge(monkeypatch):
+    from mcp_1c.server import ui_tree
+
+    calls = []
+
+    async def fake_bridge_call(session_id, method, params):
+        calls.append((session_id, method, params))
+        return {
+            "type": "Тестируемая группа формы",
+            "name": "Родитель",
+            "title": "Родитель",
+            "visible": True,
+            "available": True,
+            "root_parent_name": "Родитель",
+            "children": [
+                {"type": "Тестируемая кнопка формы", "name": "Кнопка", "title": "Кнопка", "visible": True, "available": True}
+            ],
+        }
+
+    monkeypatch.setattr("mcp_1c.server._bridge_call_recorded", fake_bridge_call)
+
+    result = asyncio.run(ui_tree(parent_name="Родитель", format="outline", session_id="unit"))
+
+    assert calls == [(
+        "unit",
+        "ui_tree",
+        {"include_hidden": False, "include_data": False, "include_command_panels": False, "parent_name": "Родитель"},
+    )]
+    assert result["parent_name"] == "Родитель"
+    assert "Тестируемая кнопка формы Кнопка" in result["text"]
+
+
+def test_ui_tree_parent_not_found_result(monkeypatch):
+    from mcp_1c.server import ui_tree
+
+    async def fake_bridge_call(session_id, method, params):
+        return {"found": False, "reason": "parent_not_found", "parent_name": "НетТакого"}
+
+    monkeypatch.setattr("mcp_1c.server._bridge_call_recorded", fake_bridge_call)
+
+    result = asyncio.run(ui_tree(parent_name="НетТакого", session_id="unit"))
+
+    assert result["found"] is False
+    assert result["reason"] == "parent_not_found"
+    assert result["parent_name"] == "НетТакого"
 
 
 def test_ui_tree_profile_full_enables_expensive_options(monkeypatch):

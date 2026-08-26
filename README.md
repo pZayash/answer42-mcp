@@ -56,6 +56,7 @@ start_session(
 
 Useful modes:
 
+- `ui_tree(parent_name=...)` serializes only the subtree under a known parent element, useful for large/complex forms.
 - `ui_tree(name=.../title=.../type=...)` returns a flat `objects` list instead of a nested tree.
 - `profile="diagnostic"` includes command panels without enabling expensive data reads.
 - `profile="data"` enables node data presentations; prefer targeted `field_value_text`, `table_rows`, `tabular_document_text`, or `tabular_document_save` unless you really need data for many nodes.
