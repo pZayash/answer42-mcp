@@ -1281,7 +1281,8 @@ def test_ui_tree_tool_schema_defaults_and_new_arguments():
     assert props["type"]["default"] == ""
     assert props["title"]["default"] == ""
     assert props["parent_name"]["default"] == ""
-    assert props["limit"]["default"] == 200
+    assert props["fields"]["default"] == "auto"
+    assert "limit" not in props
     assert "max_depth" not in props
 
 
@@ -1289,9 +1290,11 @@ def test_ui_tree_filtering_and_presentations():
     from mcp_1c.server import (
         _dedupe_ui_nodes,
         _flat_ui_nodes,
+        _apply_ui_fields,
         _outline_ui_tree,
         _to_simple_yaml,
         _transform_ui_groups,
+        _ui_tree_field_names,
         _validate_ui_tree_choice,
     )
 
@@ -1324,6 +1327,8 @@ def test_ui_tree_filtering_and_presentations():
     assert _transform_ui_groups({"type": "Тестируемая группа формы", "name": "ГруппаПустая", "children": []}, "exclude_empty") is None
     assert _dedupe_ui_nodes([{"type": "Тестируемая командная панель", "name": "Панель"}, {"type": "Тестируемая командная панель", "name": "Панель"}]) == [{"type": "Тестируемая командная панель", "name": "Панель"}]
     assert _validate_ui_tree_choice("format", "yml", {"json", "yaml", "yml"}) == "yaml"
+    assert _ui_tree_field_names("minimal", "navigation") == {"type", "name", "title"}
+    assert _apply_ui_fields({"type": "T", "name": "N", "data": "D", "children": []}, {"type", "name"}) == {"type": "T", "name": "N", "children": []}
     outline = _outline_ui_tree(flattened)
     assert "Тестируемая таблица формы Товары" in outline
     yaml_text = _to_simple_yaml({"objects": _flat_ui_nodes(tree, name="Товары")})
@@ -1339,28 +1344,28 @@ def test_ui_tree_default_params_and_filtered_flat_result(monkeypatch):
     async def fake_bridge_call(session_id, method, params):
         calls.append((session_id, method, params))
         return {
-            "type": "Тестируемое окно клиентского приложения",
-            "title": "Окно",
-            "visible": True,
-            "available": True,
-            "children": [
-                {"type": "Тестируемая форма", "title": "Форма", "visible": True, "available": True, "children": [
-                    {"type": "Тестируемая таблица формы", "name": "Товары", "title": "Товары", "visible": True, "available": True},
-                    {"type": "Тестируемая группа формы", "name": "Группа", "title": "Группа", "visible": True, "available": True},
-                ]}
-            ],
+            "found": True,
+            "count": 1,
+            "objects": [{"type": "Тестируемая таблица формы", "name": "Товары", "title": "Товары", "visible": True, "available": True}],
+            "filter": {"name": "Товары", "title": "", "type": ""},
+            "flat": True,
+            "method": "fast_platform_search_objects",
+            "_tree_ms": 12,
+            "_nodes_serialized": 1,
+            "_nodes_visited": 0,
         }
 
     monkeypatch.setattr("mcp_1c.server._bridge_call_recorded", fake_bridge_call)
 
-    result = asyncio.run(ui_tree(name="Товары", session_id="unit"))
+    result = asyncio.run(ui_tree(name="Товары", fields="minimal", session_id="unit"))
 
-    assert calls == [("unit", "ui_tree", {"include_hidden": False, "include_data": False, "include_command_panels": False, "flat": True, "name": "Товары", "title": "", "type": "", "limit": 200})]
+    assert calls == [("unit", "ui_tree", {"include_hidden": False, "include_data": False, "include_command_panels": False, "flat": True, "name": "Товары", "title": "", "type": ""})]
     assert result["found"] is True
     assert result["count"] == 1
-    assert result["objects"] == [{"type": "Тестируемая таблица формы", "name": "Товары", "title": "Товары", "visible": True, "available": True}]
+    assert result["objects"] == [{"type": "Тестируемая таблица формы", "name": "Товары", "title": "Товары"}]
     assert result["filter"] == {"name": "Товары", "title": "", "type": ""}
     assert result["flat"] is True
+    assert result["method"] == "fast_platform_search_objects"
     assert result["metrics"]["objects_count"] == 1
     assert result["metrics"]["json_bytes"] > 0
 

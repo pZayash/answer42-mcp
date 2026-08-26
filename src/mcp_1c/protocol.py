@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-MANAGER_PROTOCOL_VERSION = "2026.08.26.1"
+MANAGER_PROTOCOL_VERSION = "2026.08.26.2"
 
 
 @dataclass(slots=True)
