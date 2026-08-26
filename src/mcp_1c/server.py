@@ -1545,6 +1545,15 @@ def _flat_ui_nodes(tree: Any, *, name: str = "", title: str = "", type: str = ""
     return result
 
 
+def _find_ui_node_by_name(tree: Any, parent_name: str) -> dict[str, Any] | None:
+    if not parent_name:
+        return tree if isinstance(tree, dict) else None
+    for node in _walk_ui_tree(tree):
+        if _norm_key(node.get("name")) == _norm_key(parent_name):
+            return node
+    return None
+
+
 def _is_group_node(node: dict[str, Any]) -> bool:
     return "тестируемаягруппа" in _ui_node_type_key(node.get("type"))
 
@@ -4586,6 +4595,7 @@ async def ui_tree(
     include_command_panels: Annotated[bool | None, "Include command-panel subtrees; overrides profile/command_panels when specified"] = None,
     command_panels: Annotated[str, "Command-panel mode: auto/profile default, include/full, exclude/without, or only"] = "auto",
     profile: Annotated[str, "Output profile: navigation (default), diagnostic, data, full, no_command_panels, or command_panels"] = "navigation",
+    parent_name: Annotated[str, "Optional exact technical name of a UI node to use as the tree root; children are serialized only under this parent"] = "",
     type: Annotated[str, "Optional UI object type filter. When name, title or type filter is set, ui_tree returns a flat matches list"] = "",
     name: Annotated[str, "Optional exact technical name filter. When name, title or type filter is set, ui_tree returns a flat matches list"] = "",
     title: Annotated[str, "Optional title substring filter. When name, title or type filter is set, ui_tree returns a flat matches list"] = "",
@@ -4600,6 +4610,7 @@ async def ui_tree(
     Default profile is `navigation`: visible elements, compact fields, no data
     presentations, no RAG enrichment, and command panels excluded unless requested.
     The tree has no depth limit. Use `include_hidden=true` for hidden pages/elements.
+    Pass `parent_name` to serialize only the subtree rooted at a specific form element.
 
     `include_data=true` may call 1C `ПолучитьПредставлениеДанных()` for many nodes;
     do not enable it casually on large forms. Prefer targeted tools for data:
@@ -4635,11 +4646,21 @@ async def ui_tree(
     elif command_mode == "only":
         include_command_panels_effective = True
 
-    tree = await _bridge_call_recorded(session_id, "ui_tree", {
+    bridge_params = {
         "include_hidden": include_hidden,
         "include_data": include_data,
         "include_command_panels": include_command_panels_effective,
-    })
+    }
+    if parent_name:
+        bridge_params["parent_name"] = parent_name
+    tree = await _bridge_call_recorded(session_id, "ui_tree", bridge_params)
+    if parent_name and isinstance(tree, dict) and tree.get("reason") != "parent_not_found" and tree.get("root_parent_name") != parent_name:
+        parent_node = _find_ui_node_by_name(tree, parent_name)
+        if parent_node is None:
+            tree = {"found": False, "parent_name": parent_name, "reason": "parent_not_found"}
+        else:
+            tree = parent_node
+            tree["root_parent_name"] = parent_name
     if isinstance(tree, dict):
         tree["tree_summary"] = _summarize_ui_tree(tree, include_hidden=include_hidden)
     if include_rag_types:
@@ -4650,6 +4671,17 @@ async def ui_tree(
                 tree["rag_diagnostic"] = _rag_diagnostic(session_id, rag_snapshot)
         elif isinstance(tree, dict):
             tree["rag_diagnostic"] = _rag_diagnostic(session_id, rag_snapshot)
+
+    if parent_name and isinstance(tree, dict) and tree.get("found") is False and tree.get("reason") == "parent_not_found":
+        tree["tree_summary"] = _summarize_ui_tree(tree, include_hidden=include_hidden)
+        if fmt := (format or "json").strip().lower():
+            if fmt == "yml":
+                fmt = "yaml"
+            if fmt == "outline":
+                return {"format": "outline", "text": "", "tree_summary": tree.get("tree_summary"), "profile": profile_key, "parent_name": parent_name, "found": False, "reason": "parent_not_found"}
+            if fmt == "yaml":
+                return {"format": "yaml", "yaml": _to_simple_yaml(tree), "tree_summary": tree.get("tree_summary"), "profile": profile_key}
+        return tree
 
     summary = tree.get("tree_summary") if isinstance(tree, dict) else None
     filtered = bool(name or title or type)
@@ -4670,6 +4702,8 @@ async def ui_tree(
             "profile": profile_key,
             "command_panels": "only" if command_mode == "only" else ("include" if include_command_panels_effective else "exclude"),
         }
+        if parent_name:
+            result["parent_name"] = parent_name
     elif command_mode == "only":
         objects = _collect_command_panel_nodes(tree)
         if _compact_enabled(compact):
@@ -4682,6 +4716,8 @@ async def ui_tree(
             "profile": profile_key,
             "command_panels": "only",
         }
+        if parent_name:
+            result["parent_name"] = parent_name
     else:
         result = tree
         if not include_command_panels_effective:
@@ -4700,9 +4736,15 @@ async def ui_tree(
 
     if fmt == "outline":
         text = _outline_ui_nodes(result.get("objects", [])) if isinstance(result, dict) and "objects" in result else _outline_ui_tree(result)
-        return {"format": "outline", "text": text, "tree_summary": summary, "profile": profile_key}
+        response = {"format": "outline", "text": text, "tree_summary": summary, "profile": profile_key}
+        if parent_name:
+            response["parent_name"] = parent_name
+        return response
     if fmt == "yaml":
-        return {"format": "yaml", "yaml": _to_simple_yaml(result), "tree_summary": summary, "profile": profile_key}
+        response = {"format": "yaml", "yaml": _to_simple_yaml(result), "tree_summary": summary, "profile": profile_key}
+        if parent_name:
+            response["parent_name"] = parent_name
+        return response
     return result
 
 @mcp.tool()

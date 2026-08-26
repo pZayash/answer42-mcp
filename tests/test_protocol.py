@@ -672,6 +672,9 @@ def test_ui_tree_current_page_is_shallow_and_command_panels_can_be_disabled():
     module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
 
     assert 'ВключатьКомандныеПанели = СвойствоСтруктуры(Параметры, "include_command_panels", Ложь)' in module
+    assert 'ИмяРодителя = СвойствоСтруктуры(Параметры, "parent_name", "")' in module
+    assert 'КорневойОбъект = НайтиОбъектБыстроMCP(АктивноеОкно, ИмяРодителя, "", "", КешСериализации)' in module
+    assert 'Результат.Вставить("root_parent_name", ИмяРодителя)' in module
     assert 'Результат.Вставить("current_page_name", ИмяТекущейСтраницы)' in module
     assert "КешСериализации, ВключатьДанные, Ложь, СчетчикУзлов, Ложь" in module
     assert "Если ВключатьКомандныеПанели И (ТипОбъекта" in module

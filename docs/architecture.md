@@ -239,6 +239,7 @@ Supported presentation controls:
 - `profile="full"` — closest to the historical verbose behavior, including RAG when available.
 - `profile="command_panels"` or `command_panels="only"` — returns command-panel nodes as a flat list.
 - `include_command_panels` / `command_panels` — explicitly include, exclude, or return only command panels.
+- `parent_name` — serializes only the subtree rooted at a specific technical element name.
 - `name`, `title`, `type` — filter nodes; active filters return a flat `objects` list.
 - `group_mode="include|flatten|exclude"` — controls whether group nodes are returned as regular nodes.
 - `format="json|outline|yaml|yml"` — JSON remains the structured default; outline/YAML are readable text views wrapped in a structured result.
