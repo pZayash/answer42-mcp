@@ -237,9 +237,9 @@ Supported presentation controls:
 - `profile="diagnostic"` — includes command panels and diagnostic state, without data.
 - `profile="data"` — includes data presentations; use sparingly on large forms.
 - `profile="full"` — closest to the historical verbose behavior, including RAG when available.
-- `profile="command_panels"` or `command_panels="only"` — returns command-panel nodes as a flat list.
+- `profile="command_panels"` or `command_panels="only"` — returns command-panel nodes as a deduplicated flat list.
 - `include_command_panels` / `command_panels` — explicitly include, exclude, or return only command panels.
 - `parent_name` — serializes only the subtree rooted at a specific technical element name.
-- `name`, `title`, `type` — filter nodes; active filters return a flat `objects` list.
-- `group_mode="include|flatten|exclude"` — controls whether group nodes are returned as regular nodes.
-- `format="json|outline|yaml|yml"` — JSON remains the structured default; outline/YAML are readable text views wrapped in a structured result.
+- `name`, `title`, `type` — filter nodes; active filters return a flat `objects` list and are pushed to the 1C manager on current protocol versions.
+- `group_mode="include|flatten|flatten_layout|exclude|exclude_empty|pages_only"` — controls whether group nodes are returned as regular nodes, lifted, or omitted.
+- `format="json|outline|yaml|yml"` — JSON remains the structured default; outline/YAML are readable text views wrapped in a structured result. Mode arguments are strictly validated, and responses include `metrics` for timing/payload diagnostics.

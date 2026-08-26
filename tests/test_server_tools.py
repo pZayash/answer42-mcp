@@ -1281,15 +1281,18 @@ def test_ui_tree_tool_schema_defaults_and_new_arguments():
     assert props["type"]["default"] == ""
     assert props["title"]["default"] == ""
     assert props["parent_name"]["default"] == ""
+    assert props["limit"]["default"] == 200
     assert "max_depth" not in props
 
 
 def test_ui_tree_filtering_and_presentations():
     from mcp_1c.server import (
         _flat_ui_nodes,
+        _dedupe_ui_nodes,
         _outline_ui_tree,
         _to_simple_yaml,
         _transform_ui_groups,
+        _validate_ui_tree_choice,
     )
 
     tree = {
@@ -1318,6 +1321,9 @@ def test_ui_tree_filtering_and_presentations():
     assert [node["name"] for node in _flat_ui_nodes(tree, title="вар") ] == ["Товары"]
     flattened = _transform_ui_groups(tree, "flatten")
     assert flattened["children"][0]["name"] == "Товары"
+    assert _transform_ui_groups({"type": "Тестируемая группа формы", "name": "ГруппаПустая", "children": []}, "exclude_empty") is None
+    assert _dedupe_ui_nodes([{"type": "Тестируемая командная панель", "name": "Панель"}, {"type": "Тестируемая командная панель", "name": "Панель"}]) == [{"type": "Тестируемая командная панель", "name": "Панель"}]
+    assert _validate_ui_tree_choice("format", "yml", {"json", "yaml", "yml"}) == "yaml"
     outline = _outline_ui_tree(flattened)
     assert "Тестируемая таблица формы Товары" in outline
     yaml_text = _to_simple_yaml({"objects": _flat_ui_nodes(tree, name="Товары")})
@@ -1349,11 +1355,14 @@ def test_ui_tree_default_params_and_filtered_flat_result(monkeypatch):
 
     result = asyncio.run(ui_tree(name="Товары", session_id="unit"))
 
-    assert calls == [("unit", "ui_tree", {"include_hidden": False, "include_data": False, "include_command_panels": False})]
+    assert calls == [("unit", "ui_tree", {"include_hidden": False, "include_data": False, "include_command_panels": False, "flat": True, "name": "Товары", "title": "", "type": "", "limit": 200})]
     assert result["found"] is True
     assert result["count"] == 1
     assert result["objects"] == [{"type": "Тестируемая таблица формы", "name": "Товары", "title": "Товары", "visible": True, "available": True}]
     assert result["filter"] == {"name": "Товары", "title": "", "type": ""}
+    assert result["flat"] is True
+    assert result["metrics"]["objects_count"] == 1
+    assert result["metrics"]["json_bytes"] > 0
 
 
 def test_ui_tree_parent_name_is_passed_to_bridge(monkeypatch):
@@ -1418,6 +1427,25 @@ def test_ui_tree_profile_full_enables_expensive_options(monkeypatch):
 
     assert calls == [{"include_hidden": False, "include_data": True, "include_command_panels": True}]
     assert result["type"] == "Тестируемое окно клиентского приложения"
+    assert "metrics" in result
+
+
+def test_ui_tree_rejects_unknown_modes(monkeypatch):
+    from mcp_1c.server import ui_tree
+
+    async def fake_bridge_call(session_id, method, params):
+        raise AssertionError("bridge must not be called for invalid ui_tree choices")
+
+    monkeypatch.setattr("mcp_1c.server._bridge_call_recorded", fake_bridge_call)
+
+    with pytest.raises(ValueError, match="Unsupported ui_tree profile"):
+        asyncio.run(ui_tree(profile="wide", session_id="unit"))
+    with pytest.raises(ValueError, match="Unsupported ui_tree group_mode"):
+        asyncio.run(ui_tree(group_mode="hide_empty", session_id="unit"))
+    with pytest.raises(ValueError, match="Unsupported ui_tree command_panels"):
+        asyncio.run(ui_tree(command_panels="maybe", session_id="unit"))
+    with pytest.raises(ValueError, match="Unsupported ui_tree format"):
+        asyncio.run(ui_tree(format="xml", session_id="unit"))
 
 
 def test_redact_value_masks_secrets():

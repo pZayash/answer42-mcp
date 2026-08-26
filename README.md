@@ -57,13 +57,13 @@ start_session(
 Useful modes:
 
 - `ui_tree(parent_name=...)` serializes only the subtree under a known parent element, useful for large/complex forms.
-- `ui_tree(name=.../title=.../type=...)` returns a flat `objects` list instead of a nested tree.
+- `ui_tree(name=.../title=.../type=...)` returns a flat `objects` list instead of a nested tree; on current managers filtering is performed on the 1C side and respects `limit`.
 - `profile="diagnostic"` includes command panels without enabling expensive data reads.
 - `profile="data"` enables node data presentations; prefer targeted `field_value_text`, `table_rows`, `tabular_document_text`, or `tabular_document_save` unless you really need data for many nodes.
 - `profile="full"` gives the closest historical verbose result.
-- `command_panels="include|exclude|only"` controls command-panel serialization explicitly.
-- `group_mode="include|flatten|exclude"` controls whether group nodes are kept as separate nodes.
-- `format="json|outline|yaml|yml"` keeps JSON as the default structured result and offers readable text views for inspection.
+- `command_panels="include|exclude|only"` controls command-panel serialization explicitly; `only` returns a deduplicated flat list.
+- `group_mode="include|flatten|flatten_layout|exclude|exclude_empty|pages_only"` controls whether group nodes are kept, lifted, or omitted.
+- `format="json|outline|yaml|yml"` keeps JSON as the default structured result and offers readable text views for inspection. Invalid profile/group/command-panel/format values are rejected; every result includes `metrics` with timings and payload counters.
 
 ## Установка skills
 
