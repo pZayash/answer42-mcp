@@ -1496,21 +1496,192 @@ def _summarize_ui_tree(tree: Any, include_hidden: bool) -> dict[str, Any]:
     }
 
 
-def _compact_ui_node(node: Any, depth: int = 0, max_children: int = 30) -> Any:
+def _compact_ui_node(node: Any) -> Any:
     if not isinstance(node, dict):
         return node
     keep_keys = (
-        "type", "name", "title", "text", "value", "presentation", "visible", "available", "enabled", "read_only",
-        "current", "selected", "data_path", "rag_type", "rag", "hidden_children_count",
+        "type", "name", "title", "form_name", "navigation_url", "text", "value", "presentation", "data",
+        "visible", "available", "read_only", "current", "selected", "data_path", "rag_type", "rag", "hidden_children_count",
+        "current_page_name", "current_page", "pages", "_tree_ms", "_nodes_serialized",
     )
     result = {key: _copy_compact_object(node[key]) for key in keep_keys if key in node and node.get(key) not in (None, "", [], {})}
+    if node.get("enabled") is not None and node.get("enabled") != node.get("available"):
+        result["enabled"] = node.get("enabled")
+    for key in ("main", "home"):
+        if node.get(key) is True:
+            result[key] = True
     children = node.get("children") or []
     if isinstance(children, list) and children:
-        compact_children = [_compact_ui_node(child, depth + 1, max_children=max_children) for child in children[:max_children]]
-        result["children"] = compact_children
-        if len(children) > max_children:
-            result["children_omitted_count"] = len(children) - max_children
+        result["children"] = [_compact_ui_node(child) for child in children]
     return result
+
+
+def _ui_node_type_key(value: Any) -> str:
+    return re.sub(r"\s+", "", str(value or "").casefold())
+
+
+def _ui_node_matches_filters(node: dict[str, Any], *, name: str = "", title: str = "", type: str = "") -> bool:
+    if name and _norm_key(node.get("name")) != _norm_key(name):
+        return False
+    if title and _norm_key(title) not in _norm_key(node.get("title")):
+        return False
+    if type:
+        node_type = _ui_node_type_key(node.get("type"))
+        wanted = _ui_node_type_key(type)
+        if wanted not in node_type and node_type not in wanted:
+            return False
+    return True
+
+
+def _flat_ui_nodes(tree: Any, *, name: str = "", title: str = "", type: str = "") -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for node in _walk_ui_tree(tree):
+        if _ui_node_matches_filters(node, name=name, title=title, type=type):
+            flat = dict(node)
+            flat.pop("children", None)
+            flat.pop("current_page", None)
+            flat.pop("pages", None)
+            result.append(flat)
+    return result
+
+
+def _is_group_node(node: dict[str, Any]) -> bool:
+    return "тестируемаягруппа" in _ui_node_type_key(node.get("type"))
+
+
+def _is_command_panel_node(node: dict[str, Any]) -> bool:
+    haystack = " ".join(str(node.get(key) or "") for key in ("type", "name", "title"))
+    return "команднаяпанель" in _ui_node_type_key(haystack)
+
+
+def _transform_ui_groups(node: Any, group_mode: str) -> Any:
+    if not isinstance(node, dict):
+        return node
+    mode = (group_mode or "include").strip().lower()
+    if mode in {"", "include", "show"}:
+        return node
+    transformed_children: list[Any] = []
+    for child in node.get("children") or []:
+        transformed = _transform_ui_groups(child, group_mode)
+        if isinstance(transformed, list):
+            transformed_children.extend(transformed)
+        elif transformed is not None:
+            transformed_children.append(transformed)
+    current = dict(node)
+    current["children"] = transformed_children
+    if mode in {"flatten", "skip"} and _is_group_node(current):
+        return transformed_children
+    if mode in {"exclude", "hide"} and _is_group_node(current):
+        return None
+    return current
+
+
+def _collect_command_panel_nodes(node: Any, inside: bool = False) -> list[dict[str, Any]]:
+    if not isinstance(node, dict):
+        return []
+    current_inside = inside or _is_command_panel_node(node)
+    result: list[dict[str, Any]] = []
+    if current_inside:
+        copy = dict(node)
+        copy.pop("children", None)
+        result.append(copy)
+    for child in node.get("children") or []:
+        result.extend(_collect_command_panel_nodes(child, current_inside))
+    return result
+
+
+
+def _transform_command_panels(node: Any, mode: str) -> Any:
+    if not isinstance(node, dict):
+        return node
+    mode_key = (mode or "include").strip().lower()
+    if mode_key in {"", "include", "full", "with", "all", "auto"}:
+        return node
+    transformed_children: list[Any] = []
+    for child in node.get("children") or []:
+        transformed = _transform_command_panels(child, mode_key)
+        if isinstance(transformed, list):
+            transformed_children.extend(transformed)
+        elif transformed is not None:
+            transformed_children.append(transformed)
+    current = dict(node)
+    current["children"] = transformed_children
+    if _is_command_panel_node(current):
+        if mode_key in {"flatten", "skip"}:
+            return transformed_children
+        if mode_key in {"exclude", "without", "none", "off", "no"}:
+            return None
+    return current
+
+def _outline_ui_tree(node: Any, indent: int = 0) -> str:
+    if not isinstance(node, dict):
+        return ""
+    label_parts = [str(node.get("type") or "Object")]
+    if node.get("name"):
+        label_parts.append(str(node["name"]))
+    if node.get("title") and node.get("title") != node.get("name"):
+        label_parts.append(f"— {node['title']}")
+    flags = []
+    for key, mark in (("visible", "visible"), ("available", "available"), ("read_only", "read_only")):
+        if node.get(key) is True:
+            flags.append(mark)
+        elif node.get(key) is False and key in node:
+            flags.append(f"not_{mark}")
+    line = "  " * indent + "- " + " ".join(label_parts)
+    if flags:
+        line += " [" + ", ".join(flags) + "]"
+    lines = [line]
+    for child in node.get("children") or []:
+        child_text = _outline_ui_tree(child, indent + 1)
+        if child_text:
+            lines.append(child_text)
+    return "\n".join(lines)
+
+
+def _outline_ui_nodes(nodes: list[dict[str, Any]]) -> str:
+    return "\n".join(_outline_ui_tree(node, 0) for node in nodes)
+
+
+def _yaml_scalar(value: Any) -> str:
+    if value is True:
+        return "true"
+    if value is False:
+        return "false"
+    if value is None:
+        return "null"
+    if isinstance(value, (int, float)):
+        return str(value)
+    text = str(value)
+    if "\n" in text:
+        return "|\n" + "\n".join("  " + line for line in text.splitlines())
+    if text == "" or any(ch in text for ch in ":#{}[],&*?!|-<>=%@`\"'") or text.strip() != text:
+        return json.dumps(text, ensure_ascii=False)
+    return text
+
+
+def _to_simple_yaml(value: Any, indent: int = 0) -> str:
+    prefix = "  " * indent
+    if isinstance(value, dict):
+        lines: list[str] = []
+        for key, item in value.items():
+            if isinstance(item, (dict, list)):
+                lines.append(f"{prefix}{key}:")
+                lines.append(_to_simple_yaml(item, indent + 1))
+            else:
+                lines.append(f"{prefix}{key}: {_yaml_scalar(item)}")
+        return "\n".join(lines)
+    if isinstance(value, list):
+        if not value:
+            return prefix + "[]"
+        lines = []
+        for item in value:
+            if isinstance(item, (dict, list)):
+                lines.append(f"{prefix}-")
+                lines.append(_to_simple_yaml(item, indent + 1))
+            else:
+                lines.append(f"{prefix}- {_yaml_scalar(item)}")
+        return "\n".join(lines)
+    return prefix + _yaml_scalar(value)
 
 
 def _compact_rows_result(result: Any, *, include_raw: bool = False) -> Any:
@@ -4408,27 +4579,66 @@ async def decoration_click(name: Annotated[str, "Decoration technical name"] = "
 
 @mcp.tool()
 async def ui_tree(
-    include_rag_types: Annotated[bool, "Enrich UI elements with best-effort types from the local RAG index"] = True,
-    include_hidden: Annotated[bool, "Include invisible form elements; visible/available flags are always returned"] = False,
-    compact: Annotated[bool | None, "Return compact tree fields; default follows ONEC_MCP_RESULT_VERBOSITY"] = None,
-    include_data: Annotated[bool, "Include potentially expensive data presentations from UI nodes"] = True,
+    include_rag_types: Annotated[bool, "Enrich UI elements with best-effort types from the local RAG index; disabled by default because it may add lookup cost and verbose metadata"] = False,
+    include_hidden: Annotated[bool, "Include invisible form elements/pages; visible/available/read_only flags are returned for serialized nodes"] = False,
+    compact: Annotated[bool | None, "Return compact node fields; default follows ONEC_MCP_RESULT_VERBOSITY"] = None,
+    include_data: Annotated[bool, "Include data presentations from UI nodes; expensive on large forms, prefer field_value_text/table_rows/tabular_document_text for values"] = False,
+    include_command_panels: Annotated[bool | None, "Include command-panel subtrees; overrides profile/command_panels when specified"] = None,
+    command_panels: Annotated[str, "Command-panel mode: auto/profile default, include/full, exclude/without, or only"] = "auto",
+    profile: Annotated[str, "Output profile: navigation (default), diagnostic, data, full, no_command_panels, or command_panels"] = "navigation",
+    type: Annotated[str, "Optional UI object type filter. When name, title or type filter is set, ui_tree returns a flat matches list"] = "",
+    name: Annotated[str, "Optional exact technical name filter. When name, title or type filter is set, ui_tree returns a flat matches list"] = "",
+    title: Annotated[str, "Optional title substring filter. When name, title or type filter is set, ui_tree returns a flat matches list"] = "",
+    group_mode: Annotated[str, "Group handling mode for tree output: include (default), flatten (lift children of groups), or exclude"] = "include",
+    format: Annotated[str, "Response format: json (structured), outline (readable text outline), yaml/yml (readable YAML text)"] = "json",
     rag_snapshot: Annotated[str, "Optional RAG snapshot name/id used for type enrichment"] = "",
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
-    """Return a serialized tree of the active window/forms/elements.
+    """Return a serialized snapshot of the active 1C UI tree.
 
-    By default the 1C side serializes the full visible/active form tree without
-    depth or node limits. Use include_hidden=true to inspect hidden pages/elements.
-    For huge forms, set include_data=false to skip expensive
-    ПолучитьПредставлениеДанных() calls.
-    When RAG data is available, each matching element gets `rag_type` and `rag`
-    fields with metadata-derived type/source information. Runtime 1C UI data is
-    returned unchanged when the RAG index has no match.
+    Default profile is `navigation`: visible elements, compact fields, no data
+    presentations, no RAG enrichment, and command panels excluded unless requested.
+    The tree has no depth limit. Use `include_hidden=true` for hidden pages/elements.
+
+    `include_data=true` may call 1C `ПолучитьПредставлениеДанных()` for many nodes;
+    do not enable it casually on large forms. Prefer targeted tools for data:
+    `field_value_text` for one field, `table_rows` for tables/dynamic lists, and
+    `tabular_document_text`/`tabular_document_save` for reports/tabular documents.
+
+    When `name`, `title` or `type` filter is set, the result is a flat `objects` list instead
+    of a nested tree. For finding one control, prefer `search_objects`/`find_object`.
+    `format=outline` and `format=yaml|yml` return readable text representations
+    inside a structured tool result; JSON remains the default machine-readable form.
     """
+    profile_key = (profile or "navigation").strip().lower()
+    command_mode = (command_panels or "auto").strip().lower()
+    if profile_key in {"full", "diagnostic", "data"}:
+        profile_include_command_panels = True
+    elif profile_key in {"command_panels", "command-panel", "commands"}:
+        profile_include_command_panels = True
+        command_mode = "only" if command_mode in {"", "auto"} else command_mode
+    else:
+        profile_include_command_panels = False
+    if profile_key in {"data", "full"} and include_data is False:
+        include_data = True
+    if compact is None:
+        compact = profile_key != "full"
+    if include_command_panels is None:
+        include_command_panels_effective = profile_include_command_panels
+    else:
+        include_command_panels_effective = bool(include_command_panels)
+    if command_mode in {"include", "full", "with", "all"}:
+        include_command_panels_effective = True
+    elif command_mode in {"exclude", "without", "none", "off", "no"}:
+        include_command_panels_effective = False
+    elif command_mode == "only":
+        include_command_panels_effective = True
+
     tree = await _bridge_call_recorded(session_id, "ui_tree", {
         "include_hidden": include_hidden,
         "include_data": include_data,
+        "include_command_panels": include_command_panels_effective,
     })
     if isinstance(tree, dict):
         tree["tree_summary"] = _summarize_ui_tree(tree, include_hidden=include_hidden)
@@ -4440,16 +4650,60 @@ async def ui_tree(
                 tree["rag_diagnostic"] = _rag_diagnostic(session_id, rag_snapshot)
         elif isinstance(tree, dict):
             tree["rag_diagnostic"] = _rag_diagnostic(session_id, rag_snapshot)
-    if _compact_enabled(compact) and isinstance(tree, dict):
-        summary = tree.get("tree_summary")
-        compact_tree = _compact_ui_node(tree)
-        if summary:
-            compact_tree["tree_summary"] = summary
-        if tree.get("rag_diagnostic"):
-            compact_tree["rag_diagnostic"] = tree["rag_diagnostic"]
-        return compact_tree
-    return tree
 
+    summary = tree.get("tree_summary") if isinstance(tree, dict) else None
+    filtered = bool(name or title or type)
+    fmt = (format or "json").strip().lower()
+    if fmt == "yml":
+        fmt = "yaml"
+
+    if filtered:
+        objects = _flat_ui_nodes(tree, name=name, title=title, type=type)
+        if _compact_enabled(compact):
+            objects = [_compact_ui_node(obj) for obj in objects]
+        result: Any = {
+            "found": bool(objects),
+            "count": len(objects),
+            "objects": objects,
+            "filter": {"name": name, "title": title, "type": type},
+            "tree_summary": summary,
+            "profile": profile_key,
+            "command_panels": "only" if command_mode == "only" else ("include" if include_command_panels_effective else "exclude"),
+        }
+    elif command_mode == "only":
+        objects = _collect_command_panel_nodes(tree)
+        if _compact_enabled(compact):
+            objects = [_compact_ui_node(obj) for obj in objects]
+        result = {
+            "found": bool(objects),
+            "count": len(objects),
+            "objects": objects,
+            "tree_summary": summary,
+            "profile": profile_key,
+            "command_panels": "only",
+        }
+    else:
+        result = tree
+        if not include_command_panels_effective:
+            result = _transform_command_panels(result, "exclude")
+        transformed = _transform_ui_groups(result, group_mode)
+        if transformed is None:
+            transformed = {"type": "filtered_out", "tree_summary": summary}
+        result = transformed
+        if _compact_enabled(compact) and isinstance(result, dict):
+            compact_tree = _compact_ui_node(result)
+            if summary:
+                compact_tree["tree_summary"] = summary
+            if isinstance(tree, dict) and tree.get("rag_diagnostic"):
+                compact_tree["rag_diagnostic"] = tree["rag_diagnostic"]
+            result = compact_tree
+
+    if fmt == "outline":
+        text = _outline_ui_nodes(result.get("objects", [])) if isinstance(result, dict) and "objects" in result else _outline_ui_tree(result)
+        return {"format": "outline", "text": text, "tree_summary": summary, "profile": profile_key}
+    if fmt == "yaml":
+        return {"format": "yaml", "yaml": _to_simple_yaml(result), "tree_summary": summary, "profile": profile_key}
+    return result
 
 @mcp.tool()
 async def command_bar(*,

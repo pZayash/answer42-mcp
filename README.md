@@ -50,6 +50,20 @@ start_session(
 
 Логин/пароль рекомендуется **не передавать явно**: `start_session` умеет брать их из локального credentials-файла по `base_url`. Параметры `username`/`password` остаются в API для разовых сценариев и обратной совместимости, но при передаче в MCP-вызове они видны вызывающему агенту в аргументах tool-call.
 
+## `ui_tree` profiles and output formats
+
+`ui_tree` is optimized for form-structure diagnostics. The default `profile="navigation"` returns a compact visible UI tree without data presentations, RAG enrichment, or command-panel subtrees. The tree is not depth-limited.
+
+Useful modes:
+
+- `ui_tree(name=.../title=.../type=...)` returns a flat `objects` list instead of a nested tree.
+- `profile="diagnostic"` includes command panels without enabling expensive data reads.
+- `profile="data"` enables node data presentations; prefer targeted `field_value_text`, `table_rows`, `tabular_document_text`, or `tabular_document_save` unless you really need data for many nodes.
+- `profile="full"` gives the closest historical verbose result.
+- `command_panels="include|exclude|only"` controls command-panel serialization explicitly.
+- `group_mode="include|flatten|exclude"` controls whether group nodes are kept as separate nodes.
+- `format="json|outline|yaml|yml"` keeps JSON as the default structured result and offers readable text views for inspection.
+
 ## Установка skills
 
 PyPI-пакет не записывает agent skills в пользовательские каталоги автоматически. После установки Answer42 поставьте bundled skills отдельной командой:
