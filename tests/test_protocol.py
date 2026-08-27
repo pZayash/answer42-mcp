@@ -107,6 +107,36 @@ def test_set_field_value_suggests_creating_missing_reference_values():
     assert "создайте элемент справочника/вида/единицы" in module
 
 
+def test_dropdown_create_variants_are_opt_in_for_field_input():
+    module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
+    selector = _bsl_function_body(module, "ИндексРелевантногоВариантаСпискаВыбораMCP")
+    setter = _bsl_function_body(module, "УстановитьЗначениеПоля")
+
+    assert "Функция ЭтоВариантСозданияСпискаВыбораMCP" in module
+    assert 'СтрНайти(ТекстНРег, "создать:") = 1' in module
+    assert "СоздатьЕслиОтсутствует = Ложь" in selector
+    assert "ЭтоВариантСозданияСпискаВыбораMCP(Представление) И Не СоздатьЕслиОтсутствует" in selector
+    assert "Продолжить;" in selector
+    assert 'СвойствоСтруктуры(Параметры, "create_if_missing", Ложь)' in setter
+    assert "ИндексРелевантногоВариантаСпискаВыбораMCP(Представления, Значение, СоздатьЕслиОтсутствует)" in setter
+    assert "creation_window_opened" in setter
+
+
+def test_dropdown_create_variants_are_opt_in_for_table_input():
+    module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
+    table_setter = _bsl_function_body(module, "УстановитьПолеТаблицыMCP")
+    editor = _bsl_function_body(module, "ВвестиТекстВРедакторТаблицыMCP")
+    row_values = _bsl_function_body(module, "УстановитьЗначенияСтрокиТаблицыMCP")
+
+    assert 'СвойствоСтруктуры(Параметры, "create_if_missing", Ложь)' in table_setter
+    assert "ВвестиТекстВРедакторТаблицыMCP(Таблица, Поле, ИмяПоля, Значение, СоздатьЕслиОтсутствует)" in table_setter
+    assert "СоздатьЕслиОтсутствует = Ложь" in editor
+    assert "ИндексРелевантногоВариантаСпискаВыбораMCP(Представления, Значение, СоздатьЕслиОтсутствует)" in editor
+    assert "creation_window_opened" in table_setter
+    assert "ДобавитьДиагностикуМодальногоОкнаЕслиОткрылосьMCP" in editor
+    assert "table,field,value,search_by_title,create_if_missing" in row_values
+
+
 def test_set_field_value_closes_missing_dropdown_variant_before_fallbacks():
     module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
     setter = _bsl_function_body(module, "УстановитьЗначениеПоля")
@@ -119,10 +149,12 @@ def test_set_field_value_closes_missing_dropdown_variant_before_fallbacks():
     assert "Предыдущий неудачный ввод мог оставить открытые dropdown-ы" in setter
     assert setter.index("ЗакрытьВсеВыпадающиеСпискиMCP(АктивноеОкно);") < setter.index("Поле = НайтиОбъектРекурсивно")
     assert setter.index("ЗакрытьВсеВыпадающиеСпискиMCP(ТестируемоеПриложение.ПолучитьАктивноеОкно())") < setter.index('ВызватьИсключение "Не удалось установить поле ')
-    explicit_open = setter[setter.index("ЗаголовокОкнаДоВыбора"):setter.index("// Последние fallback-варианты")]
+    explicit_open = setter[setter.index("// Поля со стандартным выпадающим списком."):setter.index("// Последние fallback-варианты")]
     cleanup_call = "Поле = ЗакрытьВыпадающийСписокПоляИАктуализироватьMCP(Поле, ИмяПоля, ЗаголовокПоля);"
     assert cleanup_call in explicit_open
-    assert "Поле.ВыполнитьВыборИзСпискаВыбора(Значение);" not in explicit_open
+    assert "Прямой ВыполнитьВыборИзСпискаВыбора пропущен: create_if_missing=false" in explicit_open
+    assert explicit_open.index("Если СоздатьЕслиОтсутствует Тогда") < explicit_open.index("Поле.ВыполнитьВыборИзСпискаВыбора(Значение);")
+    assert "ИндексРелевантногоВариантаСпискаВыбораMCP(Представления, Значение, СоздатьЕслиОтсутствует)" in explicit_open
     assert explicit_open.index("ИндексВыбора = Неопределено") < explicit_open.index(cleanup_call)
     assert setter.index(cleanup_call) < setter.index("Поле.Значение = Значение")
     assert "оставить фокус на временном редакторе" in setter

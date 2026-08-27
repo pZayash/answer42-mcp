@@ -6164,11 +6164,17 @@ async def set_field_value(
     field_name: Annotated[str, "Field technical name or title"],
     value: Annotated[str, "Value to set"],
     search_by_title: Annotated[bool, "If true, match visible title instead of object name"] = False,
+    create_if_missing: Annotated[bool, "Allow choosing dropdown items like 'Create: ...' for missing reference values"] = False,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
     """Set a value in a form field by name or title."""
-    return await _bridge_call_recorded(session_id, "set_field_value", {"field_name": field_name, "value": value, "search_by_title": search_by_title})
+    return await _bridge_call_recorded(session_id, "set_field_value", {
+        "field_name": field_name,
+        "value": value,
+        "search_by_title": search_by_title,
+        "create_if_missing": create_if_missing,
+    })
 
 
 @mcp.tool()
@@ -7899,6 +7905,7 @@ async def table_set_field(
     field: Annotated[str, "Column field technical name or title"],
     value: Annotated[str, "Value to set"],
     search_by_title: Annotated[bool, "If true, match visible title instead of object name"] = False,
+    create_if_missing: Annotated[bool, "Allow choosing dropdown items like 'Create: ...' for missing reference values"] = False,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
@@ -7907,7 +7914,13 @@ async def table_set_field(
     Finds the editor field for the column (e.g. ТоварыНоменклатура), activates it,
     delegates to the general set_field_value logic, ends row editing, and verifies
     the value in the current table row."""
-    return await _bridge_call_recorded(session_id, "table_set_field", {"table": table, "field": field, "value": value, "search_by_title": search_by_title})
+    return await _bridge_call_recorded(session_id, "table_set_field", {
+        "table": table,
+        "field": field,
+        "value": value,
+        "search_by_title": search_by_title,
+        "create_if_missing": create_if_missing,
+    })
 
 
 @mcp.tool()
@@ -7915,22 +7928,33 @@ async def table_set_row_values(
     table: Annotated[str, "Table technical name"],
     values: Annotated[str, "JSON object mapping column names/titles to values"],
     search_by_title: Annotated[bool, "If true, match visible title instead of object name"] = False,
+    create_if_missing: Annotated[bool, "Allow choosing dropdown items like 'Create: ...' for missing reference values"] = False,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
     """Set multiple fields in the current row of a form table and verify each value."""
-    return await _bridge_call_recorded(session_id, "table_set_row_values", {"table": table, "values": values, "search_by_title": search_by_title})
+    return await _bridge_call_recorded(session_id, "table_set_row_values", {
+        "table": table,
+        "values": values,
+        "search_by_title": search_by_title,
+        "create_if_missing": create_if_missing,
+    })
 
 
 @mcp.tool()
 async def set_form_fields(
     values: Annotated[str, "JSON object mapping field names/titles to values"],
     search_by_title: Annotated[bool, "If true, match visible title instead of object name"] = False,
+    create_if_missing: Annotated[bool, "Allow choosing dropdown items like 'Create: ...' for missing reference values"] = False,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
     """Set multiple ordinary form fields using the same logic as set_field_value."""
-    return await _bridge_call_recorded(session_id, "set_form_fields", {"values": values, "search_by_title": search_by_title})
+    return await _bridge_call_recorded(session_id, "set_form_fields", {
+        "values": values,
+        "search_by_title": search_by_title,
+        "create_if_missing": create_if_missing,
+    })
 
 
 @mcp.tool()
