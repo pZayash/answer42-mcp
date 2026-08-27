@@ -18,7 +18,7 @@ import urllib.request
 import uuid
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
 from urllib.parse import urlsplit, urlunsplit
@@ -2057,7 +2057,7 @@ def _store_ui_tree_snapshot(
     resource_uri = _ui_tree_resource_uri(session_id, snapshot_id)
     annotated_payload = _annotate_ui_tree_paths(payload)
     summary = _summarize_ui_tree(annotated_payload, include_hidden=bool(request.get("include_hidden"))) if isinstance(annotated_payload, dict) else {}
-    saved_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    saved_at = datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     document = {
         "kind": "answer42.ui_tree.snapshot",
         "version": 1,
@@ -5148,7 +5148,7 @@ async def ui_tree(
     """
     delivery_key = (delivery or "auto").strip().lower()
     if delivery_key not in {"auto", "inline", "resource"}:
-        raise ValueError("Unsupported ui_tree delivery: %r. Expected auto, inline or resource." % delivery)
+        raise ValueError(f"Unsupported ui_tree delivery: {delivery!r}. Expected auto, inline or resource.")
     profile_key = _validate_ui_tree_choice("profile", profile, _UI_TREE_PROFILES)
     command_mode = _validate_ui_tree_choice("command_panels", command_panels, _UI_TREE_COMMAND_PANEL_MODES)
     group_mode_key = _validate_ui_tree_choice("group_mode", group_mode, _UI_TREE_GROUP_MODES)
@@ -5559,7 +5559,7 @@ async def ui_tree_resource_action(
         return await field_value_text(field_name=node_name or node_title, search_by_title=not bool(node_name), session_id=session_id)
     if action_key == "field_info":
         return await field_info(field_name=node_name or node_title, search_by_title=not bool(node_name), session_id=session_id)
-    raise ValueError("Unsupported ui_tree_resource_action action: %r. Expected focus, click_button, activate_field, field_value_text, or field_info." % action)
+    raise ValueError(f"Unsupported ui_tree_resource_action action: {action!r}. Expected focus, click_button, activate_field, field_value_text, or field_info.")
 
 @mcp.tool()
 async def command_bar(*,
