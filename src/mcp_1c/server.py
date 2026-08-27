@@ -18,13 +18,14 @@ import urllib.request
 import uuid
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any
 from urllib.parse import urlsplit, urlunsplit
 
 from mcp.server import MCPServer
 from mcp.server.lowlevel import NotificationOptions
+from mcp.server.mcpserver.resources import FileResource
 from mcp.server.subscriptions import ToolsListChanged
 
 from . import __version__, os_support, release_helper, runtime, skill_installer
@@ -70,6 +71,9 @@ GLOBAL_ORPHAN_TTL_SECONDS = int(os.getenv("ONEC_MCP_ORPHAN_TTL_SECONDS", "1800")
 AUTORELOAD_PID_FILE = os_support.runtime_path("ONEC_MCP_AUTORELOAD_PID_FILE", "answer42-autoreload.pid")
 AUTORELOAD_LOG_FILE = os_support.runtime_path("ONEC_MCP_AUTORELOAD_LOG_FILE", "answer42-autoreload.log")
 RAG_BINDINGS_FILE = os_support.runtime_path("ONEC_MCP_RAG_BINDINGS", "rag-bindings.json")
+UI_TREE_SNAPSHOTS_DIR = os_support.runtime_path("ONEC_MCP_UI_TREE_SNAPSHOTS_DIR", "ui-tree-snapshots")
+UI_TREE_RESOURCE_AUTO_THRESHOLD_TOKENS = int(os.getenv("ONEC_MCP_UI_TREE_RESOURCE_AUTO_THRESHOLD_TOKENS", "50000"))
+UI_TREE_RESOURCE_AUTO_THRESHOLD_BYTES = int(os.getenv("ONEC_MCP_UI_TREE_RESOURCE_AUTO_THRESHOLD_BYTES", "0"))  # deprecated fallback; 0 disables
 NOTIFY_TOOLS_CHANGED_ON_STARTUP = os.getenv("ONEC_MCP_NOTIFY_TOOLS_CHANGED_ON_STARTUP", "1").strip().lower() not in {"0", "false", "no", "off"}
 TOOLS_CHANGED_STARTUP_DELAYS = tuple(
     float(part)
@@ -127,7 +131,9 @@ TOOL_PROFILE_GROUPS: dict[str, set[str]] = {
         "wait_form_closed", "object_command_panel", "object_context_menu", "window_command_interface",
         "command_interface_sections", "command_interface_commands", "command_interface_search", "group_expand", "group_collapse",
         "group_current_page", "group_activate_page", "group_state", "decoration_links", "decoration_click_link", "decoration_click",
-        "ui_tree", "command_bar", "click_button", "find_object", "search_objects", "get_object", "focus_object",
+        "ui_tree", "ui_tree_resource_search", "ui_tree_resource_get_node", "ui_tree_resource_children", "ui_tree_diff",
+        "ui_tree_resource_action",
+        "command_bar", "click_button", "find_object", "search_objects", "get_object", "focus_object",
         "open_navigation_link", "current_element", "field_dropdown_state", "field_dropdown_close", "toggle_field",
         "set_field_value", "activate_field", "choose_field_from_list", "choose_field_first_row", "choose_current_row",
         "set_form_fields", "save_form", "close_form", "form_open_settings",
@@ -163,6 +169,7 @@ TOOL_PROFILE_CORE: set[str] = TOOL_PROFILE_GROUPS["sessions"] | {
     "table_rows", "table_find_row", "table_goto_row", "table_move_row", "table_add_row", "table_set_field", "table_set_row_values",
     "table_choose_field_from_list", "table_edit_info", "table_begin_edit", "table_end_edit", "table_editing_state",
     "tabular_documents", "tabular_document_text", "tabular_document_save", "screenshot",
+    "ui_tree",
 }
 TOOL_PROFILE_ALIASES: dict[str, set[str]] = {
     "core": TOOL_PROFILE_CORE,
@@ -1372,6 +1379,23 @@ def _record_tool(
     return result
 
 
+def _record_tool_if_session(
+    session_id: str,
+    action: str,
+    params: dict[str, Any],
+    result: Any,
+) -> Any:
+    """Record a tool call when the live session exists, but allow offline helpers.
+
+    Saved ui_tree resources may outlive the 1C test-client session.  Search/read
+    helpers should remain useful for diagnostics even after `stop_session`, so
+    they do not require `_record_tool()`'s live-session lookup.
+    """
+    if session_id in _SESSIONS:
+        return _record_tool(session_id, action, params, result)
+    return result
+
+
 def _rag_disabled_result(session_rag_enabled: bool = True) -> dict[str, Any]:
     reason = "rag_disabled_for_session" if _RAG_ENABLED and not session_rag_enabled else "rag_disabled"
     message = (
@@ -1453,6 +1477,17 @@ def _walk_ui_tree(node: Any):
         yield from _walk_ui_tree(child)
 
 
+def _walk_ui_snapshot(node: Any):
+    """Walk saved ui_tree snapshots, including flat `objects` collections."""
+    if not isinstance(node, dict):
+        return
+    if "type" in node or "name" in node or "title" in node:
+        yield node
+    for collection_key in ("children", "objects"):
+        for child in node.get(collection_key) or []:
+            yield from _walk_ui_snapshot(child)
+
+
 def _tool_result_verbosity() -> str:
     value = os.getenv("ONEC_MCP_RESULT_VERBOSITY", "compact").strip().lower()
     if value in {"full", "verbose"}:
@@ -1474,6 +1509,43 @@ def _copy_compact_object(value: Any) -> Any:
     return value
 
 
+
+
+def _ui_tree_type_family(raw_type: Any) -> str:
+    normalized = _ui_node_type_key(raw_type)
+    if not normalized:
+        return "unknown"
+    if "кнопка" in normalized or "button" in normalized:
+        return "buttons"
+    if "таблица" in normalized or "table" in normalized:
+        return "tables"
+    if "поле" in normalized or "field" in normalized:
+        return "fields"
+    if "группа" in normalized or "group" in normalized:
+        return "groups"
+    if "форма" in normalized or "form" in normalized:
+        return "forms"
+    if "окно" in normalized or "window" in normalized:
+        return "windows"
+    if "декорац" in normalized or "decoration" in normalized:
+        return "decorations"
+    return "other"
+
+
+def _ui_tree_type_statistics(nodes: list[dict[str, Any]]) -> dict[str, Any]:
+    by_type: dict[str, int] = {}
+    by_family: dict[str, int] = {}
+    for node in nodes:
+        raw_type = str(node.get("type") or "<unknown>").strip() or "<unknown>"
+        by_type[raw_type] = by_type.get(raw_type, 0) + 1
+        family = _ui_tree_type_family(raw_type)
+        by_family[family] = by_family.get(family, 0) + 1
+    return {
+        "by_family": dict(sorted(by_family.items())),
+        "by_type": dict(sorted(by_type.items(), key=lambda item: (-item[1], item[0]))),
+    }
+
+
 def _summarize_ui_tree(tree: Any, include_hidden: bool) -> dict[str, Any]:
     """Return compact diagnostics about omitted/truncated UI tree parts."""
     if isinstance(tree, dict) and tree.get("flat") is True and isinstance(tree.get("objects"), list):
@@ -1488,6 +1560,7 @@ def _summarize_ui_tree(tree: Any, include_hidden: bool) -> dict[str, Any]:
             "hidden_children_count": 0,
             "hidden_nodes_count": len(hidden_nodes),
             "flat_objects_count": len(objects),
+            "types_count": _ui_tree_type_statistics(objects),
         }
     nodes = list(_walk_ui_tree(tree))
     truncated_nodes = [node for node in nodes if node.get("truncated")]
@@ -1506,6 +1579,7 @@ def _summarize_ui_tree(tree: Any, include_hidden: bool) -> dict[str, Any]:
         "truncated_nodes_count": len(truncated_nodes),
         "hidden_children_count": hidden_children_total,
         "hidden_nodes_count": len(hidden_nodes),
+        "types_count": _ui_tree_type_statistics(nodes),
     }
 
 
@@ -1515,7 +1589,8 @@ def _compact_ui_node(node: Any) -> Any:
     keep_keys = (
         "type", "name", "title", "form_name", "navigation_url", "text", "value", "presentation", "data",
         "visible", "available", "read_only", "current", "selected", "data_path", "rag_type", "rag", "hidden_children_count",
-        "current_page_name", "current_page", "pages", "_tree_ms", "_nodes_serialized", "metrics", "flat",
+        "current_page_name", "current_page", "pages", "path", "index_path", "children_omitted_count",
+        "_tree_ms", "_nodes_serialized", "metrics", "flat",
     )
     result = {key: _copy_compact_object(node[key]) for key in keep_keys if key in node and node.get(key) not in (None, "", [], {})}
     if node.get("enabled") is not None and node.get("enabled") != node.get("available"):
@@ -1574,7 +1649,7 @@ def _apply_ui_fields(value: Any, allowed: set[str] | None) -> Any:
     always = {
         "children", "objects", "filter", "tree_summary", "profile", "fields", "command_panels", "parent_name",
         "found", "count", "reason", "format", "text", "yaml", "metrics", "flat", "rag_diagnostic",
-        "method", "supports", "warnings",
+        "method", "supports", "warnings", "path", "index_path", "children_omitted_count",
     }
     result: dict[str, Any] = {}
     for key, item in value.items():
@@ -1767,6 +1842,28 @@ def _json_size_bytes(value: Any) -> int:
         return 0
 
 
+def _estimate_text_tokens(text: str) -> int:
+    """Cheap tokenizer-free estimate for context budgeting.
+
+    We intentionally avoid a tokenizer dependency in Answer42 runtime.  The
+    estimate is conservative enough for Russian/English JSON: split words,
+    punctuation and CJK characters, then add a character-based floor.
+    """
+    if not text:
+        return 0
+    lexical_tokens = len(re.findall(r"[A-Za-zА-Яа-яЁё0-9_]+|[^\sA-Za-zА-Яа-яЁё0-9_]", text))
+    char_floor = (len(text) + 3) // 4
+    return max(lexical_tokens, char_floor)
+
+
+def _estimate_json_tokens(value: Any) -> int:
+    try:
+        text = json.dumps(value, ensure_ascii=False, default=str)
+    except Exception:
+        text = str(value)
+    return _estimate_text_tokens(text)
+
+
 def _ui_tree_metrics(tree: Any, *, bridge_ms: float, python_transform_ms: float = 0.0, format_ms: float = 0.0, result: Any = None) -> dict[str, Any]:
     metrics = {
         "bridge_ms": round(bridge_ms, 3),
@@ -1782,6 +1879,7 @@ def _ui_tree_metrics(tree: Any, *, bridge_ms: float, python_transform_ms: float 
             metrics["nodes_visited"] = tree.get("_nodes_visited")
     payload = result if result is not None else tree
     metrics["json_bytes"] = _json_size_bytes(payload)
+    metrics["estimated_tokens"] = _estimate_json_tokens(payload)
     if isinstance(payload, dict) and isinstance(payload.get("objects"), list):
         metrics["objects_count"] = len(payload["objects"])
     return metrics
@@ -1862,6 +1960,245 @@ def _to_simple_yaml(value: Any, indent: int = 0) -> str:
                 lines.append(f"{prefix}- {_yaml_scalar(item)}")
         return "\n".join(lines)
     return prefix + _yaml_scalar(value)
+
+
+def _ui_tree_snapshot_file(snapshot_id: str, session_id: str = "") -> Path:
+    safe_id = re.sub(r"[^0-9a-zA-Z_.-]+", "_", str(snapshot_id or "")).strip("._")
+    if not safe_id:
+        raise ValueError("ui_tree snapshot id is empty")
+    if session_id:
+        safe_session = re.sub(r"[^0-9a-zA-Z_.-]+", "_", str(session_id or "")).strip("._") or "default"
+        return UI_TREE_SNAPSHOTS_DIR / safe_session / f"{safe_id}.json"
+    matches = list(UI_TREE_SNAPSHOTS_DIR.glob(f"*/{safe_id}.json"))
+    if len(matches) == 1:
+        return matches[0]
+    if not matches:
+        raise ValueError(f"ui_tree snapshot {snapshot_id!r} not found")
+    raise ValueError(f"ui_tree snapshot id {snapshot_id!r} is ambiguous; pass resource_uri instead")
+
+
+def _ui_tree_resource_uri(session_id: str, snapshot_id: str) -> str:
+    safe_session = re.sub(r"[^0-9a-zA-Z_.-]+", "_", str(session_id or "")).strip("._") or "default"
+    return f"answer42://ui-tree/{safe_session}/{snapshot_id}"
+
+
+def _parse_ui_tree_resource_uri(resource_uri: str) -> tuple[str, str]:
+    text = str(resource_uri or "").strip()
+    match = re.fullmatch(r"answer42://ui-tree/([^/]+)/([^/?#]+)", text)
+    if not match:
+        raise ValueError("Expected ui_tree resource_uri like answer42://ui-tree/<session>/<snapshot_id>")
+    return match.group(1), match.group(2)
+
+
+def _node_label(node: dict[str, Any]) -> str:
+    parts = []
+    for key in ("type", "name", "title"):
+        value = str(node.get(key) or "").strip()
+        if value and value not in parts:
+            parts.append(value)
+    return " ".join(parts) or "Object"
+
+
+def _annotate_ui_tree_paths(value: Any, index_path: str = "", label_path: str = "") -> Any:
+    if isinstance(value, list):
+        return [_annotate_ui_tree_paths(item, f"{index_path}/{idx}", label_path) for idx, item in enumerate(value)]
+    if not isinstance(value, dict):
+        return value
+    node = dict(value)
+    current_index_path = index_path or "/"
+    if "type" in node or "name" in node or "title" in node:
+        node.setdefault("index_path", current_index_path)
+        current_label = _node_label(node).replace("/", "∕")
+        node.setdefault("path", f"{label_path}/{current_label}" if label_path else f"/{current_label}")
+        label_path = node["path"]
+    for collection_key in ("children", "objects"):
+        children = node.get(collection_key)
+        if isinstance(children, list):
+            node[collection_key] = [
+                _annotate_ui_tree_paths(child, f"{current_index_path.rstrip('/')}/{idx}" if current_index_path != "/" else f"/{idx}", label_path)
+                for idx, child in enumerate(children)
+            ]
+    for nested_key in ("current_page", "pages"):
+        nested = node.get(nested_key)
+        if isinstance(nested, (dict, list)):
+            node[nested_key] = _annotate_ui_tree_paths(nested, f"{current_index_path}/{nested_key}", label_path)
+    return node
+
+
+def _ui_tree_resource_preview(payload: Any, max_nodes: int = 40, fmt: str = "outline") -> dict[str, Any]:
+    max_nodes = max(1, min(int(max_nodes or 40), 500))
+    all_nodes = [node for node in _walk_ui_snapshot(payload) if isinstance(node, dict)]
+    nodes: list[dict[str, Any]] = []
+    for node in all_nodes[:max_nodes]:
+        flat = dict(node)
+        flat.pop("children", None)
+        flat.pop("current_page", None)
+        flat.pop("pages", None)
+        nodes.append(_compact_ui_node(flat))
+    truncated = len(all_nodes) > len(nodes)
+    preview_source: Any = {"objects": nodes}
+    if fmt == "yaml":
+        text = _to_simple_yaml(preview_source)
+        return {"format": "yaml", "yaml": text, "nodes_count": len(nodes), "truncated": truncated}
+    text = _outline_ui_nodes(nodes)
+    return {"format": "outline", "text": text, "nodes_count": len(nodes), "truncated": truncated}
+
+
+def _store_ui_tree_snapshot(
+    payload: Any,
+    *,
+    session_id: str,
+    request: dict[str, Any],
+    metrics: dict[str, Any] | None = None,
+    preview_max_nodes: int = 40,
+    preview_format: str = "outline",
+) -> dict[str, Any]:
+    snapshot_id = uuid.uuid4().hex
+    resource_uri = _ui_tree_resource_uri(session_id, snapshot_id)
+    annotated_payload = _annotate_ui_tree_paths(payload)
+    summary = _summarize_ui_tree(annotated_payload, include_hidden=bool(request.get("include_hidden"))) if isinstance(annotated_payload, dict) else {}
+    saved_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    document = {
+        "kind": "answer42.ui_tree.snapshot",
+        "version": 1,
+        "snapshot_id": snapshot_id,
+        "resource_uri": resource_uri,
+        "session_id": session_id,
+        "saved_at": saved_at,
+        "request": request,
+        "summary": summary,
+        "metrics": metrics or {},
+        "payload": annotated_payload,
+    }
+    path = _ui_tree_snapshot_file(snapshot_id, session_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(document, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    try:
+        mcp.add_resource(FileResource(
+            uri=resource_uri,
+            name=f"ui_tree {session_id}/{snapshot_id}",
+            title=f"Answer42 ui_tree snapshot {snapshot_id}",
+            description="Full ui_tree payload saved outside the tool response; use ui_tree_resource_* tools for targeted reads.",
+            mime_type="application/json",
+            path=path.resolve(),
+        ))
+    except Exception as exc:
+        logging.debug("Could not register ui_tree resource %s: %s", resource_uri, exc)
+    file_bytes = path.stat().st_size if path.exists() else _json_size_bytes(document)
+    preview = _ui_tree_resource_preview(annotated_payload, preview_max_nodes, preview_format)
+    return {
+        "delivery": "resource",
+        "resource_uri": resource_uri,
+        "snapshot_id": snapshot_id,
+        "session_id": session_id,
+        "path": str(path),
+        "saved_at": saved_at,
+        "summary": summary,
+        "metrics": metrics or {},
+        "json_bytes": file_bytes,
+        "preview": preview,
+        "usage": {
+            "search": "ui_tree_resource_search(resource_uri=..., name/title/type/text=...) returns only matched nodes.",
+            "node": "ui_tree_resource_get_node(resource_uri=..., index_path=...) returns one node.",
+            "children": "ui_tree_resource_children(resource_uri=..., index_path=..., depth=1) returns a small subtree.",
+            "diff": "ui_tree_diff(before_resource_uri=..., after_resource_uri=...) compares two saved snapshots.",
+        },
+    }
+
+
+def _ui_tree_should_use_resource(delivery: str, metrics: dict[str, Any] | None = None, payload: Any = None) -> bool:
+    """Return whether a ui_tree response should be moved to resource delivery."""
+    delivery_key = (delivery or "auto").strip().lower()
+    if delivery_key == "resource":
+        return True
+    if delivery_key != "auto":
+        return False
+    metric_tokens = 0
+    if isinstance(metrics, dict) and isinstance(metrics.get("estimated_tokens"), int):
+        metric_tokens = int(metrics["estimated_tokens"])
+    payload_tokens = _estimate_json_tokens(payload) if payload is not None else 0
+    if max(metric_tokens, payload_tokens) > UI_TREE_RESOURCE_AUTO_THRESHOLD_TOKENS:
+        return True
+    # Deprecated byte fallback for deployments that explicitly configured it.
+    if UI_TREE_RESOURCE_AUTO_THRESHOLD_BYTES > 0:
+        metric_bytes = 0
+        if isinstance(metrics, dict) and isinstance(metrics.get("json_bytes"), int):
+            metric_bytes = int(metrics["json_bytes"])
+        payload_bytes = _json_size_bytes(payload) if payload is not None else 0
+        return max(metric_bytes, payload_bytes) > UI_TREE_RESOURCE_AUTO_THRESHOLD_BYTES
+    return False
+
+
+def _ui_tree_maybe_resource_response(
+    payload: Any,
+    *,
+    inline_response: Any,
+    delivery: str,
+    session_id: str,
+    request: dict[str, Any],
+    metrics: dict[str, Any] | None,
+    preview_max_nodes: int,
+    preview_format: str,
+) -> Any:
+    if not _ui_tree_should_use_resource(delivery, metrics, inline_response):
+        return inline_response
+    response = _store_ui_tree_snapshot(
+        payload,
+        session_id=session_id,
+        request=request,
+        metrics=metrics,
+        preview_max_nodes=preview_max_nodes,
+        preview_format=preview_format,
+    )
+    response["delivery_requested"] = delivery
+    response["delivery_reason"] = "explicit_resource" if (delivery or "").strip().lower() == "resource" else "auto_threshold_exceeded"
+    response["auto_threshold_tokens"] = UI_TREE_RESOURCE_AUTO_THRESHOLD_TOKENS
+    if UI_TREE_RESOURCE_AUTO_THRESHOLD_BYTES > 0:
+        response["auto_threshold_bytes"] = UI_TREE_RESOURCE_AUTO_THRESHOLD_BYTES
+    return response
+
+
+def _load_ui_tree_snapshot(resource_uri: str = "", snapshot_id: str = "") -> dict[str, Any]:
+    if resource_uri:
+        session_part, snap_part = _parse_ui_tree_resource_uri(resource_uri)
+        path = _ui_tree_snapshot_file(snap_part, session_part)
+    else:
+        path = _ui_tree_snapshot_file(snapshot_id)
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise ValueError(f"ui_tree snapshot file not found: {path}")
+
+
+def _ui_tree_payload_from_snapshot(snapshot: dict[str, Any]) -> Any:
+    return snapshot.get("payload") if isinstance(snapshot, dict) and "payload" in snapshot else snapshot
+
+
+def _find_ui_node_by_path(value: Any, path: str = "", index_path: str = "") -> dict[str, Any] | None:
+    wanted_path = str(path or "").strip()
+    wanted_index = str(index_path or "").strip()
+    if not wanted_path and not wanted_index:
+        return value if isinstance(value, dict) else None
+    for node in _walk_ui_snapshot(value):
+        if wanted_index and str(node.get("index_path") or "") == wanted_index:
+            return node
+        if wanted_path and str(node.get("path") or "") == wanted_path:
+            return node
+    return None
+
+
+def _trim_ui_tree_depth(node: Any, depth: int, current: int = 0) -> Any:
+    if not isinstance(node, dict):
+        return node
+    result = dict(node)
+    children = result.get("children") or []
+    if current >= depth:
+        if children:
+            result["children_omitted_count"] = len(children)
+        result.pop("children", None)
+        return result
+    result["children"] = [_trim_ui_tree_depth(child, depth, current + 1) for child in children if isinstance(child, dict)]
+    return result
 
 
 def _compact_rows_result(result: Any, *, include_raw: bool = False) -> Any:
@@ -4774,6 +5111,8 @@ async def ui_tree(
     group_mode: Annotated[str, "Group handling mode: include, flatten, flatten_layout, exclude, exclude_empty, or pages_only"] = "include",
     format: Annotated[str, "Response format: json (structured), outline (readable text outline), yaml/yml (readable YAML text)"] = "json",
     rag_snapshot: Annotated[str, "Optional RAG snapshot name/id used for type enrichment"] = "",
+    delivery: Annotated[str, "Delivery mode: auto (default) returns small results inline and saves responses above token threshold as resource; inline always returns the selected JSON/outline/yaml; resource always saves full JSON and returns resource_uri + summary + preview"] = "auto",
+    preview_max_nodes: Annotated[int, "For delivery=auto/resource, number of top nodes/matches to include in the small inline preview when a resource is returned"] = 40,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
@@ -4795,7 +5134,21 @@ async def ui_tree(
     of a nested tree. For finding one control, prefer `search_objects`/`find_object`.
     `format=outline` and `format=yaml|yml` return readable text representations
     inside a structured tool result; JSON remains the default machine-readable form.
+
+    `delivery=auto` is the default: small results stay inline, but large results
+    above `ONEC_MCP_UI_TREE_RESOURCE_AUTO_THRESHOLD_TOKENS` (default 50k estimated tokens) are
+    saved as MCP resources. Use `delivery=inline` to force inline output and
+    `delivery=resource` to force resource output for large/verbose diagnostics
+    (`profile=full`, `include_hidden=true`, `include_data=true`). Resource
+    responses contain only `resource_uri`, `snapshot_id`, summary, metrics and a
+    small preview. Then inspect the saved snapshot with
+    `ui_tree_resource_search`, `ui_tree_resource_get_node`,
+    `ui_tree_resource_children`, or `ui_tree_diff` instead of loading the whole
+    tree into the agent context.
     """
+    delivery_key = (delivery or "auto").strip().lower()
+    if delivery_key not in {"auto", "inline", "resource"}:
+        raise ValueError("Unsupported ui_tree delivery: %r. Expected auto, inline or resource." % delivery)
     profile_key = _validate_ui_tree_choice("profile", profile, _UI_TREE_PROFILES)
     command_mode = _validate_ui_tree_choice("command_panels", command_panels, _UI_TREE_COMMAND_PANEL_MODES)
     group_mode_key = _validate_ui_tree_choice("group_mode", group_mode, _UI_TREE_GROUP_MODES)
@@ -4863,12 +5216,42 @@ async def ui_tree(
         if fmt == "outline":
             response = {"format": "outline", "text": "", "tree_summary": tree.get("tree_summary"), "profile": profile_key, "parent_name": parent_name, "found": False, "reason": "parent_not_found"}
             response = _apply_ui_fields(response, field_names)
-            return _attach_ui_tree_metrics(response, _ui_tree_metrics(tree, bridge_ms=bridge_ms, python_transform_ms=python_transform_ms, result=response))
+            response = _attach_ui_tree_metrics(response, _ui_tree_metrics(tree, bridge_ms=bridge_ms, python_transform_ms=python_transform_ms, result=response))
+            return _ui_tree_maybe_resource_response(
+                response,
+                inline_response=response,
+                delivery=delivery_key,
+                session_id=session_id,
+                request={**bridge_params, "profile": profile_key, "fields": fields, "format": fmt, "delivery": delivery_key},
+                metrics=response.get("metrics"),
+                preview_max_nodes=preview_max_nodes,
+                preview_format=fmt,
+            )
         if fmt == "yaml":
             response = {"format": "yaml", "yaml": _to_simple_yaml(tree), "tree_summary": tree.get("tree_summary"), "profile": profile_key, "parent_name": parent_name}
-            return _attach_ui_tree_metrics(response, _ui_tree_metrics(tree, bridge_ms=bridge_ms, python_transform_ms=python_transform_ms, result=response))
+            response = _attach_ui_tree_metrics(response, _ui_tree_metrics(tree, bridge_ms=bridge_ms, python_transform_ms=python_transform_ms, result=response))
+            return _ui_tree_maybe_resource_response(
+                tree,
+                inline_response=response,
+                delivery=delivery_key,
+                session_id=session_id,
+                request={**bridge_params, "profile": profile_key, "fields": fields, "format": fmt, "delivery": delivery_key},
+                metrics=response.get("metrics"),
+                preview_max_nodes=preview_max_nodes,
+                preview_format=fmt,
+            )
         tree = _apply_ui_fields(tree, field_names)
-        return _attach_ui_tree_metrics(tree, _ui_tree_metrics(tree, bridge_ms=bridge_ms, python_transform_ms=python_transform_ms, result=tree))
+        tree = _attach_ui_tree_metrics(tree, _ui_tree_metrics(tree, bridge_ms=bridge_ms, python_transform_ms=python_transform_ms, result=tree))
+        return _ui_tree_maybe_resource_response(
+            tree,
+            inline_response=tree,
+            delivery=delivery_key,
+            session_id=session_id,
+            request={**bridge_params, "profile": profile_key, "fields": fields, "format": fmt, "delivery": delivery_key},
+            metrics=tree.get("metrics"),
+            preview_max_nodes=preview_max_nodes,
+            preview_format=fmt,
+        )
 
     summary = tree.get("tree_summary") if isinstance(tree, dict) else None
 
@@ -4939,16 +5322,244 @@ async def ui_tree(
         if parent_name:
             response["parent_name"] = parent_name
         metrics = _ui_tree_metrics(tree, bridge_ms=bridge_ms, python_transform_ms=python_transform_ms, format_ms=(time.monotonic() - format_start) * 1000, result=response)
-        return _attach_ui_tree_metrics(response, metrics)
+        response = _attach_ui_tree_metrics(response, metrics)
+        return _ui_tree_maybe_resource_response(
+            result,
+            inline_response=response,
+            delivery=delivery_key,
+            session_id=session_id,
+            request={**bridge_params, "profile": profile_key, "fields": fields, "format": fmt, "delivery": delivery_key},
+            metrics=metrics,
+            preview_max_nodes=preview_max_nodes,
+            preview_format=fmt,
+        )
     if fmt == "yaml":
         format_start = time.monotonic()
         response = {"format": "yaml", "yaml": _to_simple_yaml(result), "tree_summary": summary, "profile": profile_key, "fields": fields}
         if parent_name:
             response["parent_name"] = parent_name
         metrics = _ui_tree_metrics(tree, bridge_ms=bridge_ms, python_transform_ms=python_transform_ms, format_ms=(time.monotonic() - format_start) * 1000, result=response)
-        return _attach_ui_tree_metrics(response, metrics)
+        response = _attach_ui_tree_metrics(response, metrics)
+        return _ui_tree_maybe_resource_response(
+            result,
+            inline_response=response,
+            delivery=delivery_key,
+            session_id=session_id,
+            request={**bridge_params, "profile": profile_key, "fields": fields, "format": fmt, "delivery": delivery_key},
+            metrics=metrics,
+            preview_max_nodes=preview_max_nodes,
+            preview_format=fmt,
+        )
     metrics = _ui_tree_metrics(tree, bridge_ms=bridge_ms, python_transform_ms=python_transform_ms, result=result)
-    return _attach_ui_tree_metrics(result, metrics)
+    result = _attach_ui_tree_metrics(result, metrics)
+    return _ui_tree_maybe_resource_response(
+        result,
+        inline_response=result,
+        delivery=delivery_key,
+        session_id=session_id,
+        request={**bridge_params, "profile": profile_key, "fields": fields, "format": fmt, "delivery": delivery_key},
+        metrics=metrics,
+        preview_max_nodes=preview_max_nodes,
+        preview_format=fmt,
+    )
+
+
+@mcp.tool()
+async def ui_tree_resource_search(
+    resource_uri: Annotated[str, "Resource URI returned by ui_tree(delivery='resource'), e.g. answer42://ui-tree/<session>/<snapshot_id>"] = "",
+    snapshot_id: Annotated[str, "Snapshot id returned by ui_tree(delivery='resource'); pass only when resource_uri is unavailable/unambiguous"] = "",
+    name: Annotated[str, "Optional exact technical name filter"] = "",
+    title: Annotated[str, "Optional title substring filter"] = "",
+    type: Annotated[str, "Optional UI object type filter"] = "",
+    text: Annotated[str, "Optional case-insensitive substring over type/name/title/text/value/presentation/data_path/path"] = "",
+    fields: Annotated[str, "Field-set profile for returned nodes: minimal, navigation, diagnostic, data, full, or comma-separated field names"] = "navigation",
+    limit: Annotated[int, "Maximum matched nodes to return"] = 20,
+    *,
+    session_id: Annotated[str, "Session id (used only for recording/compatibility)"] = DEFAULT_SESSION,
+) -> Any:
+    """Search a saved ui_tree resource without loading the full tree into context.
+
+    Use after `ui_tree(delivery='resource')` when you need a few controls from a
+    large snapshot. The result includes `path` and `index_path`; use either with
+    `ui_tree_resource_get_node`, `ui_tree_resource_children`, or
+    `ui_tree_resource_action`.
+    """
+    snapshot = _load_ui_tree_snapshot(resource_uri, snapshot_id)
+    payload = _ui_tree_payload_from_snapshot(snapshot)
+    max_items = max(1, min(int(limit or 20), 500))
+    query_text = _norm_key(text)
+    matches: list[dict[str, Any]] = []
+    for node in _walk_ui_snapshot(payload):
+        if not _ui_node_matches_filters(node, name=name, title=title, type=type):
+            continue
+        if query_text:
+            haystack = " ".join(str(node.get(key) or "") for key in ("type", "name", "title", "text", "value", "presentation", "data_path", "path"))
+            if query_text not in _norm_key(haystack):
+                continue
+        flat = dict(node)
+        flat.pop("children", None)
+        flat.pop("current_page", None)
+        flat.pop("pages", None)
+        matches.append(flat)
+        if len(matches) >= max_items:
+            break
+    field_names = _ui_tree_field_names(fields, "navigation")
+    result = {
+        "found": bool(matches),
+        "count": len(matches),
+        "objects": _apply_ui_fields([_compact_ui_node(item) for item in matches], field_names),
+        "filter": {"name": name, "title": title, "type": type, "text": text, "limit": max_items},
+        "resource_uri": snapshot.get("resource_uri") or resource_uri,
+        "snapshot_id": snapshot.get("snapshot_id") or snapshot_id,
+        "summary": snapshot.get("summary") or {},
+    }
+    return _record_tool_if_session(session_id, "ui_tree_resource_search", {"resource_uri": resource_uri, "snapshot_id": snapshot_id, "name": name, "title": title, "type": type, "text": text, "fields": fields, "limit": limit}, result)
+
+
+@mcp.tool()
+async def ui_tree_resource_get_node(
+    resource_uri: Annotated[str, "Resource URI returned by ui_tree(delivery='resource')"] = "",
+    snapshot_id: Annotated[str, "Snapshot id returned by ui_tree(delivery='resource'); pass only when resource_uri is unavailable/unambiguous"] = "",
+    path: Annotated[str, "Human-readable node path returned by ui_tree_resource_search/children; use index_path for more stable addressing"] = "",
+    index_path: Annotated[str, "Stable numeric path returned as index_path, e.g. /0/3/2"] = "",
+    fields: Annotated[str, "Field-set profile: minimal, navigation, diagnostic, data, full, or comma-separated field names"] = "diagnostic",
+    *,
+    session_id: Annotated[str, "Session id (used only for recording/compatibility)"] = DEFAULT_SESSION,
+) -> Any:
+    """Return one node from a saved ui_tree resource by `index_path` or `path`."""
+    snapshot = _load_ui_tree_snapshot(resource_uri, snapshot_id)
+    node = _find_ui_node_by_path(_ui_tree_payload_from_snapshot(snapshot), path=path, index_path=index_path)
+    field_names = _ui_tree_field_names(fields, "diagnostic")
+    result = {
+        "found": node is not None,
+        "node": _apply_ui_fields(_compact_ui_node(node) if isinstance(node, dict) else None, field_names) if node is not None else None,
+        "path": path,
+        "index_path": index_path,
+        "resource_uri": snapshot.get("resource_uri") or resource_uri,
+        "snapshot_id": snapshot.get("snapshot_id") or snapshot_id,
+    }
+    return _record_tool_if_session(session_id, "ui_tree_resource_get_node", {"resource_uri": resource_uri, "snapshot_id": snapshot_id, "path": path, "index_path": index_path, "fields": fields}, result)
+
+
+@mcp.tool()
+async def ui_tree_resource_children(
+    resource_uri: Annotated[str, "Resource URI returned by ui_tree(delivery='resource')"] = "",
+    snapshot_id: Annotated[str, "Snapshot id returned by ui_tree(delivery='resource'); pass only when resource_uri is unavailable/unambiguous"] = "",
+    path: Annotated[str, "Parent node path returned by ui_tree_resource_search/get_node"] = "",
+    index_path: Annotated[str, "Parent node numeric index_path returned by ui_tree_resource_search/get_node"] = "",
+    depth: Annotated[int, "How many child levels to return; use 1-2 for context-friendly reads"] = 1,
+    fields: Annotated[str, "Field-set profile: minimal, navigation, diagnostic, data, full, or comma-separated field names"] = "navigation",
+    format: Annotated[str, "Response format for the subtree: json, outline, yaml/yml"] = "json",
+    *,
+    session_id: Annotated[str, "Session id (used only for recording/compatibility)"] = DEFAULT_SESSION,
+) -> Any:
+    """Return a small subtree from a saved ui_tree resource.
+
+    Prefer this over MCP resource reads when the full snapshot is large. Set
+    `depth=1` to inspect direct children, `depth=2` for immediate context.
+    """
+    fmt = _validate_ui_tree_choice("format", format, _UI_TREE_FORMATS)
+    snapshot = _load_ui_tree_snapshot(resource_uri, snapshot_id)
+    payload = _ui_tree_payload_from_snapshot(snapshot)
+    node = _find_ui_node_by_path(payload, path=path, index_path=index_path) if (path or index_path) else payload
+    if node is None:
+        result: Any = {"found": False, "path": path, "index_path": index_path, "resource_uri": snapshot.get("resource_uri") or resource_uri, "snapshot_id": snapshot.get("snapshot_id") or snapshot_id}
+    else:
+        subtree = _trim_ui_tree_depth(node, max(0, min(int(depth or 1), 10)))
+        subtree = _apply_ui_fields(_compact_ui_node(subtree), _ui_tree_field_names(fields, "navigation"))
+        if fmt == "outline":
+            result = {"found": True, "format": "outline", "text": _outline_ui_tree(subtree), "path": path or subtree.get("path"), "index_path": index_path or subtree.get("index_path")}
+        elif fmt == "yaml":
+            result = {"found": True, "format": "yaml", "yaml": _to_simple_yaml(subtree), "path": path or subtree.get("path"), "index_path": index_path or subtree.get("index_path")}
+        else:
+            result = {"found": True, "node": subtree, "path": path or subtree.get("path"), "index_path": index_path or subtree.get("index_path")}
+        result["resource_uri"] = snapshot.get("resource_uri") or resource_uri
+        result["snapshot_id"] = snapshot.get("snapshot_id") or snapshot_id
+    return _record_tool_if_session(session_id, "ui_tree_resource_children", {"resource_uri": resource_uri, "snapshot_id": snapshot_id, "path": path, "index_path": index_path, "depth": depth, "fields": fields, "format": format}, result)
+
+
+@mcp.tool()
+async def ui_tree_diff(
+    before_resource_uri: Annotated[str, "Resource URI of the earlier ui_tree snapshot"] = "",
+    after_resource_uri: Annotated[str, "Resource URI of the later ui_tree snapshot"] = "",
+    before_snapshot_id: Annotated[str, "Earlier snapshot id, only if resource URI is unavailable/unambiguous"] = "",
+    after_snapshot_id: Annotated[str, "Later snapshot id, only if resource URI is unavailable/unambiguous"] = "",
+    fields: Annotated[str, "Field-set profile for changed nodes"] = "navigation",
+    limit: Annotated[int, "Maximum added/removed/changed samples per category"] = 50,
+    *,
+    session_id: Annotated[str, "Session id (used only for recording/compatibility)"] = DEFAULT_SESSION,
+) -> Any:
+    """Compare two saved ui_tree snapshots and return compact added/removed/changed node samples."""
+    before = _load_ui_tree_snapshot(before_resource_uri, before_snapshot_id)
+    after = _load_ui_tree_snapshot(after_resource_uri, after_snapshot_id)
+
+    def index(payload: Any) -> dict[str, dict[str, Any]]:
+        return {str(node.get("index_path") or node.get("path") or idx): dict(node) for idx, node in enumerate(_walk_ui_snapshot(payload)) if isinstance(node, dict)}
+
+    before_idx = index(_ui_tree_payload_from_snapshot(before))
+    after_idx = index(_ui_tree_payload_from_snapshot(after))
+    max_items = max(1, min(int(limit or 50), 500))
+    field_names = _ui_tree_field_names(fields, "navigation")
+
+    def node_signature(node: dict[str, Any]) -> dict[str, Any]:
+        return {k: node.get(k) for k in ("type", "name", "title", "visible", "available", "read_only", "value", "presentation", "data_path") if k in node}
+
+    added_keys = [key for key in after_idx if key not in before_idx]
+    removed_keys = [key for key in before_idx if key not in after_idx]
+    common_changed = [key for key in after_idx.keys() & before_idx.keys() if node_signature(before_idx[key]) != node_signature(after_idx[key])]
+    result = {
+        "before_resource_uri": before.get("resource_uri") or before_resource_uri,
+        "after_resource_uri": after.get("resource_uri") or after_resource_uri,
+        "before_snapshot_id": before.get("snapshot_id") or before_snapshot_id,
+        "after_snapshot_id": after.get("snapshot_id") or after_snapshot_id,
+        "counts": {"before": len(before_idx), "after": len(after_idx), "added": len(added_keys), "removed": len(removed_keys), "changed": len(common_changed)},
+        "added": _apply_ui_fields([_compact_ui_node(after_idx[key]) for key in added_keys[:max_items]], field_names),
+        "removed": _apply_ui_fields([_compact_ui_node(before_idx[key]) for key in removed_keys[:max_items]], field_names),
+        "changed": [
+            {"index_path": key, "before": _apply_ui_fields(_compact_ui_node(before_idx[key]), field_names), "after": _apply_ui_fields(_compact_ui_node(after_idx[key]), field_names)}
+            for key in common_changed[:max_items]
+        ],
+        "limit": max_items,
+    }
+    return _record_tool_if_session(session_id, "ui_tree_diff", {"before_resource_uri": before_resource_uri, "after_resource_uri": after_resource_uri, "before_snapshot_id": before_snapshot_id, "after_snapshot_id": after_snapshot_id, "fields": fields, "limit": limit}, result)
+
+
+@mcp.tool()
+async def ui_tree_resource_action(
+    resource_uri: Annotated[str, "Resource URI returned by ui_tree(delivery='resource')"] = "",
+    snapshot_id: Annotated[str, "Snapshot id returned by ui_tree(delivery='resource'); pass only when resource_uri is unavailable/unambiguous"] = "",
+    path: Annotated[str, "Node path returned by ui_tree_resource_search/get_node"] = "",
+    index_path: Annotated[str, "Node index_path returned by ui_tree_resource_search/get_node"] = "",
+    action: Annotated[str, "Action to run on the node: focus, click_button, activate_field, field_value_text, field_info"] = "focus",
+    watchdog_timeout: Annotated[int, "For click_button, deadline in seconds before reporting blocked interface"] = 20,
+    *,
+    session_id: Annotated[str, "Live session id where the UI action is executed"] = DEFAULT_SESSION,
+) -> Any:
+    """Run a safe first-class UI action using a node selected from a saved ui_tree snapshot.
+
+    The snapshot is only used to extract stable name/title/type hints; the actual
+    action is executed against the current live 1C UI via existing tools. Refresh
+    the snapshot after large UI changes before relying on old selectors.
+    """
+    snapshot = _load_ui_tree_snapshot(resource_uri, snapshot_id)
+    node = _find_ui_node_by_path(_ui_tree_payload_from_snapshot(snapshot), path=path, index_path=index_path)
+    if not isinstance(node, dict):
+        return _record_tool_if_session(session_id, "ui_tree_resource_action", {"resource_uri": resource_uri, "snapshot_id": snapshot_id, "path": path, "index_path": index_path, "action": action}, {"found": False, "reason": "node_not_found"})
+    action_key = (action or "focus").strip().lower()
+    node_name = str(node.get("name") or "")
+    node_title = str(node.get("title") or "")
+    node_type = str(node.get("type") or "")
+    if action_key == "focus":
+        return await focus_object(name=node_name, title=node_title, type=node_type, session_id=session_id)
+    if action_key == "click_button":
+        return await click_button(name=node_name or node_title, search_by_title=not bool(node_name), watchdog_timeout=watchdog_timeout, session_id=session_id)
+    if action_key == "activate_field":
+        return await activate_field(field_name=node_name or node_title, search_by_title=not bool(node_name), session_id=session_id)
+    if action_key == "field_value_text":
+        return await field_value_text(field_name=node_name or node_title, search_by_title=not bool(node_name), session_id=session_id)
+    if action_key == "field_info":
+        return await field_info(field_name=node_name or node_title, search_by_title=not bool(node_name), session_id=session_id)
+    raise ValueError("Unsupported ui_tree_resource_action action: %r. Expected focus, click_button, activate_field, field_value_text, or field_info." % action)
 
 @mcp.tool()
 async def command_bar(*,

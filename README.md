@@ -64,7 +64,27 @@ Useful modes:
 - `fields="minimal|navigation|diagnostic|data|full"` (or a comma-separated custom field list) controls node payload without truncating the tree.
 - `command_panels="include|exclude|only"` controls command-panel serialization explicitly; `only` returns a deduplicated flat list.
 - `group_mode="include|flatten|flatten_layout|exclude|exclude_empty|pages_only"` controls whether group nodes are kept, lifted, or omitted.
-- `format="json|outline|yaml|yml"` keeps JSON as the default structured result and offers readable text views for inspection. Invalid profile/group/command-panel/format values are rejected; every result includes `metrics` with timings and payload counters.
+- `format="json|outline|yaml|yml"` keeps JSON as the default structured result and offers readable text views for inspection. Invalid profile/group/command-panel/format values are rejected; every result includes `metrics` with timings/payload counters; `tree_summary.types_count` reports node counts by broad family (`buttons`, `fields`, `tables`, `groups`, etc.) and exact 1C test-client type.
+
+### Large `ui_tree` snapshots as resources
+
+By default `delivery="auto"` keeps small results inline and automatically stores large results as resources when the estimated token count exceeds `ONEC_MCP_UI_TREE_RESOURCE_AUTO_THRESHOLD_TOKENS` (default 50k).
+Use `delivery="inline"` to force the selected JSON/outline/yaml directly in the response. Use `delivery="resource"` to force resource storage for large diagnostics:
+
+```text
+r = ui_tree(profile="full", include_hidden=true, delivery="resource")
+```
+
+When auto switches to resource, or when `delivery="resource"` is forced, the inline response contains only `resource_uri`, `snapshot_id`, summary, metrics, byte size, estimated tokens, threshold reason and a small preview. The full JSON snapshot is stored under the Answer42 runtime data directory and registered as an MCP resource (`answer42://ui-tree/<session>/<snapshot_id>`). Do not load that whole resource into the agent context unless you really need the raw file; use targeted snapshot tools instead:
+
+- `ui_tree_resource_search(resource_uri=..., name/title/type/text=...)` — find a few controls in a saved snapshot and get their `path`/`index_path`.
+- `ui_tree_resource_get_node(resource_uri=..., index_path=...)` — read exactly one node.
+- `ui_tree_resource_children(resource_uri=..., index_path=..., depth=1|2)` — read a small subtree.
+- `ui_tree_diff(before_resource_uri=..., after_resource_uri=...)` — compare snapshots before/after a UI action.
+- `ui_tree_resource_action(resource_uri=..., index_path=..., action="focus|click_button|activate_field|field_value_text|field_info")` — reuse a node selector from the snapshot and execute a first-class live UI tool.
+
+`index_path` is the preferred stable address inside one snapshot. `path` is human-readable and useful for reports, but less reliable when several controls have the same captions.
+
 
 ## Установка skills
 

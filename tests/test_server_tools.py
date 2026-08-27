@@ -660,6 +660,29 @@ def test_ui_tree_summary_reports_truncation_and_hidden_children():
     assert summary["truncated_nodes_count"] == 2
     assert summary["hidden_children_count"] == 8
     assert summary["hidden_nodes_count"] == 1
+    assert summary["types_count"]["by_family"]["buttons"] == 1
+    assert summary["types_count"]["by_family"]["fields"] == 1
+    assert summary["types_count"]["by_family"]["forms"] == 2
+    assert summary["types_count"]["by_type"]["ТестируемаяФорма"] == 2
+
+
+def test_ui_tree_summary_reports_type_counts_for_flat_objects():
+    from mcp_1c.server import _summarize_ui_tree
+
+    summary = _summarize_ui_tree({
+        "flat": True,
+        "objects": [
+            {"type": "ТестируемаяКнопкаФормы", "visible": True},
+            {"type": "ТестируемаяКнопкаФормы", "visible": True},
+            {"type": "ТестируемоеПолеФормы", "visible": False},
+            {"type": "ТестируемаяТаблицаФормы", "visible": True},
+        ],
+    }, include_hidden=True)
+
+    assert summary["flat_objects_count"] == 4
+    assert summary["hidden_nodes_count"] == 1
+    assert summary["types_count"]["by_family"] == {"buttons": 2, "fields": 1, "tables": 1}
+    assert summary["types_count"]["by_type"]["ТестируемаяКнопкаФормы"] == 2
 
 
 def test_configuration_name_version_reads_main_configuration_from_list_output(monkeypatch):
@@ -1368,6 +1391,7 @@ def test_ui_tree_default_params_and_filtered_flat_result(monkeypatch):
     assert result["method"] == "fast_platform_search_objects"
     assert result["metrics"]["objects_count"] == 1
     assert result["metrics"]["json_bytes"] > 0
+    assert result["metrics"]["estimated_tokens"] > 0
 
 
 def test_ui_tree_parent_name_is_passed_to_bridge(monkeypatch):
@@ -2377,3 +2401,146 @@ def test_enable_tools_list_changed_capability_sets_legacy_initialize_bit(monkeyp
 
     assert opts.capabilities.tools is not None
     assert opts.capabilities.tools.list_changed is True
+
+
+def test_ui_tree_resource_snapshot_helpers_roundtrip(tmp_path, monkeypatch):
+    from mcp_1c import server
+
+    monkeypatch.setattr(server, "UI_TREE_SNAPSHOTS_DIR", tmp_path)
+    tree = {
+        "type": "Тестируемая форма",
+        "name": "Форма",
+        "title": "Форма",
+        "visible": True,
+        "children": [
+            {"type": "Тестируемая кнопка формы", "name": "ФормаЗаписать", "title": "Записать", "visible": True},
+            {"type": "Тестируемая таблица формы", "name": "Товары", "title": "Товары", "visible": True},
+        ],
+    }
+
+    stored = server._store_ui_tree_snapshot(
+        tree,
+        session_id="unit",
+        request={"profile": "navigation", "include_hidden": False},
+        metrics={"json_bytes": 123},
+        preview_max_nodes=2,
+    )
+    loaded = server._load_ui_tree_snapshot(stored["resource_uri"])
+    payload = server._ui_tree_payload_from_snapshot(loaded)
+
+    assert stored["delivery"] == "resource"
+    assert stored["resource_uri"].startswith("answer42://ui-tree/unit/")
+    assert stored["summary"]["nodes_count"] == 3
+    assert stored["preview"]["nodes_count"] == 2
+    assert stored["preview"]["truncated"] is True
+    assert "ФормаЗаписать" in stored["preview"]["text"]
+    assert "Товары" not in stored["preview"]["text"]
+    assert "children" not in stored["preview"]["text"]
+    assert payload["index_path"] == "/"
+    assert payload["children"][0]["index_path"] == "/0"
+    assert "ФормаЗаписать" in payload["children"][0]["path"]
+
+
+def test_ui_tree_resource_preview_respects_node_limit():
+    from mcp_1c import server
+
+    tree = server._annotate_ui_tree_paths({
+        "type": "Root",
+        "name": "Root",
+        "children": [
+            {"type": "Child", "name": "One", "children": [{"type": "Grand", "name": "Nested"}]},
+            {"type": "Child", "name": "Two"},
+        ],
+    })
+
+    preview = server._ui_tree_resource_preview(tree, max_nodes=1, fmt="outline")
+
+    assert preview["nodes_count"] == 1
+    assert preview["truncated"] is True
+    assert "Root" in preview["text"]
+    assert "One" not in preview["text"]
+    assert "Nested" not in preview["text"]
+
+
+def test_ui_tree_resource_tools_search_get_children_and_diff(tmp_path, monkeypatch):
+    from mcp_1c import server
+
+    monkeypatch.setattr(server, "UI_TREE_SNAPSHOTS_DIR", tmp_path)
+    before = {"type": "Form", "name": "F", "children": [{"type": "Button", "name": "Save", "title": "Save"}]}
+    after = {"type": "Form", "name": "F", "children": [{"type": "Button", "name": "Save", "title": "Write"}, {"type": "Field", "name": "Number", "title": "Number"}]}
+    a = server._store_ui_tree_snapshot(before, session_id="unit", request={"include_hidden": False})
+    b = server._store_ui_tree_snapshot(after, session_id="unit", request={"include_hidden": False})
+
+    found = asyncio.run(server.ui_tree_resource_search(resource_uri=b["resource_uri"], name="Number", session_id="missing-session"))
+    assert found["found"] is True
+    assert found["objects"][0]["name"] == "Number"
+    idx = found["objects"][0]["index_path"]
+
+    node = asyncio.run(server.ui_tree_resource_get_node(resource_uri=b["resource_uri"], index_path=idx, session_id="missing-session"))
+    assert node["found"] is True
+    assert node["node"]["title"] == "Number"
+
+    children = asyncio.run(server.ui_tree_resource_children(resource_uri=b["resource_uri"], depth=1, format="outline", session_id="missing-session"))
+    assert children["found"] is True
+    assert "Field Number" in children["text"]
+
+    diff = asyncio.run(server.ui_tree_diff(before_resource_uri=a["resource_uri"], after_resource_uri=b["resource_uri"], session_id="missing-session"))
+    assert diff["counts"]["added"] == 1
+    assert diff["counts"]["changed"] == 1
+
+
+def test_ui_tree_resource_tool_schema():
+    tools = _tools_by_name()
+    ui_props = tools["ui_tree"].input_schema["properties"]
+    assert ui_props["delivery"]["default"] == "auto"
+    assert ui_props["preview_max_nodes"]["default"] == 40
+    for name in [
+        "ui_tree_resource_search",
+        "ui_tree_resource_get_node",
+        "ui_tree_resource_children",
+        "ui_tree_diff",
+        "ui_tree_resource_action",
+    ]:
+        assert name in tools
+
+
+def test_ui_tree_resource_auto_threshold_helpers(tmp_path, monkeypatch):
+    from mcp_1c import server
+
+    monkeypatch.setattr(server, "UI_TREE_SNAPSHOTS_DIR", tmp_path)
+    monkeypatch.setattr(server, "UI_TREE_RESOURCE_AUTO_THRESHOLD_TOKENS", 20)
+    monkeypatch.setattr(server, "UI_TREE_RESOURCE_AUTO_THRESHOLD_BYTES", 0)
+    small = {"type": "Form", "name": "F"}
+    large = {"type": "Form", "name": "F", "children": [{"type": "Field", "name": "N", "title": "X" * 100}]}
+
+    assert server._ui_tree_should_use_resource("inline", payload=large) is False
+    assert server._ui_tree_should_use_resource("resource", payload=small) is True
+    assert server._ui_tree_should_use_resource("auto", payload=small) is False
+    assert server._ui_tree_should_use_resource("auto", payload=large) is True
+
+    inline = server._ui_tree_maybe_resource_response(
+        small,
+        inline_response=small,
+        delivery="auto",
+        session_id="unit",
+        request={"include_hidden": False},
+        metrics={"json_bytes": 10, "estimated_tokens": 5},
+        preview_max_nodes=10,
+        preview_format="outline",
+    )
+    assert inline is small
+
+    resource = server._ui_tree_maybe_resource_response(
+        large,
+        inline_response=large,
+        delivery="auto",
+        session_id="unit",
+        request={"include_hidden": False},
+        metrics={"json_bytes": 1000, "estimated_tokens": 1000},
+        preview_max_nodes=10,
+        preview_format="outline",
+    )
+    assert resource["delivery"] == "resource"
+    assert resource["delivery_requested"] == "auto"
+    assert resource["delivery_reason"] == "auto_threshold_exceeded"
+    assert resource["auto_threshold_tokens"] == 20
