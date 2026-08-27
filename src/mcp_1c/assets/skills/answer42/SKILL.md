@@ -107,6 +107,62 @@ start_session(
 - `dynamic_list_filter_by_current_value` удалён из публичных MCP tools. Для поиска/отбора используй `dynamic_list_find`, `dynamic_list_set_settings` или другие text/settings tools.
 - Для поиска правильных имён метаданных используй `metadata_objects_from_catalog(query=...)` как live fallback к RAG. Первый вызов строит per-session кэш через стандартный Универсальный отчёт по справочнику идентификаторов метаданных (`source_method="universal_report"`): получает имена/синонимы, исключает помеченные на удаление строки, роли и подсистемы. Последующие вызовы ищут уже по кэшу; используй `refresh_cache=true`, только если нужно перечитать снимок из 1С.
 - Если `open_navigation_link` вернул блок `Возможно, вы имели в виду:`, используй предложенную `e1cib/list/...`/`e1cib/app/...` ссылку вместо повторной ручной догадки.
+- В `ui_tree`/resource summary смотри `tree_summary.types_count`: `by_family` даёт быстрый счётчик семейств (`buttons`, `fields`, `tables`, `groups`, `forms`, `windows`, `decorations`, `other`), `by_type` — точные типы клиента тестирования. Это удобно для первичной оценки формы: сколько кнопок, полей ввода, таблиц и т.п.
+
+## Большие UI-деревья: resource/snapshot workflow
+
+`ui_tree` умеет три режима доставки результата:
+
+- `delivery="auto"` — режим по умолчанию. Маленький результат возвращается inline, большой автоматически сохраняется как resource, если оценка токенов ответа больше `ONEC_MCP_UI_TREE_RESOURCE_AUTO_THRESHOLD_TOKENS` (по умолчанию 50k). Это безопасный режим для обычной агентской работы.
+- `delivery="inline"` — принудительно возвращает выбранный JSON/outline/yaml прямо в ответ tool-call. Используй для маленьких форм и точечных фильтров, когда точно нужен inline payload.
+- `delivery="resource"` — принудительно сохраняет полный JSON-снимок UI-дерева вне LLM-контекста и возвращает только `resource_uri`, `snapshot_id`, summary/metrics и маленький preview. Используй для больших форм, `profile="full"`, `include_hidden=true`, `include_data=true`, `command_panels="include"`, когда inline-ответ может быть огромным или обрезанным runtime.
+
+Главное правило: **не читай полный resource в контекст без необходимости**. Resource нужен как handle к снимку; работай с ним адресными tools:
+
+```text
+# 1. Сделать большой снимок, не загружая всё дерево в ответ агента
+r = ui_tree(profile="full", include_hidden=true, delivery="resource")
+
+# 2. Найти несколько нужных узлов внутри сохранённого снимка
+ui_tree_resource_search(resource_uri=r.resource_uri, title="Провести", type="кнопка")
+
+# 3. Получить один узел по стабильному index_path из результата поиска
+ui_tree_resource_get_node(resource_uri=r.resource_uri, index_path="/0/4/2")
+
+# 4. Посмотреть только детей/поддерево на 1-2 уровня
+ui_tree_resource_children(resource_uri=r.resource_uri, index_path="/0/4", depth=2, format="outline")
+```
+
+Адресация:
+
+- `index_path` — предпочтительный стабильный путь внутри конкретного снимка (`/0/3/2`). Используй его для `get_node`, `children`, `ui_tree_resource_action`.
+- `path` — человекочитаемый путь по type/name/title. Хорош для отчёта и ручной диагностики, но менее стабилен при одинаковых заголовках.
+
+Сравнение до/после:
+
+```text
+before = ui_tree(delivery="resource")
+# выполнить действие в UI
+after = ui_tree(delivery="resource")
+ui_tree_diff(before_resource_uri=before.resource_uri, after_resource_uri=after.resource_uri)
+```
+
+Действия по найденному узлу:
+
+```text
+ui_tree_resource_action(resource_uri=r.resource_uri, index_path="/0/4/2", action="focus")
+ui_tree_resource_action(resource_uri=r.resource_uri, index_path="/0/4/3", action="click_button")
+```
+
+`ui_tree_resource_action` не кликает “из файла”: он берёт из снимка `name/title/type` и запускает обычные first-class tools (`focus_object`, `click_button`, `activate_field`, `field_value_text`, `field_info`) против текущего live UI. Если после снимка форма сильно изменилась, сначала сделай новый `ui_tree(delivery="resource")`.
+
+Когда какой режим выбирать:
+
+- Маленькая форма / нужен быстрый ответ агенту → `ui_tree()`; default `delivery="auto"` сам оставит маленький ответ inline.
+- Нужна читаемая навигационная карта → `ui_tree(format="outline")`.
+- Нужна большая диагностика без засорения контекста → `ui_tree(profile="diagnostic")`; если результат превысит threshold, default `auto` сам вернёт resource. Для гарантии используй `delivery="resource"`.
+- Нужно всё, включая скрытые страницы/командные панели/данные → `ui_tree(profile="full", include_hidden=true, delivery="resource")`, затем `ui_tree_resource_*`.
+- Нужны фактические значения таблиц/отчётов → не `include_data=true` по всему дереву, а специализированные `field_value_text`, `table_rows`, `tabular_document_text/save`.
 
 ## Динамические списки: добавление вложенных полей через «Изменить форму»
 
