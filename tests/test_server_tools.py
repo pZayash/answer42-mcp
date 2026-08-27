@@ -354,7 +354,7 @@ def test_selected_new_tool_schemas():
     assert "search_depth" not in tools["field_dropdown_items"].input_schema["properties"]
     assert "max_depth" not in tools["toggle_field"].input_schema["properties"]
     assert "max_depth" not in tools["click_button"].input_schema["properties"]
-    assert tools["click_button"].input_schema["properties"]["watchdog_timeout"]["default"] == 20
+    assert tools["click_button"].input_schema["properties"]["watchdog_timeout"]["default"] == 120
     assert tools["decoration_click_link"].input_schema["properties"]["presentation"]["default"] == ""
     assert tools["command_interface_commands"].input_schema["properties"]["section"]["default"] == ""
     assert "max_depth" not in tools["command_interface_commands"].input_schema["properties"]
@@ -384,7 +384,7 @@ def test_selected_new_tool_schemas():
     assert tools["credentials_save"].input_schema["required"] == ["url", "username", "password"]
     assert tools["credentials_remove"].input_schema["required"] == ["url"]
     assert tools["tabular_document_save"].input_schema["properties"]["format"]["default"] == "pdf"
-    assert tools["tabular_document_save"].input_schema["properties"]["watchdog_timeout"]["default"] == 20
+    assert tools["tabular_document_save"].input_schema["properties"]["watchdog_timeout"]["default"] == 120
     assert tools["client_busy_status"].input_schema["properties"]["probe_timeout"]["default"] == 2
     assert tools["wait_client_idle"].input_schema["properties"]["timeout"]["default"] == 60
     assert "max_depth" not in tools["tabular_document_state_display"].input_schema["properties"]
@@ -2331,7 +2331,7 @@ def test_click_button_uses_dangerous_watchdog_by_default(monkeypatch):
         "unit",
         "click_button",
         {"name": "СформироватьОтчет", "search_by_title": False},
-        20,
+        120,
         "click_button_may_start_long_ui_action",
     )]
 

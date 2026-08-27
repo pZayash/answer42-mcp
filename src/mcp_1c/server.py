@@ -5531,7 +5531,7 @@ async def ui_tree_resource_action(
     path: Annotated[str, "Node path returned by ui_tree_resource_search/get_node"] = "",
     index_path: Annotated[str, "Node index_path returned by ui_tree_resource_search/get_node"] = "",
     action: Annotated[str, "Action to run on the node: focus, click_button, activate_field, field_value_text, field_info"] = "focus",
-    watchdog_timeout: Annotated[int, "For click_button, deadline in seconds before reporting blocked interface"] = 20,
+    watchdog_timeout: Annotated[int, "For click_button, deadline in seconds before reporting blocked interface; default is 120 seconds because many 1C managed forms open slowly"] = 120,
     *,
     session_id: Annotated[str, "Live session id where the UI action is executed"] = DEFAULT_SESSION,
 ) -> Any:
@@ -5623,7 +5623,7 @@ def _filter_search_objects_result(result: Any, name: str = "", title: str = "", 
 async def click_button(
     name: Annotated[str, "Button name or title text"],
     search_by_title: Annotated[bool, "If true, match visible title instead of object name"] = False,
-    watchdog_timeout: Annotated[int, "Deadline in seconds for button press before reporting blocked interface; 0 disables watchdog"] = 20,
+    watchdog_timeout: Annotated[int, "Deadline in seconds for button press before reporting blocked interface; 0 disables watchdog. Default is 120 seconds because many 1C managed forms open slowly; a timeout means 'inspect/retry', not proof that 1C hung."] = 120,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
@@ -5942,7 +5942,7 @@ async def tabular_document_save(
     path: Annotated[str, "Output file path; empty = auto-generated temp path"] = "",
     format: Annotated[str, "Output format: pdf | xlsx | xls | html | txt | mxl"] = "pdf",
     exact_filter_only: Annotated[bool, "Deprecated: use only a trusted file-dialog filter instead of probing many filters; unstable formats ignore it"] = False,
-    watchdog_timeout: Annotated[int, "Deadline in seconds for dangerous UI save action before reporting blocked interface"] = 20,
+    watchdog_timeout: Annotated[int, "Deadline in seconds for dangerous UI save action before reporting blocked interface; 0 disables watchdog. Default is 120 seconds because thin-client file dialogs and large tabular documents can be slow."] = 120,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
