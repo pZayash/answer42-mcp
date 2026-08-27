@@ -79,8 +79,10 @@ answer42 install-skills --list-agents
 OpenClaw хранит MCP-серверы в `mcp.servers`. Добавьте `Answer42` как stdio server:
 
 ```bash
-/mcp set Answer42={"command":"answer42","args":[],"env":{"ONEC_MCP_CREDENTIALS_FILE":"/secure/path/credentials.json"},"enabled":true,"requestTimeoutMs":120000,"connectionTimeoutMs":30000,"toolFilter":{"exclude":["credentials_list"]}}
+/mcp set Answer42={"command":"answer42","args":[],"env":{"ONEC_MCP_CREDENTIALS_FILE":"/secure/path/credentials.json"},"enabled":true,"timeout":600,"connectionTimeoutMs":30000,"toolFilter":{"exclude":["credentials_list"]}}
 ```
+
+Для OpenClaw новых инсталляций задавайте внешний MCP request timeout для Answer42 с запасом: рекомендуемое значение — **600 секунд** (`timeout: 600` или эквивалентный `requestTimeoutMs: 600000`). Не ставьте его равным самым длинным внутренним timeout'ам tools: например, если агент вызывает `wait_client_idle(timeout=180)` или `tabular_document_save(watchdog_timeout=180)`, внешний MCP timeout должен быть больше этого значения и покрывать накладные расходы транспорта, сериализацию результата, диагностику и медленные ответы web-клиента 1С. Для тяжёлых отчётов, сохранения больших табличных документов или очень медленных web-баз допустимо увеличить внешний timeout до 900–1200 секунд, но обычные интерактивные действия лучше держать с меньшими `watchdog_timeout`, чтобы зависания диагностировались структурированным ответом, а не обрывались внешним MCP timeout.
 
 `ONEC_MCP_CREDENTIALS_FILE` указывает на локальный JSON с логинами и паролями. В штатном режиме агент вызывает `start_session(base_url="...")` без `username`/`password`, а Answer42 сам подставляет креды внутри MCP-процесса. Для сохранения или обновления записи используйте tool `credentials_save(url="...", username="...", password="...")`, для удаления — `credentials_remove(url="...")`, для проверки наличия записи — `credentials_check(base_url="...")`; эти tools не возвращают ни логин, ни пароль, ни маску пароля. `credentials_list` рекомендуется скрывать через `toolFilter.exclude`, чтобы агент не видел список URL-шаблонов. Если в `start_session`/`connect_test_client` передан пароль вида `***`, Answer42 считает это плейсхолдером и выдаёт явную ошибку вместо попытки авторизации.
 
