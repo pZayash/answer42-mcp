@@ -342,6 +342,30 @@ def test_removed_mcp_tools_are_not_registered():
     assert "performance_clear" not in tool_names
 
 
+
+def test_reference_setters_pass_create_if_missing_to_bridge(monkeypatch):
+    from mcp_1c import server
+
+    calls = []
+
+    async def fake_bridge_call(session_id, method, params, *, timeout=None):
+        calls.append((session_id, method, params, timeout))
+        return {"ok": True}
+
+    monkeypatch.setattr(server, "_bridge_call_recorded", fake_bridge_call)
+
+    asyncio.run(server.set_field_value("Номенклатура", "Новый товар", create_if_missing=True, session_id="unit"))
+    asyncio.run(server.table_set_field("Товары", "Номенклатура", "Новый товар", create_if_missing=True, session_id="unit"))
+    asyncio.run(server.table_set_row_values("Товары", '{"Номенклатура":"Новый товар"}', create_if_missing=True, session_id="unit"))
+    asyncio.run(server.set_form_fields('{"Контрагент":"Новый контрагент"}', create_if_missing=True, session_id="unit"))
+
+    assert calls == [
+        ("unit", "set_field_value", {"field_name": "Номенклатура", "value": "Новый товар", "search_by_title": False, "create_if_missing": True}, None),
+        ("unit", "table_set_field", {"table": "Товары", "field": "Номенклатура", "value": "Новый товар", "search_by_title": False, "create_if_missing": True}, None),
+        ("unit", "table_set_row_values", {"table": "Товары", "values": '{"Номенклатура":"Новый товар"}', "search_by_title": False, "create_if_missing": True}, None),
+        ("unit", "set_form_fields", {"values": '{"Контрагент":"Новый контрагент"}', "search_by_title": False, "create_if_missing": True}, None),
+    ]
+
 def test_selected_new_tool_schemas():
     tools = _tools_by_name()
 
@@ -350,6 +374,10 @@ def test_selected_new_tool_schemas():
     assert tools["field_info"].input_schema["required"] == ["field_name"]
     assert tools["field_dropdown_items"].input_schema["required"] == ["field_name"]
     assert tools["field_dropdown_items"].input_schema["properties"]["timeout"]["default"] == 10
+    assert tools["set_field_value"].input_schema["properties"]["create_if_missing"]["default"] is False
+    assert tools["table_set_field"].input_schema["properties"]["create_if_missing"]["default"] is False
+    assert tools["table_set_row_values"].input_schema["properties"]["create_if_missing"]["default"] is False
+    assert tools["set_form_fields"].input_schema["properties"]["create_if_missing"]["default"] is False
     assert "max_depth" not in tools["field_dropdown_items"].input_schema["properties"]
     assert "search_depth" not in tools["field_dropdown_items"].input_schema["properties"]
     assert "max_depth" not in tools["toggle_field"].input_schema["properties"]
