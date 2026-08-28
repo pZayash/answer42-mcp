@@ -14,6 +14,7 @@ from .detect import detect_source_format, discover_source_roots
 from .model import SourceInfo
 from .parsers import navigation_for_object, normalize_query, parse_source, search_text_variants
 from .store import RagStore, json_dumps, row_to_dict
+from .summary_backend import ConfigurationSummaryBackend
 
 DEFAULT_RAG_DB = Path(os.environ.get("MCP_1C_RAG_DB", "build/rag/onec-rag.sqlite"))
 EMBEDDING_MODEL = "answer42-local-hash-v1"
@@ -24,6 +25,7 @@ class RagService:
     def __init__(self, db_path: str | Path = DEFAULT_RAG_DB):
         self.store = RagStore(db_path)
         self.store.init()
+        self.summary_backend = ConfigurationSummaryBackend()
 
     @property
     def db_path(self) -> str:
@@ -162,7 +164,9 @@ class RagService:
                 extensions.append(item)
             else:
                 other.append(item)
-        return {"rag_enabled": True, "db_path": self.db_path, "watch_roots": self.list_watch_roots(), "sync": sync_result, "configurations": configs, "extensions": extensions, "other_sources": other, "snapshots": snapshots}
+        summary_configs = self.summary_backend.available_configurations() if self.summary_backend.enabled else []
+        configs.extend(summary_configs)
+        return {"rag_enabled": True, "db_path": self.db_path, "watch_roots": self.list_watch_roots(), "sync": sync_result, "configurations": configs, "extensions": extensions, "other_sources": other, "snapshots": snapshots, "summary_backend": {"enabled": self.summary_backend.enabled, "backend": self.summary_backend.backend, "project": self.summary_backend.project, "ref": self.summary_backend.ref, "configurations": summary_configs}}
 
     def indexed_source_stats(self) -> list[dict[str, Any]]:
         with self.store.connect() as con:
@@ -182,6 +186,8 @@ class RagService:
             ]
 
     def snapshot_has_index(self, snapshot: str | int | None) -> bool:
+        if self.summary_backend.is_summary_snapshot(snapshot):
+            return self.summary_backend.snapshot_has_index(snapshot)
         with self.store.connect() as con:
             if snapshot is None:
                 row = con.execute("SELECT 1 FROM metadata_objects LIMIT 1").fetchone()
@@ -243,9 +249,11 @@ class RagService:
                         (snap["id"],),
                     )
                 ]
-            return snaps
+            return snaps + self.summary_backend.list_snapshots()
 
     def build_index(self, snapshot: str | int | None = None, source: str | None = None) -> dict[str, Any]:
+        if source is None and self.summary_backend.is_summary_snapshot(snapshot):
+            return self.summary_backend.build_index(snapshot)
         with self.store.connect() as con:
             if source:
                 source_rows = [con.execute("SELECT * FROM sources WHERE name=?", (source,)).fetchone()]
@@ -384,6 +392,8 @@ class RagService:
         return {"db_path": self.db_path, **counts}
 
     def lookup_object(self, object: str, snapshot: str | int | None = None) -> dict[str, Any]:
+        if self.summary_backend.is_summary_snapshot(snapshot):
+            return self.summary_backend.lookup_object(object, snapshot)
         with self.store.connect() as con:
             source_filter = ""
             params: list[Any] = []
@@ -408,6 +418,8 @@ class RagService:
             return {"query": object, "snapshot": snapshot, "matches": rows}
 
     def lookup_form_element_types(self, snapshot: str | int | None = None) -> dict[str, Any]:
+        if self.summary_backend.is_summary_snapshot(snapshot):
+            return self.summary_backend.lookup_form_element_types(snapshot)
         """Return a compact name/title/data-path index for UI-tree enrichment.
 
         The 1C test-client API exposes runtime UI element names and captions, but
@@ -504,6 +516,8 @@ class RagService:
         return {"snapshot": snapshot, "count": len(items), "items": items}
 
     def query(self, text: str, snapshot: str | int | None = None, limit: int = 10) -> dict[str, Any]:
+        if self.summary_backend.is_summary_snapshot(snapshot):
+            return self.summary_backend.query(text, snapshot, limit)
         q = normalize_query(text)
         with self.store.connect() as con:
             snapshot_id = None
