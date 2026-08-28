@@ -18,6 +18,7 @@ from mcp_1c.server import (
     _cf_marker_matches,
     _configure_session_scope,
     _configure_universal_report_metadata_settings,
+    _convert_1c_guid_navigation_link,
     _decode_log_bytes,
     _effective_dump_connection,
     _ensure_restored_session,
@@ -113,6 +114,7 @@ EXPECTED_NEW_TOOLS = {
     "rag_session_autoconfigure",
     "tabular_document_state_display",
     "search_objects",
+    "convert_1c_guid_navigation_link",
 }
 
 
@@ -340,6 +342,35 @@ def test_removed_mcp_tools_are_not_registered():
     assert "create_new_item" not in tool_names
     assert "performance_get" not in tool_names
     assert "performance_clear" not in tool_names
+
+
+def test_convert_1c_guid_navigation_link_known_bp_example():
+    result = _convert_1c_guid_navigation_link(
+        "c3314ae6-6899-11e8-8780-b06ebf2faaf6",
+        metadata_name="Справочник.ВидыНоменклатуры",
+    )
+
+    assert result["guid"] == "c3314ae6-6899-11e8-8780-b06ebf2faaf6"
+    assert result["ref"] == "8780b06ebf2faaf611e86899c3314ae6"
+    assert result["navigation_link"] == (
+        "e1cib/data/Справочник.ВидыНоменклатуры?ref=8780b06ebf2faaf611e86899c3314ae6"
+    )
+
+
+def test_convert_1c_guid_navigation_link_ref_and_navigation_to_guid():
+    ref = "8780b06ebf2faaf611e86899c3314ae6"
+
+    from_ref = _convert_1c_guid_navigation_link(ref, direction="ref_to_guid")
+    from_link = _convert_1c_guid_navigation_link(
+        f"e1cib/data/Справочник.ВидыНоменклатуры?ref={ref}",
+        direction="navigation_to_guid",
+    )
+
+    assert from_ref["guid"] == "c3314ae6-6899-11e8-8780-b06ebf2faaf6"
+    assert from_ref["navigation_link"] == ""
+    assert from_link["guid"] == "c3314ae6-6899-11e8-8780-b06ebf2faaf6"
+    assert from_link["metadata_name"] == "Справочник.ВидыНоменклатуры"
+    assert from_link["navigation_link"].endswith(f"?ref={ref}")
 
 
 

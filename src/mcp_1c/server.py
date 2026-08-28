@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qs, unquote, urlsplit, urlunsplit
 
 from mcp.server import MCPServer
 from mcp.server.lowlevel import NotificationOptions
@@ -2374,6 +2374,109 @@ def _metadata_name_to_rag_name(value: str) -> str:
         if text.startswith(en):
             return ru + text[len(en):]
     return text
+
+
+_ONEC_REF_RE = re.compile(r"^[0-9a-fA-F]{32}$")
+
+
+def _onec_guid_to_ref(guid_value: str) -> str:
+    """Convert a textual 1C GUID/UUID to the 32-char e1cib/data ref value.
+
+    1C navigation links store reference UUID bytes in the platform internal
+    order: UUID groups 4-5-3-2-1, without hyphens.  Example from a standard BP
+    module comment:
+    c3314ae6-6899-11e8-8780-b06ebf2faaf6 ->
+    8780b06ebf2faaf611e86899c3314ae6.
+    """
+    normalized = str(uuid.UUID(str(guid_value).strip().strip("{}"))).lower()
+    part1, part2, part3, part4, part5 = normalized.split("-")
+    return f"{part4}{part5}{part3}{part2}{part1}"
+
+
+def _onec_ref_to_guid(ref_value: str) -> str:
+    ref = str(ref_value or "").strip().lower()
+    if not _ONEC_REF_RE.fullmatch(ref):
+        raise ValueError("1C ref must contain exactly 32 hexadecimal characters")
+    guid_text = f"{ref[24:32]}-{ref[20:24]}-{ref[16:20]}-{ref[0:4]}-{ref[4:16]}"
+    return str(uuid.UUID(guid_text))
+
+
+def _extract_e1cib_data_link(value: str) -> str:
+    text = str(value or "").strip()
+    marker = "e1cib/data/"
+    if marker in text and not text.startswith(marker):
+        text = text[text.index(marker):]
+    return text
+
+
+def _parse_e1cib_data_link(value: str) -> tuple[str, str]:
+    link = _extract_e1cib_data_link(value)
+    if not link.startswith("e1cib/data/"):
+        raise ValueError("value is not an e1cib/data navigation link")
+    tail = link[len("e1cib/data/"):]
+    object_part, _, query = tail.partition("?")
+    metadata_name = unquote(object_part).strip()
+    ref_values = parse_qs(query, keep_blank_values=True).get("ref", [])
+    ref = ref_values[0].strip() if ref_values else ""
+    if not ref:
+        raise ValueError("e1cib/data navigation link does not contain a ref parameter")
+    return metadata_name, ref
+
+
+def _build_e1cib_data_link(metadata_name: str, ref_value: str) -> str:
+    metadata = str(metadata_name or "").strip()
+    if not metadata:
+        raise ValueError("metadata is required to build an e1cib/data navigation link")
+    ref = str(ref_value or "").strip().lower()
+    if not _ONEC_REF_RE.fullmatch(ref):
+        raise ValueError("1C ref must contain exactly 32 hexadecimal characters")
+    return f"e1cib/data/{metadata}?ref={ref}"
+
+
+def _convert_1c_guid_navigation_link(
+    value: str,
+    *,
+    metadata_name: str = "",
+    direction: str = "auto",
+) -> dict[str, Any]:
+    text = str(value or "").strip()
+    mode = str(direction or "auto").strip().lower().replace("-", "_")
+    if mode not in {"auto", "guid_to_ref", "ref_to_guid", "guid_to_navigation", "navigation_to_guid"}:
+        raise ValueError(
+            "direction must be one of: auto, guid_to_ref, ref_to_guid, "
+            "guid_to_navigation, navigation_to_guid"
+        )
+
+    detected_metadata = ""
+    if mode in {"auto", "navigation_to_guid"} and "e1cib/data/" in text:
+        detected_metadata, ref = _parse_e1cib_data_link(text)
+        guid = _onec_ref_to_guid(ref)
+        navigation_link = _build_e1cib_data_link(detected_metadata, ref)
+        input_type = "navigation_link"
+    elif mode in {"auto", "ref_to_guid"} and _ONEC_REF_RE.fullmatch(text):
+        ref = text.lower()
+        guid = _onec_ref_to_guid(ref)
+        navigation_link = _build_e1cib_data_link(metadata_name, ref) if metadata_name else ""
+        input_type = "ref"
+    elif mode in {"auto", "guid_to_ref", "guid_to_navigation"}:
+        guid = str(uuid.UUID(text.strip("{}")))
+        ref = _onec_guid_to_ref(guid)
+        navigation_link = _build_e1cib_data_link(metadata_name, ref) if metadata_name else ""
+        input_type = "guid"
+    else:
+        raise ValueError("value does not match the requested conversion direction")
+
+    metadata = detected_metadata or str(metadata_name or "").strip()
+    return {
+        "input": text,
+        "input_type": input_type,
+        "metadata_name": metadata,
+        "guid": guid,
+        "ref": ref,
+        "navigation_link": navigation_link,
+        "algorithm": "ref = UUID groups 4 + 5 + 3 + 2 + 1, lowercase hex without hyphens; "
+        "guid = ref[24:32]-ref[20:24]-ref[16:20]-ref[0:4]-ref[4:16]",
+    }
 
 
 def _rag_form_element_index(snapshot: str | int | None = None) -> dict[str, list[dict[str, Any]]]:
@@ -5783,6 +5886,36 @@ async def focus_object(
     children.
     """
     return await _bridge_call_recorded(session_id, "focus_object", {"name": name, "title": title, "type": type})
+
+
+@mcp.tool()
+async def convert_1c_guid_navigation_link(
+    value: Annotated[
+        str,
+        "1C GUID/UUID, 32-character e1cib ref, or e1cib/data/... navigation link",
+    ],
+    metadata_name: Annotated[
+        str,
+        "Metadata full name for building e1cib/data links, e.g. Справочник.Номенклатура",
+    ] = "",
+    direction: Annotated[
+        str,
+        "Conversion direction: auto, guid_to_ref, ref_to_guid, guid_to_navigation, navigation_to_guid",
+    ] = "auto",
+) -> dict[str, Any]:
+    """Convert 1C object reference GUIDs to e1cib/data navigation links and back.
+
+    The pure 1C algorithm is the same as used by platform navigation refs:
+    `ref = UUID groups 4 + 5 + 3 + 2 + 1`, all lowercase and without hyphens.
+    For example, `c3314ae6-6899-11e8-8780-b06ebf2faaf6` becomes
+    `8780b06ebf2faaf611e86899c3314ae6` and can be embedded as
+    `e1cib/data/Справочник.ВидыНоменклатуры?ref=8780...`.
+    """
+    return _convert_1c_guid_navigation_link(
+        value,
+        metadata_name=metadata_name,
+        direction=direction,
+    )
 
 
 @mcp.tool()
