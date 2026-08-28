@@ -349,12 +349,16 @@ class ConfigurationSummaryBackend:
         if not info:
             raise ValueError(f"summary snapshot not found: {snapshot}")
         layers = self._snapshot_layer_names(info)
-        hits, meta = self.search(str(info["config_code"]), layers, text, limit=limit, kinds="auto")
-        vector_candidates, vector_meta = self.vector_candidates(str(info["config_code"]), str(info["layer"]), text, limit=max(limit * 5, 50))
-        if vector_candidates:
-            hits = self._merge_vector_candidates(str(info["config_code"]), str(info["layer"]), text, hits, vector_candidates, limit)
+        config_code = str(info["config_code"])
+        hits, meta = self.search(config_code, layers, text, limit=limit, kinds="auto")
+        vector_meta_by_layer: dict[str, Any] = {}
+        for layer in layers:
+            vector_candidates, layer_vector_meta = self.vector_candidates(config_code, layer, text, limit=max(limit * 5, 50))
+            vector_meta_by_layer[layer] = layer_vector_meta
+            if vector_candidates:
+                hits = self._merge_vector_candidates(config_code, layer, text, hits, vector_candidates, limit)
         summary = self._summary_info(info, meta)
-        summary["vector"] = vector_meta
+        summary["vector"] = {"layers": vector_meta_by_layer}
         return {"query": text, "snapshot": snapshot, "backend": "configuration-summary", "summary": summary, "terms": [], "fts": [_hit_to_rag_row(hit) for hit in hits], "semantic": []}
 
     def lookup_object(self, object: str, snapshot: str | int | None = None) -> dict[str, Any]:
