@@ -1437,12 +1437,21 @@ def _rag_diagnostic(session_id: str, snapshot: str | None) -> dict[str, Any]:
                 "message": "RAG has no indexed metadata for this snapshot. Register sources with rag_source_add/rag_sources_add_from_directory and run rag_index_build.",
             }
         )
-    return {
+    result = {
         "rag_enabled": _RAG_ENABLED,
         "snapshot": effective_snapshot,
         "session_snapshot": session_snapshot,
         "diagnostics": diagnostics,
     }
+    if getattr(_RAG, "summary_backend", None) is not None and _RAG.summary_backend.is_summary_snapshot(effective_snapshot):
+        result["summary_backend"] = {
+            "enabled": _RAG.summary_backend.enabled,
+            "backend": _RAG.summary_backend.backend,
+            "project": _RAG.summary_backend.project,
+            "ref": _RAG.summary_backend.ref,
+            "snapshot": effective_snapshot,
+        }
+    return result
 
 
 def _rag_require_enabled(session_id: str, action: str, params: dict[str, Any]) -> dict[str, Any] | None:
@@ -3136,6 +3145,42 @@ async def rag_session_autoconfigure(
     extensions_from_designer = False
 
     warnings: list[str] = []
+    summary_candidate = _RAG.summary_backend.find_configuration(config_name, config_version) if getattr(_RAG, "summary_backend", None) is not None else None
+    non_ignored_runtime_extensions = [ext for ext in installed_extensions if not _is_ignored_runtime_extension_name(str(ext.get("name") or ""))]
+    if summary_candidate and not non_ignored_runtime_extensions:
+        warnings.extend(summary_candidate.get("warnings") or [])
+        summary_snapshot = _RAG.summary_backend.create_snapshot(
+            config_code=str(summary_candidate["config_code"]),
+            layer=str(summary_candidate.get("layer") or "configuration"),
+            identifier=str(summary_candidate.get("identifier") or ""),
+            version=str(summary_candidate.get("version") or ""),
+            name=snapshot_name,
+            manifest=summary_candidate.get("manifest") or None,
+            warnings=summary_candidate.get("warnings") or [],
+        )
+        sess.rag_snapshot = str(summary_snapshot.get("name") or "")
+        if sess.base_url:
+            _save_rag_binding(sess.base_url, sess.rag_snapshot)
+        _persist_sessions()
+        index_result = _RAG.build_index(snapshot=sess.rag_snapshot) if build_index else None
+        result = {
+            "snapshot": sess.rag_snapshot,
+            "snapshot_result": summary_snapshot,
+            "index_result": index_result,
+            "warnings": warnings,
+            "runtime_configuration": {"name": config_name, "version": config_version, "match": {"matched": True, "source_name": f"summary:{summary_candidate['config_code']}:configuration", "source_kind": "configuration", "source_version": summary_candidate.get("version", ""), "exact_version": not bool(summary_candidate.get("warnings"))}},
+            "runtime_extensions": installed_extensions,
+            "extensions_from_designer": False,
+            "extension_matches": [],
+            "dumps": [],
+            "generated_sources": [],
+            "session_snapshot": sess.rag_snapshot,
+            "summary_backend": {"enabled": True, "configured": True, "snapshot": sess.rag_snapshot, "project": _RAG.summary_backend.project, "ref": _RAG.summary_backend.ref, "config_code": summary_candidate["config_code"], "layer": summary_candidate.get("layer") or "configuration"},
+        }
+        return _record_tool(session_id, "rag_session_autoconfigure", params, result)
+    if summary_candidate and non_ignored_runtime_extensions:
+        warnings.append("Summary RAG matched the base configuration, but runtime has non-service extensions; falling back to local/dump RAG so extension layers are not lost.")
+
     dumps: list[dict[str, Any]] = []
     generated_sources: list[dict[str, Any]] = []
     used_generated_names = {str(src.get("name") or "") for src in sources}
