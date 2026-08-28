@@ -134,3 +134,57 @@ def test_metadata_object_chunk_parser():
     assert parsed["attributes"][0]["name"] == "Артикул"
     assert parsed["table_parts"][0]["name"] == "Штрихкоды"
     assert parsed["table_parts"][0]["columns"][0]["name"] == "Штрихкод"
+
+
+def test_summary_snapshot_can_include_extension_layer(monkeypatch, tmp_path: Path):
+    root = _fixture_summary(tmp_path / "summary")
+    fresh_rag = root / "bp" / "fresh" / "ai" / "rag"
+    fresh_chunks = fresh_rag / "chunks"
+    fresh_manifest = {
+        "schema": "platform42-config-summary-rag-v1",
+        "configCode": "bp.fresh",
+        "layer": "fresh",
+        "identifier": "Accounting30",
+        "version": "3.0.204.22",
+        "chunkCount": 1,
+    }
+    fresh_rag.mkdir(parents=True)
+    (fresh_rag / "manifest.json").write_text(json.dumps(fresh_manifest, ensure_ascii=False), encoding="utf-8")
+    (fresh_rag / "chunks-manifest.json").write_text(
+        json.dumps({"totalChunks": 1, "files": [{"file": "metadata-object-0001.jsonl", "kind": "metadata-object", "lineCount": 1}]}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    _write_jsonl(
+        fresh_chunks / "metadata-object-0001.jsonl",
+        [
+            {
+                "id": "bp:fresh:metadata-object:Обработка:FreshOnly",
+                "kind": "metadata-object",
+                "metadataType": "Обработка",
+                "metadataName": "FreshOnly",
+                "title": "Обработка FreshOnly",
+                "text": "Обработка FreshOnly из расширения fresh.",
+                "sourcePath": "DataProcessors/FreshOnly.xml",
+            }
+        ],
+    )
+    monkeypatch.setenv("MCP_1C_RAG_SUMMARY_BACKEND", "local-stream")
+    monkeypatch.setenv("MCP_1C_RAG_SUMMARY_LOCAL_ROOT", str(root))
+    backend = ConfigurationSummaryBackend()
+    base = backend.find_configuration("Бухгалтерия предприятия", "3.0.204.22")
+    ext = backend.find_extension("bp", "fresh", "20.15.2.5")
+
+    assert ext is not None
+    snap = backend.create_snapshot(**base, extra_layers=[{"layer": ext["layer"], "role": "extension", "manifest": ext["manifest"]}])
+    result = backend.lookup_object("Обработка.FreshOnly", snap["name"])
+
+    assert snap["name"].startswith("summary:bp:configuration+fresh:")
+    assert [layer["name"] for layer in snap["layers"]] == ["summary:bp:configuration", "summary:bp:fresh"]
+
+    # The snapshot name should be enough to restore all summary layers after
+    # process restart, when in-memory external_snapshots is empty.
+    restored = ConfigurationSummaryBackend().resolve_snapshot(snap["name"])
+    assert [layer["layer"] for layer in restored["summary_layers"]] == ["configuration", "fresh"]
+
+    assert result["matches"][0]["full_name"] == "Обработка.FreshOnly"
+    assert result["summary"]["chunkCount"] == 4

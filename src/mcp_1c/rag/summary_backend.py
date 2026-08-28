@@ -12,9 +12,10 @@ import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from .parsers import navigation_for_object, normalize_query
 from .summary_vector import vector_query_candidates
@@ -28,6 +29,7 @@ WORD_RE = re.compile(r"[A-Za-zА-Яа-яЁё0-9_][A-Za-zА-Яа-яЁё0-9_.\-]*"
 KIND_PRIORITY = {"config-summary": 0, "metadata-object": 1, "bsl-module": 2, "form": 3, "bsl-method": 4}
 LAYER_PATHS = {"configuration": "{config}/configuration/rag/chunks", "fresh": "{config}/fresh/ai/rag/chunks"}
 SEARCH_INDEX_PATHS = {"configuration": "{config}/configuration/rag/search-index", "fresh": "{config}/fresh/ai/rag/search-index"}
+EXTENSION_LAYER_ALIASES = {"fresh": "fresh"}
 CONFIG_ALIASES = {
     "accounting30": "bp",
     "бухгалтерияпредприятия": "bp",
@@ -205,22 +207,57 @@ class ConfigurationSummaryBackend:
             parts.append(version)
         return ":".join(_safe_part(part) for part in parts)
 
-    def create_snapshot(self, *, config_code: str, layer: str = "configuration", identifier: str = "", version: str = "", name: str = "", manifest: dict[str, Any] | None = None, warnings: list[str] | None = None) -> dict[str, Any]:
+    def create_snapshot(
+        self,
+        *,
+        config_code: str,
+        layer: str = "configuration",
+        identifier: str = "",
+        version: str = "",
+        name: str = "",
+        manifest: dict[str, Any] | None = None,
+        warnings: list[str] | None = None,
+        extra_layers: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         manifest = manifest or self.load_manifest(config_code, layer)
-        effective_name = name or self.snapshot_name(config_code, layer, identifier or str(manifest.get("identifier") or ""), version or str(manifest.get("version") or ""))
+        snapshot_layers = [{"layer": layer, "role": "base" if layer == "configuration" else layer, "manifest": manifest}]
+        for extra in extra_layers or []:
+            extra_layer = str(extra.get("layer") or "").strip()
+            extra_manifest = extra.get("manifest")
+            if extra_layer and isinstance(extra_manifest, dict):
+                snapshot_layers.append({"layer": extra_layer, "role": str(extra.get("role") or extra_layer), "manifest": extra_manifest})
+        layer_key = "+".join(str(item.get("layer") or "").strip() for item in snapshot_layers if str(item.get("layer") or "").strip()) or layer
+        effective_name = name or self.snapshot_name(config_code, layer_key, identifier or str(manifest.get("identifier") or ""), version or str(manifest.get("version") or ""))
+        public_layers = []
+        for order, layer_info in enumerate(snapshot_layers, start=1):
+            layer_name = str(layer_info["layer"])
+            layer_manifest = layer_info.get("manifest") or {}
+            public_layers.append({
+                "layer_order": order,
+                "role": layer_info.get("role") or layer_name,
+                "name": f"summary:{config_code}:{layer_name}",
+                "path": f"{self.project}@{self.ref}:{config_code}/{layer_name}",
+                "kind": "configuration" if layer_name == "configuration" else "extension",
+                "format": "configuration_summary",
+                "commit_hash": "",
+                "identifier": layer_manifest.get("identifier"),
+                "version": layer_manifest.get("version"),
+                "chunks": layer_manifest.get("chunkCount"),
+            })
         item = {
             "id": effective_name,
             "name": effective_name,
             "backend": "configuration-summary",
             "config_code": config_code,
             "layer": layer,
+            "summary_layers": snapshot_layers,
             "identifier": identifier or manifest.get("identifier") or "",
             "version": version or manifest.get("version") or "",
             "project": self.project,
             "ref": self.ref,
             "manifest": manifest,
             "warnings": warnings or [],
-            "layers": [{"layer_order": 1, "role": layer, "name": f"summary:{config_code}:{layer}", "path": f"{self.project}@{self.ref}:{config_code}/{layer}", "kind": "configuration", "format": "configuration_summary", "commit_hash": ""}],
+            "layers": public_layers,
         }
         self.external_snapshots[effective_name] = item
         return item
@@ -235,12 +272,14 @@ class ConfigurationSummaryBackend:
         if len(parts) < 3:
             return None
         config_code = parts[1]
-        layer = parts[2] or "configuration"
+        layer_parts = [part for part in (parts[2] or "configuration").split("+") if part]
+        layer = layer_parts[0] if layer_parts else "configuration"
         try:
             manifest = self.load_manifest(config_code, layer)
+            extra_layers = [{"layer": extra_layer, "role": "extension", "manifest": self.load_manifest(config_code, extra_layer)} for extra_layer in layer_parts[1:]]
         except Exception:
             return None
-        return self.create_snapshot(config_code=config_code, layer=layer, identifier=str(manifest.get("identifier") or ""), version=str(manifest.get("version") or ""), name=snapshot, manifest=manifest)
+        return self.create_snapshot(config_code=config_code, layer=layer, identifier=str(manifest.get("identifier") or ""), version=str(manifest.get("version") or ""), name=snapshot, manifest=manifest, extra_layers=extra_layers)
 
     def list_snapshots(self) -> list[dict[str, Any]]:
         return list(self.external_snapshots.values())
@@ -263,7 +302,7 @@ class ConfigurationSummaryBackend:
             return None
         for config_code in dict.fromkeys(_config_candidates(config_name)):
             try:
-                manifest = json.loads(self.client().read_text(f"{config_code}/configuration/rag/manifest.json"))
+                manifest = self.load_manifest(config_code, "configuration")
             except Exception:
                 continue
             warnings: list[str] = []
@@ -271,6 +310,21 @@ class ConfigurationSummaryBackend:
             if config_version and version and config_version != version:
                 warnings.append(f"Summary RAG version mismatch: runtime {config_version}, summary {version}.")
             return {"config_code": config_code, "layer": "configuration", "identifier": str(manifest.get("identifier") or ""), "version": version, "manifest": manifest, "warnings": warnings}
+        return None
+
+    def find_extension(self, config_code: str, extension_name: str, extension_version: str = "") -> dict[str, Any] | None:
+        if not self.enabled:
+            return None
+        for layer in dict.fromkeys(_extension_layer_candidates(extension_name)):
+            try:
+                manifest = self.load_manifest(config_code, layer)
+            except Exception:
+                continue
+            warnings: list[str] = []
+            version = str(manifest.get("extensionVersion") or "")
+            if extension_version and version and extension_version != version:
+                warnings.append(f"Summary RAG extension {extension_name!r} version mismatch: runtime {extension_version}, summary {version}.")
+            return {"config_code": config_code, "layer": layer, "role": "extension", "name": extension_name, "version": version, "manifest": manifest, "warnings": warnings}
         return None
 
     def available_configurations(self) -> list[dict[str, Any]]:
@@ -294,7 +348,8 @@ class ConfigurationSummaryBackend:
         info = self.resolve_snapshot(snapshot)
         if not info:
             raise ValueError(f"summary snapshot not found: {snapshot}")
-        hits, meta = self.search(str(info["config_code"]), [str(info["layer"])], text, limit=limit, kinds="auto")
+        layers = self._snapshot_layer_names(info)
+        hits, meta = self.search(str(info["config_code"]), layers, text, limit=limit, kinds="auto")
         vector_candidates, vector_meta = self.vector_candidates(str(info["config_code"]), str(info["layer"]), text, limit=max(limit * 5, 50))
         if vector_candidates:
             hits = self._merge_vector_candidates(str(info["config_code"]), str(info["layer"]), text, hits, vector_candidates, limit)
@@ -308,7 +363,7 @@ class ConfigurationSummaryBackend:
             raise ValueError(f"summary snapshot not found: {snapshot}")
         wanted_type, wanted_name = _split_object_name(object)
         query = " ".join(part for part in [wanted_type, wanted_name or object] if part)
-        hits, meta = self.search(str(info["config_code"]), [str(info["layer"])], query, limit=80, kinds="metadata-object")
+        hits, meta = self.search(str(info["config_code"]), self._snapshot_layer_names(info), query, limit=80, kinds="metadata-object")
         matches = []
         seen = set()
         for hit in hits:
@@ -319,8 +374,9 @@ class ConfigurationSummaryBackend:
                 continue
             if wanted_name and mname and normalize_query(mname) != normalize_query(wanted_name):
                 continue
+            hit_info = self._info_for_hit_layer(info, row)
             obj = metadata_object_row_from_chunk(row, source_name=f"summary:{info['config_code']}")
-            obj = self._enrich_metadata_object_from_summary_json(obj, row, info)
+            obj = self._enrich_metadata_object_from_summary_json(obj, row, hit_info)
             if obj["full_name"] not in seen:
                 matches.append(obj)
                 seen.add(obj["full_name"])
@@ -330,16 +386,30 @@ class ConfigurationSummaryBackend:
         info = self.resolve_snapshot(snapshot)
         if not info:
             raise ValueError(f"summary snapshot not found: {snapshot}")
-        hits, meta = self.search(str(info["config_code"]), [str(info["layer"])], "форма", limit=limit, kinds="form")
+        hits, meta = self.search(str(info["config_code"]), self._snapshot_layer_names(info), "форма", limit=limit, kinds="form")
         items = []
         for hit in hits:
-            items.extend(self._form_element_rows(hit.metadata, info))
+            items.extend(self._form_element_rows(hit.metadata, self._info_for_hit_layer(info, hit.metadata)))
         # Metadata-object chunks are intentionally not scanned wholesale here: on
         # large configurations that would read megabytes just for synthetic hints.
         # Object attributes are still available through lookup_object(), which is
         # what dynamic_list_metadata_available_fields uses for a concrete object.
         return {"snapshot": snapshot, "backend": "configuration-summary", "summary": self._summary_info(info, meta), "count": len(items), "items": items}
 
+
+    def _snapshot_layer_names(self, info: dict[str, Any]) -> list[str]:
+        layers = [str(item.get("layer") or "") for item in info.get("summary_layers") or [] if str(item.get("layer") or "")]
+        return layers or [str(info.get("layer") or "configuration")]
+
+    def _info_for_hit_layer(self, info: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
+        layer = str(row.get("_layer") or info.get("layer") or "configuration")
+        result = dict(info)
+        result["layer"] = layer
+        for item in info.get("summary_layers") or []:
+            if str(item.get("layer") or "") == layer and isinstance(item.get("manifest"), dict):
+                result["manifest"] = item["manifest"]
+                break
+        return result
 
     def _read_summary_json(self, row: dict[str, Any], info: dict[str, Any]) -> Any | None:
         summary_path = str(row.get("summaryPath") or "")
@@ -512,7 +582,11 @@ class ConfigurationSummaryBackend:
 
     def _summary_info(self, info: dict[str, Any], search_meta: dict[str, Any] | None = None) -> dict[str, Any]:
         manifest = info.get("manifest") or {}
-        return {"project": self.project, "ref": self.ref, "configCode": info.get("config_code"), "layer": info.get("layer"), "identifier": info.get("identifier") or manifest.get("identifier"), "version": info.get("version") or manifest.get("version"), "chunkCount": manifest.get("chunkCount"), "search": search_meta or {}}
+        layers = []
+        for item in info.get("summary_layers") or []:
+            item_manifest = item.get("manifest") or {}
+            layers.append({"layer": item.get("layer"), "role": item.get("role"), "chunkCount": item_manifest.get("chunkCount"), "version": item_manifest.get("version")})
+        return {"project": self.project, "ref": self.ref, "configCode": info.get("config_code"), "layer": info.get("layer"), "layers": layers, "identifier": info.get("identifier") or manifest.get("identifier"), "version": info.get("version") or manifest.get("version"), "chunkCount": sum(int(item.get("chunkCount") or 0) for item in layers) if layers else manifest.get("chunkCount"), "search": search_meta or {}}
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -521,11 +595,11 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 def _safe_part(value: str) -> str:
-    return re.sub(r"[^0-9A-Za-zА-Яа-яЁё_.-]+", "_", str(value)).strip("_") or "unknown"
+    return re.sub(r"[^0-9A-Za-zА-Яа-яЁё_.+-]+", "_", str(value)).strip("_") or "unknown"
 
 
 def _cache_key(project: str, ref: str, path: str, compression: str) -> Path:
-    digest = hashlib.sha1(f"{project}\0{ref}\0{path}".encode("utf-8")).hexdigest()
+    digest = hashlib.sha1(f"{project}\0{ref}\0{path}".encode()).hexdigest()
     suffix = Path(path).suffix or ".raw"
     if compression == "gzip" and path.endswith(".jsonl"):
         suffix += ".gz"
@@ -557,16 +631,24 @@ def _config_candidates(config_name: str) -> list[str]:
     return [CONFIG_ALIASES[key] for key in keys if key in CONFIG_ALIASES] or [config_name.lower()]
 
 
+def _extension_layer_candidates(extension_name: str) -> list[str]:
+    norm = normalize_query(extension_name)
+    keys = [norm, norm.replace(" ", ""), extension_name.casefold()]
+    aliases = [EXTENSION_LAYER_ALIASES[key] for key in keys if key in EXTENSION_LAYER_ALIASES]
+    safe = re.sub(r"[^0-9a-zа-яё_.-]+", "_", extension_name.casefold()).strip("_")
+    return aliases or ([safe] if safe else [])
+
+
 def _rag_prefix(config_code: str, layer: str) -> str:
     return f"{config_code}/configuration/rag" if layer == "configuration" else f"{config_code}/{layer}/ai/rag"
 
 
 def _chunks_path(config_code: str, layer: str) -> str:
-    return LAYER_PATHS[layer].format(config=config_code)
+    return LAYER_PATHS.get(layer, "{config}/" + layer + "/ai/rag/chunks").format(config=config_code)
 
 
 def _search_index_prefix(config_code: str, layer: str) -> str:
-    return SEARCH_INDEX_PATHS[layer].format(config=config_code)
+    return SEARCH_INDEX_PATHS.get(layer, "{config}/" + layer + "/ai/rag/search-index").format(config=config_code)
 
 
 def load_chunks_index(client: SummaryRawClient, config_code: str, layer: str) -> list[dict[str, Any]]:
