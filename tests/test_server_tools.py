@@ -1814,8 +1814,8 @@ def test_client_busy_status_clears_blocked_action_when_probe_succeeds(monkeypatc
             return {"connected": True, "pending": 0}
 
         async def call(self, method, params, timeout=None):
-            assert (method, params, timeout) == ("active_window", {}, 2)
-            return {"title": "1С:Предприятие"}
+            assert (method, params, timeout) == ("active_window_summary", {}, 2)
+            return {"title": "1С:Предприятие", "source": "tested_application_active_window_summary"}
 
     sess = SessionState(
         session_id="unit",
@@ -1841,6 +1841,8 @@ def test_client_busy_status_clears_blocked_action_when_probe_succeeds(monkeypatc
     assert result["responsive"] is True
     assert result["busy"] is False
     assert result["can_continue"] is True
+    assert result["probe_method"] == "active_window_summary"
+    assert result["active_window"]["source"] == "tested_application_active_window_summary"
     assert result["recovered_from_blocked_action"] is True
     assert sess.blocked_action is None
 
@@ -1854,7 +1856,8 @@ def test_client_busy_status_reports_blocked_action_when_probe_times_out(monkeypa
             return {"connected": True, "pending": 0}
 
         async def call(self, method, params, timeout=None):
-            raise BridgeError("1C bridge command 'active_window' timed out after 2s without response")
+            assert (method, params, timeout) == ("active_window_summary", {}, 2)
+            raise BridgeError("1C bridge command 'active_window_summary' timed out after 2s without response")
 
     sess = SessionState(
         session_id="unit",
@@ -1879,8 +1882,55 @@ def test_client_busy_status_reports_blocked_action_when_probe_times_out(monkeypa
     assert result["responsive"] is False
     assert result["busy"] is True
     assert result["reason"] == "bridge_probe_timeout"
+    assert result["probe_method"] == "active_window_summary"
     assert result["blocked_action"]["method"] == "tabular_document_save"
 
+
+
+def test_client_busy_status_falls_back_to_ping_for_old_manager(monkeypatch, tmp_path):
+    from mcp_1c import server
+    from mcp_1c.bridge import BridgeError
+
+    calls = []
+
+    class DummyBridge:
+        def status(self):
+            return {"connected": True, "pending": 0}
+
+        async def call(self, method, params, timeout=None):
+            calls.append((method, params, timeout))
+            if method == "active_window_summary":
+                raise BridgeError("Unknown method: active_window_summary")
+            assert method == "ping"
+            return {"pong": True, "manager_protocol_version": "2026.08.26.2"}
+
+    sess = SessionState(
+        session_id="unit",
+        display=":99",
+        platform_dir=tmp_path / "platform",
+        ws_port=12345,
+        ibsrv_port=23456,
+        testclient_port=34567,
+        data_dir=tmp_path / "session-unit",
+    )
+    sess.bridge = DummyBridge()
+
+    async def fake_ensure_restored_session(session_id):
+        assert session_id == "unit"
+        return sess
+
+    monkeypatch.setattr(server, "_ensure_restored_session", fake_ensure_restored_session)
+
+    result = asyncio.run(server._client_busy_status_impl("unit", probe_timeout=2))
+
+    assert result["responsive"] is True
+    assert result["busy"] is False
+    assert result["probe_method"] == "ping"
+    assert result["active_window"] == {
+        "source": "manager_ping",
+        "ping": {"pong": True, "manager_protocol_version": "2026.08.26.2"},
+    }
+    assert calls == [("active_window_summary", {}, 2), ("ping", {}, 2)]
 
 def test_metadata_objects_from_catalog_watchdog_returns_blocked_status(monkeypatch, tmp_path):
     from mcp_1c import server
