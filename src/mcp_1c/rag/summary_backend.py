@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from .parsers import navigation_for_object, normalize_query
-from .summary_vector import vector_enabled, vector_query_candidates
+from .summary_vector import vector_enabled, vector_query_candidates, vector_score_texts
 
 DEFAULT_PROJECT = "platform42/configurations/summary"
 DEFAULT_REF = "beta"
@@ -355,7 +355,13 @@ class ConfigurationSummaryBackend:
         use_vector = _should_use_vector("auto", text)
         for layer in layers:
             if use_vector:
-                vector_candidates, layer_vector_meta = self.vector_candidates(config_code, layer, text, limit=max(limit * 5, 50))
+                layer_hits = [hit for hit in hits if hit.layer == layer]
+                vector_candidates, layer_vector_meta = self.vector_text_candidates(config_code, layer, text, layer_hits, limit=max(limit * 5, 50))
+                if len(layer_hits) < limit:
+                    extra_candidates, extra_meta = self.vector_candidates(config_code, layer, text, limit=max(limit * 5, 50))
+                    seen = {candidate.chunk_id for candidate in vector_candidates}
+                    vector_candidates.extend(candidate for candidate in extra_candidates if candidate.chunk_id not in seen)
+                    layer_vector_meta["fallback_scan"] = extra_meta
             else:
                 vector_candidates = []
                 layer_vector_meta = {"enabled": vector_enabled(), "available": None, "skipped": "non_code_query"}
@@ -531,10 +537,8 @@ class ConfigurationSummaryBackend:
             for file_rel, entries in by_file.items():
                 wanted = {line: (cand, meta) for line, cand, meta in entries}
                 try:
-                    for row in iter_jsonl(client, f"{chunks_path}/{file_rel}"):
+                    for row in iter_jsonl_wanted_lines(client, f"{chunks_path}/{file_rel}", set(wanted)):
                         line_no = int(row.get("_rag_line") or 0)
-                        if line_no not in wanted:
-                            continue
                         cand, meta = wanted[line_no]
                         row["_layer"] = layer
                         hit = score_row(row, query, q_tokens)
@@ -553,6 +557,9 @@ class ConfigurationSummaryBackend:
     def vector_candidates(self, config_code: str, layer: str, query: str, *, limit: int) -> tuple[list[Any], dict[str, Any]]:
         return vector_query_candidates(self.client(), _rag_prefix(config_code, layer), query, limit=limit)
 
+    def vector_text_candidates(self, config_code: str, layer: str, query: str, hits: list[SummaryHit], *, limit: int) -> tuple[list[Any], dict[str, Any]]:
+        return vector_score_texts(self.client(), _rag_prefix(config_code, layer), query, [(hit.chunk_id, hit.text) for hit in hits], limit=limit)
+
     def _merge_vector_candidates(self, config_code: str, layer: str, query: str, hits: list[SummaryHit], candidates: list[Any], limit: int) -> list[SummaryHit]:
         existing = {hit.chunk_id: hit for hit in hits}
         missing = [candidate for candidate in candidates if candidate.chunk_id not in existing]
@@ -570,10 +577,8 @@ class ConfigurationSummaryBackend:
             for file_rel, rows in by_file.items():
                 wanted = {line: (candidate, meta) for line, candidate, meta in rows}
                 try:
-                    for row in iter_jsonl(self.client(), f"{_chunks_path(config_code, layer)}/{file_rel}"):
+                    for row in iter_jsonl_wanted_lines(self.client(), f"{_chunks_path(config_code, layer)}/{file_rel}", set(wanted)):
                         line_no = int(row.get("_rag_line") or 0)
-                        if line_no not in wanted:
-                            continue
                         candidate, meta = wanted[line_no]
                         row["_layer"] = layer
                         hit = score_row(row, query, q_tokens) or SummaryHit(candidate.score, meta.chunk_id, layer, meta.kind, meta.title, meta.source_path, file_rel, chunk_text(row), row)
@@ -712,6 +717,27 @@ def iter_jsonl(client: SummaryRawClient, path: str) -> Iterator[dict[str, Any]]:
             yield row
 
 
+def iter_jsonl_wanted_lines(client: SummaryRawClient, path: str, wanted_lines: set[int]) -> Iterator[dict[str, Any]]:
+    """Yield only selected JSONL line numbers from a chunk file."""
+    if not wanted_lines:
+        return
+    remaining = set(wanted_lines)
+    file_name = Path(path).name
+    for line_no, line in enumerate(client.read_text(path).splitlines(), start=1):
+        if line_no not in remaining:
+            continue
+        remaining.discard(line_no)
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        if isinstance(row, dict):
+            row["_rag_file"] = file_name
+            row["_rag_line"] = line_no
+            yield row
+        if not remaining:
+            break
+
+
 def chunk_text(row: dict[str, Any]) -> str:
     for key in ("text", "content", "summary", "page_content", "chunk", "body", "document"):
         value = row.get(key)
@@ -748,7 +774,12 @@ def score_row(row: dict[str, Any], query: str, q_tokens: list[str]) -> SummaryHi
         exact = 20.0 + min(30.0, hay.count(q_lower) * 4.0)
     token_score = 0.0
     if q_tokens:
-        counts = collections.Counter(normalize_tokens(f"{title} {source} {text} {hay_meta}"))
+        # Keep per-row scoring cheap on large metadata files: generated summary
+        # text/title/source carry the searchable terms, while hay_meta remains
+        # available for exact substring fallback below.  Tokenising full metadata
+        # JSON for every row dominates Answer42 metadata lookups on BP.
+        token_hay = f"{title} {source} {text}".lower()
+        counts = collections.Counter(match.group(0) for match in WORD_RE.finditer(token_hay))
         matched = 0
         for token in set(q_tokens):
             if token in counts:

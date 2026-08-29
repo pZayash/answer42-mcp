@@ -75,6 +75,50 @@ def vector_query_candidates(client: Any, prefix: str, query: str, *, limit: int 
     return candidates[:limit], {"enabled": True, "available": True, "backend": "gitlab-hosted-coarse-vector", "selected_shards": selected, "manifest": {"schema": manifest.get("schema"), "dim": dim, "shardCount": shard_count, "embeddingModel": manifest.get("embeddingModel")}}
 
 
+
+def vector_score_texts(client: Any, prefix: str, query: str, candidates: list[tuple[str, str]], *, limit: int = 100) -> tuple[list[VectorCandidate], dict[str, Any]]:
+    """Score already-loaded candidate texts through the Stage 3 vector contract.
+
+    For the default ``answer42-local-hash-v1`` producer, vectors are
+    deterministic from chunk text.  Recomputing them locally gives the same
+    scores as reading rows from ``vectors-*.jsonl.gz`` while avoiding large
+    GitLab/cache reads in normal rerank flows.
+    """
+    if not vector_enabled():
+        return [], {"enabled": False}
+    manifest_path = f"{prefix}/vector-index/manifest.json"
+    try:
+        manifest = json.loads(client.read_text(manifest_path))
+    except Exception as exc:
+        return [], {"enabled": True, "available": False, "diagnostics": [{"code": "vector_index_missing", "message": str(exc)}]}
+    if manifest.get("schema") != "platform42-config-summary-vector-index-v1":
+        return [], {"enabled": True, "available": False, "diagnostics": [{"code": "vector_index_invalid", "message": "Unexpected vector index schema."}]}
+    dim = int(manifest.get("dim") or 0)
+    if dim <= 0:
+        return [], {"enabled": True, "available": False, "diagnostics": [{"code": "vector_index_invalid", "message": "Vector index manifest has no positive dim."}]}
+    model = str(manifest.get("embeddingModel") or "")
+    if model and model != "answer42-local-hash-v1":
+        return [], {"enabled": True, "available": False, "diagnostics": [{"code": "query_embedding_provider_missing", "message": "Fast text rerank supports only answer42-local-hash-v1."}]}
+
+    query_vector = _hash_embedding(query, dim)
+    shard_count = int(manifest.get("shardCount") or 0)
+    rows: list[VectorCandidate] = []
+    for chunk_id, text in candidates:
+        chunk_id = str(chunk_id)
+        if not chunk_id:
+            continue
+        vector = _hash_embedding(str(text), dim)
+        score = _cosine(query_vector, vector)
+        rows.append(VectorCandidate(chunk_id=chunk_id, score=score, shard=_vector_shard(chunk_id, shard_count) if shard_count else 0))
+    rows.sort(key=lambda item: item.score, reverse=True)
+    return rows[:limit], {
+        "enabled": True,
+        "available": True,
+        "backend": "gitlab-hosted-text-rerank-vector",
+        "selected_shards": sorted({row.shard for row in rows})[: int(os.environ.get("MCP_1C_RAG_SUMMARY_VECTOR_TOP_SHARDS", "3") or 3)],
+        "manifest": {"schema": manifest.get("schema"), "dim": dim, "shardCount": shard_count, "embeddingModel": manifest.get("embeddingModel")},
+    }
+
 def _read_centroids(data: str) -> list[tuple[int, list[float]]]:
     stripped = data.strip()
     if not stripped:
@@ -126,6 +170,12 @@ def _cosine(left: list[float], right: list[float]) -> float:
         return 0.0
     return sum(left[i] * right[i] for i in range(width))
 
+
+
+def _vector_shard(chunk_id: str, shard_count: int) -> int:
+    if shard_count <= 0:
+        return 0
+    return int(hashlib.md5(chunk_id.encode("utf-8")).hexdigest(), 16) % shard_count
 
 def _env_bool(name: str, default: bool) -> bool:
     raw = os.environ.get(name)
