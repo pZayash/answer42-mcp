@@ -2674,6 +2674,18 @@ def _looks_like_bridge_timeout(exc: BaseException) -> bool:
     return "timed out" in text or "timeout" in text or "истек" in text or "таймаут" in text
 
 
+def _looks_like_unknown_bridge_method(exc: BaseException) -> bool:
+    text = _bridge_timeout_text(exc).casefold()
+    return (
+        "unknown method" in text
+        or "unsupported method" in text
+        or "method not found" in text
+        or "неизвестный метод" in text
+        or "метод не найден" in text
+        or "не поддерж" in text
+    )
+
+
 def _blocked_action_elapsed(blocked_action: dict[str, Any] | None) -> float:
     if not blocked_action:
         return 0.0
@@ -2819,18 +2831,42 @@ async def _client_busy_status_impl(
             "suggested_action": "start_session_or_restore_bridge",
         })
         return result
+    probe_method = "active_window_summary"
     try:
-        active = await sess.bridge.call("active_window", {}, timeout=probe_timeout)
+        active = await sess.bridge.call(probe_method, {}, timeout=probe_timeout)
     except Exception as exc:
-        result.update({
-            "responsive": False,
-            "busy": True if blocked_before_probe else "unknown",
-            "reason": "bridge_probe_timeout" if _looks_like_bridge_timeout(exc) else "bridge_probe_failed",
-            "probe_error": _bridge_timeout_text(exc),
-            "can_continue": False,
-            "suggested_action": "wait_client_idle" if blocked_before_probe else "retry_or_inspect_session_status",
-        })
-        return result
+        # Compatibility fallback for restored sessions started with an older
+        # MCPTestManager.cf.  The fallback still probes the manager/bridge, but
+        # cannot prove that the tested-client API is responsive; new managers
+        # should use active_window_summary because full active_window serializes
+        # the whole form tree and is too heavy for a short health check.
+        if _looks_like_unknown_bridge_method(exc):
+            try:
+                ping = await sess.bridge.call("ping", {}, timeout=probe_timeout)
+            except Exception as ping_exc:
+                result.update({
+                    "responsive": False,
+                    "busy": True if blocked_before_probe else "unknown",
+                    "reason": "bridge_probe_timeout" if _looks_like_bridge_timeout(ping_exc) else "bridge_probe_failed",
+                    "probe_method": "ping",
+                    "probe_error": _bridge_timeout_text(ping_exc),
+                    "can_continue": False,
+                    "suggested_action": "wait_client_idle" if blocked_before_probe else "retry_or_inspect_session_status",
+                })
+                return result
+            active = {"source": "manager_ping", "ping": ping}
+            probe_method = "ping"
+        else:
+            result.update({
+                "responsive": False,
+                "busy": True if blocked_before_probe else "unknown",
+                "reason": "bridge_probe_timeout" if _looks_like_bridge_timeout(exc) else "bridge_probe_failed",
+                "probe_method": probe_method,
+                "probe_error": _bridge_timeout_text(exc),
+                "can_continue": False,
+                "suggested_action": "wait_client_idle" if blocked_before_probe else "retry_or_inspect_session_status",
+            })
+            return result
 
     if sess.blocked_action is not None:
         _clear_session_blocked_action(sess)
@@ -2838,6 +2874,7 @@ async def _client_busy_status_impl(
         "responsive": True,
         "busy": False,
         "reason": "bridge_probe_ok",
+        "probe_method": probe_method,
         "can_continue": True,
         "active_window": active,
     })
