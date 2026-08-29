@@ -8597,8 +8597,14 @@ def screenshot(
         import mss  # type: ignore
         import mss.tools  # type: ignore
 
+        geometry: dict[str, Any] | None = None
+        fallback = ""
+        fallback_reason = ""
         if os_support.IS_WINDOWS:
             geometry = _active_external_1c_window_geometry() if window else None
+            if window and geometry is None:
+                fallback = "full_display"
+                fallback_reason = "1C window geometry was not detected"
             with mss.mss() as sct:
                 monitor = geometry or sct.monitors[0]
                 image = sct.grab(monitor)
@@ -8612,10 +8618,10 @@ def screenshot(
             try:
                 geometry = _active_external_1c_window_geometry(display=resolved_display) if window else None
                 if window and geometry is None:
-                    raise RuntimeError(
-                        "Cannot capture 1C window screenshot: window geometry was not detected. "
-                        "Use window=false to capture the whole virtual display, or maximize/resize the "
-                        "test client window and retry."
+                    fallback = "full_display"
+                    fallback_reason = (
+                        "Cannot capture 1C window screenshot: window geometry was not detected; "
+                        "captured the whole virtual display instead."
                     )
                 with mss.mss() as sct:
                     monitor = geometry or sct.monitors[0]
@@ -8637,6 +8643,9 @@ def screenshot(
     result = {"path": str(output_path), "bytes": len(data), "base64": base64.b64encode(data).decode("ascii")}
     if window:
         result["window_geometry"] = geometry
+    if fallback:
+        result["fallback"] = fallback
+        result["fallback_reason"] = fallback_reason
     return result
 
 
