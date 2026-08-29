@@ -188,3 +188,20 @@ def test_summary_snapshot_can_include_extension_layer(monkeypatch, tmp_path: Pat
 
     assert result["matches"][0]["full_name"] == "Обработка.FreshOnly"
     assert result["summary"]["chunkCount"] == 4
+
+
+def test_summary_query_skips_vector_for_metadata_query(monkeypatch, tmp_path: Path):
+    root = _fixture_summary(tmp_path / "summary")
+    monkeypatch.setenv("MCP_1C_RAG_SUMMARY_BACKEND", "local-stream")
+    monkeypatch.setenv("MCP_1C_RAG_SUMMARY_LOCAL_ROOT", str(root))
+    monkeypatch.setenv("MCP_1C_RAG_SUMMARY_VECTOR_ENABLED", "1")
+    backend = ConfigurationSummaryBackend()
+    found = backend.find_configuration("Бухгалтерия предприятия", "3.0.204.22")
+    snap = backend.create_snapshot(**found)
+
+    result = backend.query("Справочник Номенклатура", snap["name"], limit=3)
+
+    layer_meta = result["summary"]["vector"]["layers"]["configuration"]
+    assert layer_meta["enabled"] is True
+    assert layer_meta["skipped"] == "non_code_query"
+    assert result["fts"][0]["chunk_id"] == "bp:configuration:metadata-object:Справочник:Номенклатура"

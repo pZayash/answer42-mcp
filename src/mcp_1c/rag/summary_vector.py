@@ -17,7 +17,7 @@ class VectorCandidate:
 
 
 def vector_enabled() -> bool:
-    return _env_bool("MCP_1C_RAG_SUMMARY_VECTOR_ENABLED", False)
+    return _env_bool("MCP_1C_RAG_SUMMARY_VECTOR_ENABLED", True)
 
 
 def vector_query_candidates(client: Any, prefix: str, query: str, *, limit: int = 100) -> tuple[list[VectorCandidate], dict[str, Any]]:
