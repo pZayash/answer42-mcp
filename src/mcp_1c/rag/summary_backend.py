@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from .parsers import navigation_for_object, normalize_query
-from .summary_vector import vector_query_candidates
+from .summary_vector import vector_enabled, vector_query_candidates
 
 DEFAULT_PROJECT = "platform42/configurations/summary"
 DEFAULT_REF = "beta"
@@ -352,8 +352,13 @@ class ConfigurationSummaryBackend:
         config_code = str(info["config_code"])
         hits, meta = self.search(config_code, layers, text, limit=limit, kinds="auto")
         vector_meta_by_layer: dict[str, Any] = {}
+        use_vector = _should_use_vector("auto", text)
         for layer in layers:
-            vector_candidates, layer_vector_meta = self.vector_candidates(config_code, layer, text, limit=max(limit * 5, 50))
+            if use_vector:
+                vector_candidates, layer_vector_meta = self.vector_candidates(config_code, layer, text, limit=max(limit * 5, 50))
+            else:
+                vector_candidates = []
+                layer_vector_meta = {"enabled": vector_enabled(), "available": None, "skipped": "non_code_query"}
             vector_meta_by_layer[layer] = layer_vector_meta
             if vector_candidates:
                 hits = self._merge_vector_candidates(config_code, layer, text, hits, vector_candidates, limit)
@@ -684,6 +689,16 @@ def parse_kind_filter(kinds: str, query: str) -> set[str] | None:
             wanted.add("bsl-method")
         return wanted
     return {item.strip() for item in kinds.split(",") if item.strip()}
+
+
+def _should_use_vector(kinds: str, query: str) -> bool:
+    """Use coarse Stage 3 vectors only for code/method-like searches."""
+    kind_filter = parse_kind_filter(kinds, query)
+    if kind_filter is not None:
+        return "bsl-method" in kind_filter
+    q = query.lower()
+    markers = ("процедура", "функция", "метод", "запрос", "выборка", "общиймодуль", "модуль", "&наклиенте", "&насервере")
+    return any(marker in q for marker in markers) or re.search(r"[A-Za-zА-Яа-яЁё_]+\(", query) is not None
 
 
 def iter_jsonl(client: SummaryRawClient, path: str) -> Iterator[dict[str, Any]]:
