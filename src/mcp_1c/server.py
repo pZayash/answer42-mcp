@@ -44,6 +44,7 @@ from .window_control import maximize_test_client_window as _maximize_external_wi
 mcp = MCPServer("Answer42")
 _RAG = RagService()
 _RAG_ENABLED = os.getenv("ONEC_MCP_DISABLE_RAG", "").strip().lower() not in {"1", "true", "yes", "on"}
+AUTO_SUMMARY_RAG_ON_START = os.getenv("ONEC_MCP_AUTO_SUMMARY_RAG_ON_START", "1").strip().lower() not in {"0", "false", "no", "off"}
 _CREDENTIAL_STORE_ENABLED = os.getenv("ONEC_MCP_DISABLE_CREDENTIAL_STORE", "").strip().lower() not in {"1", "true", "yes", "on"}
 _DEV_TOOLS_ENABLED = os.getenv("ONEC_MCP_DEV_TOOLS", "").strip().lower() in {"1", "true", "yes", "on"}
 DEFAULT_SESSION = os.getenv("ONEC_MCP_DEFAULT_SESSION", f"default-{os.getpid()}")
@@ -525,6 +526,7 @@ class SessionState:
         self.recorder = RecordingSession()
         self.rag_snapshot: str = ""
         self.rag_enabled: bool = True
+        self.rag_notice: dict[str, Any] = {}
         self.idle_timeout_seconds: int = 60 * 60
         self.last_activity_monotonic: float = time.monotonic()
         self.blocked_action: dict[str, Any] | None = None
@@ -548,6 +550,7 @@ class SessionState:
             "shared_file_key": self.shared_file_key,
             "rag_snapshot": self.rag_snapshot,
             "rag_enabled": self.rag_enabled,
+            "rag_notice": self.rag_notice,
             "idle_timeout_seconds": self.idle_timeout_seconds,
             "target_connection_mode": self.target_connection_mode,
             "target_connection_value": self.target_connection_value,
@@ -579,6 +582,8 @@ class SessionState:
         sess.shared_file_key = str(data.get("shared_file_key") or "")
         sess.client_display = str(data.get("client_display", ""))
         sess.rag_enabled = bool(data.get("rag_enabled", True))
+        rag_notice = data.get("rag_notice")
+        sess.rag_notice = rag_notice if isinstance(rag_notice, dict) else {}
         sess.idle_timeout_seconds = int(data.get("idle_timeout_seconds") or 60 * 60)
         blocked_action = data.get("blocked_action")
         sess.blocked_action = blocked_action if isinstance(blocked_action, dict) else None
@@ -1411,6 +1416,153 @@ def _rag_disabled_result(session_rag_enabled: bool = True) -> dict[str, Any]:
         "reason": reason,
         "message": message,
     }
+
+
+def _summary_rag_notice(
+    *,
+    enabled: bool,
+    reason: str = "",
+    message: str = "",
+    snapshot: str = "",
+    config_code: str = "",
+    identifier: str = "",
+    version: str = "",
+    layers: list[str] | None = None,
+    warnings: list[str] | None = None,
+) -> dict[str, Any]:
+    backend = getattr(_RAG, "summary_backend", None)
+    notice: dict[str, Any] = {
+        "enabled": enabled,
+        "auto": True,
+        "backend": "configuration-summary" if enabled else "",
+        "summary_backend": None if backend is None else {
+            "enabled": bool(getattr(backend, "enabled", False)),
+            "backend": getattr(backend, "backend", ""),
+            "project": getattr(backend, "project", ""),
+            "ref": getattr(backend, "ref", ""),
+        },
+        "snapshot": snapshot,
+        "config_code": config_code,
+        "identifier": identifier,
+        "version": version,
+        "layers": layers or [],
+        "warnings": warnings or [],
+    }
+    if reason:
+        notice["reason"] = reason
+    if message:
+        notice["message"] = message
+    elif enabled:
+        repo = "" if backend is None else f"{backend.project}@{backend.ref}"
+        notice["message"] = f"Summary RAG enabled automatically from {repo}: {snapshot}"
+    else:
+        notice["message"] = reason or "Summary RAG was not enabled automatically."
+    return notice
+
+
+async def _auto_configure_summary_rag_on_start(sess: SessionState) -> dict[str, Any]:
+    if not AUTO_SUMMARY_RAG_ON_START:
+        return _summary_rag_notice(enabled=False, reason="auto_summary_rag_disabled")
+    if not _RAG_ENABLED:
+        return _summary_rag_notice(enabled=False, reason="rag_disabled_for_server")
+    if not sess.rag_enabled:
+        return _summary_rag_notice(enabled=False, reason="rag_disabled_for_session")
+    summary_backend = getattr(_RAG, "summary_backend", None)
+    if summary_backend is None:
+        return _summary_rag_notice(enabled=False, reason="summary_backend_unavailable")
+    if not summary_backend.enabled:
+        return _summary_rag_notice(enabled=False, reason="summary_backend_disabled")
+    if not sess.base_url:
+        return _summary_rag_notice(enabled=False, reason="no_web_base_url")
+
+    try:
+        config = await configuration_name_version_from_subsystems(session_id=sess.session_id)
+        config_name = str(config.get("configuration_name") or "")
+        config_version = str(config.get("configuration_version") or "")
+        if not config.get("found") or not config_name:
+            return _summary_rag_notice(
+                enabled=False,
+                reason="runtime_configuration_not_detected",
+                message="Summary RAG was not enabled automatically: live configuration was not detected.",
+            )
+
+        summary_candidate = summary_backend.find_configuration(config_name, config_version)
+        if not summary_candidate:
+            return _summary_rag_notice(
+                enabled=False,
+                reason="summary_configuration_not_found",
+                message=(
+                    "Summary RAG was not enabled automatically: configuration "
+                    f"{config_name!r} {config_version!r} was not found in "
+                    f"{summary_backend.project}@{summary_backend.ref}."
+                ),
+            )
+
+        warnings: list[str] = list(summary_candidate.get("warnings") or [])
+        extra_layers: list[dict[str, Any]] = []
+        skipped_extensions: list[dict[str, Any]] = []
+        installed_extensions: list[dict[str, Any]] = []
+        config_code = str(summary_candidate["config_code"])
+        try:
+            extensions_info = await installed_extensions_from_catalog(session_id=sess.session_id)
+            installed_extensions = extensions_info.get("extensions", []) if isinstance(extensions_info, dict) else []
+        except Exception as exc:
+            warnings.append(f"Could not read installed extensions for automatic Summary RAG setup: {exc}")
+
+        for extension in installed_extensions:
+            ext_name = str(extension.get("name") or "")
+            ext_version = str(extension.get("version") or "")
+            if _is_ignored_runtime_extension_name(ext_name):
+                skipped_extensions.append({"name": ext_name, "version": ext_version, "reason": "ignored_service_extension"})
+                continue
+            summary_extension = summary_backend.find_extension(config_code, ext_name, ext_version)
+            if summary_extension is None:
+                skipped_extensions.append({"name": ext_name, "version": ext_version, "reason": "summary_layer_not_found"})
+                warnings.append(f"Summary RAG source for extension {ext_name!r} {ext_version!r} not found; extension was not added to snapshot.")
+                continue
+            warnings.extend(summary_extension.get("warnings") or [])
+            extra_layers.append({
+                "layer": str(summary_extension.get("layer") or ""),
+                "role": "extension",
+                "manifest": summary_extension.get("manifest") or {},
+            })
+
+        summary_snapshot = summary_backend.create_snapshot(
+            config_code=config_code,
+            layer=str(summary_candidate.get("layer") or "configuration"),
+            identifier=str(summary_candidate.get("identifier") or ""),
+            version=str(summary_candidate.get("version") or ""),
+            manifest=summary_candidate.get("manifest") or None,
+            warnings=warnings,
+            extra_layers=extra_layers,
+        )
+        sess.rag_snapshot = str(summary_snapshot.get("name") or "")
+        _save_rag_binding(sess.base_url, sess.rag_snapshot)
+        layers = [str(layer.get("layer") or "") for layer in summary_snapshot.get("summary_layers", [])]
+        return _summary_rag_notice(
+            enabled=True,
+            snapshot=sess.rag_snapshot,
+            config_code=config_code,
+            identifier=str(summary_snapshot.get("identifier") or ""),
+            version=str(summary_snapshot.get("version") or ""),
+            layers=layers,
+            warnings=warnings,
+            message=(
+                "Summary RAG enabled automatically: found "
+                f"{config_name} {config_version} in {summary_backend.project}@{summary_backend.ref}; "
+                f"snapshot {sess.rag_snapshot}."
+            ),
+        ) | {"skipped_extensions": skipped_extensions}
+    except Exception as exc:
+        logging.warning("Automatic Summary RAG setup failed for session %s: %s", sess.session_id, exc)
+        return _summary_rag_notice(
+            enabled=False,
+            reason="auto_summary_rag_failed",
+            message=f"Summary RAG was not enabled automatically: {exc}",
+        )
+    finally:
+        with suppress(Exception):
+            await sess.bridge.call("goto_start_page", {}, timeout=30)
 
 
 def _rag_diagnostic(session_id: str, snapshot: str | None) -> dict[str, Any]:
@@ -3802,6 +3954,7 @@ def session_status(*,
         "rag_snapshot": sess.rag_snapshot,
         "rag_enabled": _RAG_ENABLED and sess.rag_enabled,
         "server_rag_enabled": _RAG_ENABLED,
+        "rag_notice": sess.rag_notice,
         "rag_diagnostic": _rag_diagnostic(session_id, sess.rag_snapshot),
         "idle_timeout_seconds": sess.idle_timeout_seconds,
     }
@@ -4078,6 +4231,14 @@ async def start_session(
             _mark_credentials_verified(connect_base_url or connect_connection_value, username, password, credential_account_id)
         _auto_maximize_test_client_result(connect_result, sess.client_display or sess.display)
 
+    if base_url and _RAG_ENABLED and sess.rag_enabled:
+        sess.rag_notice = await _auto_configure_summary_rag_on_start(sess)
+    else:
+        sess.rag_notice = _summary_rag_notice(
+            enabled=False,
+            reason="rag_not_requested_or_no_web_base_url",
+        )
+
     if sess.idle_timeout_seconds > 0:
         asyncio.create_task(_idle_watch_session(sid))
 
@@ -4091,6 +4252,7 @@ async def start_session(
         "bridge_url": sess.bridge.url, "rag_snapshot": sess.rag_snapshot,
         "rag_enabled": _RAG_ENABLED and sess.rag_enabled,
         "server_rag_enabled": _RAG_ENABLED,
+        "rag_notice": sess.rag_notice,
         "idle_timeout_seconds": sess.idle_timeout_seconds,
         "test_client": connect_result, **pipeline_info,
     }

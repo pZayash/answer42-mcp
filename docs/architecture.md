@@ -195,6 +195,16 @@ If a RAG lookup/query runs without a session snapshot, or the selected snapshot
 has no indexed data, the result includes `rag_diagnostic.diagnostics[]` with a
 machine-readable code and remediation message for the agent.
 
+When `start_session(rag_enabled=true)` connects to a web infobase, Answer42 also
+tries to bind a summary snapshot automatically. It reads the live configuration
+from `РегистрСведений.ВерсииПодсистем`, matches it against the configured
+summary repository, adds available extension layers from `ВерсииРасширений`, and
+returns `rag_notice`. Successful auto-binding reports
+`rag_notice.enabled=true`, `backend="configuration-summary"`, the selected
+snapshot, layers and `summary_backend` transport/project/ref. If the summary
+configuration is not found or RAG is disabled, `rag_notice.enabled=false` and the
+`reason`/`message` explain why no automatic binding was applied.
+
 ## Доказательная запись
 
 `recording_start()` включает запись. Каждый записываемый bridge-вызов сохраняет слайд с:

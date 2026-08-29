@@ -21,6 +21,16 @@ description: "RAG-индекс 1С metadata через Answer42"
 
 ### Быстрый старт (live-сессия)
 
+`start_session(rag_enabled=true)` по умолчанию пытается автоматически включить
+summary RAG для web-базы: читает live-конфигурацию, ищет её в
+`platform42/configurations/summary` и возвращает `rag_notice` с результатом.
+Если конфигурация найдена, `rag_notice.enabled=true`,
+`rag_notice.backend="configuration-summary"`, а `rag_notice.summary_backend`
+показывает транспорт (`gitlab-stream`/`local-stream`), project и ref. Если не
+найдена или RAG выключен — `rag_notice.enabled=false` с `reason` и `message`.
+
+Для ручной перенастройки или fallback-выгрузки используй:
+
 ```text
 rag_session_autoconfigure()
 ```

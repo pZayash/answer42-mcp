@@ -16,6 +16,7 @@ from mcp_1c.server import (
     DEFAULT_SESSION,
     SessionState,
     _append_available_users_to_auth_error,
+    _auto_configure_summary_rag_on_start,
     _cf_marker_matches,
     _configure_session_scope,
     _configure_universal_report_metadata_settings,
@@ -784,6 +785,105 @@ def test_rag_diagnostic_reports_missing_session_snapshot():
 
     assert diagnostic["diagnostics"]
     assert diagnostic["diagnostics"][0]["code"] == "snapshot_not_specified"
+
+
+def test_session_status_reports_rag_notice(tmp_path):
+    sess = SessionState("rag_notice_status", "", Path("."), 10011, 10012, 10013, tmp_path)
+    sess.rag_notice = {"enabled": True, "message": "Summary RAG enabled automatically"}
+    _SESSIONS[sess.session_id] = sess
+    try:
+        result = __import__("mcp_1c.server", fromlist=["session_status"]).session_status(session_id=sess.session_id)
+    finally:
+        _SESSIONS.pop(sess.session_id, None)
+
+    assert result["rag_notice"] == sess.rag_notice
+
+
+def test_auto_configure_summary_rag_on_start(monkeypatch, tmp_path):
+    class FakeBridge:
+        async def call(self, method, params, timeout=None):
+            assert method == "goto_start_page"
+            return {"ok": True}
+
+    class FakeSummaryBackend:
+        enabled = True
+        backend = "gitlab-stream"
+        project = "platform42/configurations/summary"
+        ref = "beta"
+
+        def is_summary_snapshot(self, snapshot):
+            return isinstance(snapshot, str) and snapshot.startswith("summary:")
+
+        def find_configuration(self, config_name, config_version=""):
+            assert config_name == "Бухгалтерия предприятия"
+            assert config_version == "3.0.204.22"
+            return {
+                "config_code": "bp",
+                "layer": "configuration",
+                "identifier": "Accounting30",
+                "version": "3.0.204.22",
+                "manifest": {"identifier": "Accounting30", "version": "3.0.204.22", "chunkCount": 591902},
+                "warnings": [],
+            }
+
+        def find_extension(self, config_code, extension_name, extension_version=""):
+            assert config_code == "bp"
+            assert extension_name == "fresh"
+            assert extension_version == "3.0.204.22"
+            return {
+                "config_code": "bp",
+                "layer": "fresh",
+                "role": "extension",
+                "name": "fresh",
+                "version": "3.0.204.22",
+                "manifest": {"identifier": "Accounting30", "extensionVersion": "3.0.204.22", "chunkCount": 4531},
+                "warnings": [],
+            }
+
+        def create_snapshot(self, **kwargs):
+            assert kwargs["config_code"] == "bp"
+            assert kwargs["extra_layers"][0]["layer"] == "fresh"
+            return {
+                "name": "summary:bp:configuration+fresh:Accounting30:3.0.204.22",
+                "config_code": "bp",
+                "identifier": "Accounting30",
+                "version": "3.0.204.22",
+                "summary_layers": [{"layer": "configuration"}, {"layer": "fresh"}],
+            }
+
+    fake_rag = types.SimpleNamespace(
+        summary_backend=FakeSummaryBackend(),
+        snapshot_has_index=lambda snapshot: True,
+    )
+
+    async def fake_configuration_name_version(*, session_id):
+        assert session_id == "auto_summary"
+        return {"found": True, "configuration_name": "Бухгалтерия предприятия", "configuration_version": "3.0.204.22"}
+
+    async def fake_installed_extensions(*, session_id):
+        assert session_id == "auto_summary"
+        return {"extensions": [{"name": "fresh", "version": "3.0.204.22"}]}
+
+    saved_bindings = []
+    monkeypatch.setattr("mcp_1c.server._RAG", fake_rag)
+    monkeypatch.setattr("mcp_1c.server._RAG_ENABLED", True)
+    monkeypatch.setattr("mcp_1c.server.AUTO_SUMMARY_RAG_ON_START", True)
+    monkeypatch.setattr("mcp_1c.server.configuration_name_version_from_subsystems", fake_configuration_name_version)
+    monkeypatch.setattr("mcp_1c.server.installed_extensions_from_catalog", fake_installed_extensions)
+    monkeypatch.setattr("mcp_1c.server._save_rag_binding", lambda base_url, snapshot: saved_bindings.append((base_url, snapshot)))
+
+    sess = SessionState("auto_summary", "", Path("."), 10021, 10022, 10023, tmp_path, base_url="https://example.invalid/bp/")
+    sess.bridge = FakeBridge()
+
+    notice = asyncio.run(_auto_configure_summary_rag_on_start(sess))
+
+    assert notice["enabled"] is True
+    assert notice["backend"] == "configuration-summary"
+    assert notice["summary_backend"]["backend"] == "gitlab-stream"
+    assert notice["snapshot"] == "summary:bp:configuration+fresh:Accounting30:3.0.204.22"
+    assert notice["layers"] == ["configuration", "fresh"]
+    assert sess.rag_snapshot == notice["snapshot"]
+    assert saved_bindings == [("https://example.invalid/bp/", notice["snapshot"])]
 
 
 def test_platform_version_from_windows_bin_dir():
