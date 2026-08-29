@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+import types
 from pathlib import Path, PureWindowsPath
 
 import pytest
@@ -1025,6 +1026,57 @@ def test_screenshot_missing_mss_hint_uses_pypi_package_name(tmp_path, monkeypatc
     assert "answer42[screenshot]" in message
     assert "pipx inject answer42 mss" in message
     assert ".[screenshot]" not in message
+
+
+def test_screenshot_window_geometry_falls_back_to_full_display(tmp_path, monkeypatch):
+    from mcp_1c import server
+
+    sess = _session_with_client_log_dir(tmp_path)
+    sess.display = ":99"
+    _SESSIONS[sess.session_id] = sess
+
+    class FakeShot:
+        rgb = b"rgb"
+        size = (1, 1)
+
+    class FakeMss:
+        def __init__(self):
+            self.monitors = [{"left": 0, "top": 0, "width": 1920, "height": 1200}]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def grab(self, monitor):
+            assert monitor == self.monitors[0]
+            return FakeShot()
+
+    mss_module = types.ModuleType("mss")
+    mss_module.__path__ = []
+    mss_module.mss = FakeMss
+    tools_module = types.ModuleType("mss.tools")
+
+    def fake_to_png(rgb, size, output):
+        Path(output).write_bytes(b"png")
+
+    tools_module.to_png = fake_to_png
+    mss_module.tools = tools_module
+
+    monkeypatch.setitem(sys.modules, "mss", mss_module)
+    monkeypatch.setitem(sys.modules, "mss.tools", tools_module)
+    monkeypatch.setattr(server.os_support, "IS_WINDOWS", False)
+    monkeypatch.setattr(server, "_active_external_1c_window_geometry", lambda display="": None)
+    try:
+        result = screenshot(path=str(tmp_path / "shot.png"), window=True, session_id=sess.session_id)
+    finally:
+        _SESSIONS.pop(sess.session_id, None)
+
+    assert result["bytes"] == 3
+    assert result["window_geometry"] is None
+    assert result["fallback"] == "full_display"
+    assert "geometry was not detected" in result["fallback_reason"]
 
 
 def test_cf_marker_detects_changed_manager_configuration(tmp_path):

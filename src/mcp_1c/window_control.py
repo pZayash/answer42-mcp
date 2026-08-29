@@ -90,7 +90,7 @@ def _find_x11_1c_window(title_contains: str = "", display: str | None = None) ->
             timeout=10,
         ).stdout
     except (subprocess.SubprocessError, FileNotFoundError):
-        return None
+        tree = ""
 
     screen_width, screen_height = _screen_size(env.get("DISPLAY", ""), env)
     candidates: list[dict[str, Any]] = []
@@ -133,9 +133,128 @@ def _find_x11_1c_window(title_contains: str = "", display: str | None = None) ->
             },
         })
     if not candidates:
-        return None
+        return _find_x11_1c_window_with_xlib(title_contains, env)
     candidates.sort(key=lambda item: int(item.get("priority") or 0), reverse=True)
     return candidates[0]
+
+
+def _find_x11_1c_window_with_xlib(title_contains: str, env: dict[str, str]) -> dict[str, Any] | None:
+    """Find a 1C client window through python-xlib when xwininfo output is incomplete.
+
+    Some X11/window-manager combinations used by the web test client expose a
+    perfectly usable 1C top-level window to Xlib, but `xwininfo -root -tree`
+    either omits the expected `("1cv8c" "1cv8c")` class marker or reports a
+    title that does not match the usual test-client caption.  Auto-maximize has
+    used Xlib successfully in these sessions, so screenshot geometry should use
+    the same fallback instead of failing every recording frame.
+    """
+    try:
+        from Xlib import X
+        from Xlib import display as xdisplay
+
+        display = env.get("DISPLAY") or None
+        disp = xdisplay.Display(display)
+        root = disp.screen().root
+        screen_width = disp.screen().width_in_pixels
+        screen_height = disp.screen().height_in_pixels
+
+        def walk(win):
+            yield win
+            try:
+                children = win.query_tree().children
+            except Exception:
+                return
+            for child in children:
+                yield from walk(child)
+
+        def get_name(win) -> str:
+            for atom_name in ("_NET_WM_NAME", "WM_NAME"):
+                try:
+                    prop = win.get_full_property(disp.intern_atom(atom_name), X.AnyPropertyType)
+                    if prop and prop.value is not None:
+                        value = prop.value
+                        if isinstance(value, bytes):
+                            return value.decode("utf-8", "ignore")
+                        try:
+                            return bytes(value).decode("utf-8", "ignore")
+                        except Exception:
+                            return str(value)
+                except Exception:
+                    pass
+            return ""
+
+        def get_wm_class(win) -> str:
+            try:
+                prop = win.get_full_property(disp.intern_atom("WM_CLASS"), X.AnyPropertyType)
+                if not prop or prop.value is None:
+                    return ""
+                value = prop.value
+                if isinstance(value, bytes):
+                    return value.decode("utf-8", "ignore")
+                try:
+                    return bytes(value).decode("utf-8", "ignore")
+                except Exception:
+                    return str(value)
+            except Exception:
+                return ""
+
+        candidates: list[dict[str, Any]] = []
+        for win in walk(root):
+            title = get_name(win)
+            wm_class = get_wm_class(win)
+            onec_class = "1cv8" in wm_class.lower()
+            if title_contains:
+                if title_contains.lower() not in title.lower():
+                    continue
+            elif not (onec_class or _title_matches(title, "")):
+                continue
+            try:
+                geo = win.get_geometry()
+                translated = win.translate_coords(root, 0, 0)
+            except Exception:
+                continue
+            width = int(geo.width)
+            height = int(geo.height)
+            left = int(translated.x)
+            top = int(translated.y)
+            if width < 300 or height < 150:
+                continue
+            capture_left = max(0, left)
+            capture_top = max(0, top)
+            capture_width = min(width - max(0, -left), max(0, screen_width - capture_left))
+            capture_height = min(height - max(0, -top), max(0, screen_height - capture_top))
+            if capture_width < 300 or capture_height < 150:
+                continue
+            priority = min(capture_width * capture_height // 10000, 50)
+            if onec_class:
+                priority += 75
+            if "1С:Предприятие" in title:
+                priority += 50
+            if title and title not in {"1cv8c", "1cv8", "Конфигурация"}:
+                priority += 100
+            candidates.append({
+                "title": title,
+                "wm_class": wm_class,
+                "priority": priority,
+                "geometry": {
+                    "left": capture_left,
+                    "top": capture_top,
+                    "width": capture_width,
+                    "height": capture_height,
+                    "title": title,
+                    "xlib_left": left,
+                    "xlib_top": top,
+                    "xlib_width": width,
+                    "xlib_height": height,
+                    "wm_class": wm_class,
+                },
+            })
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: int(item.get("priority") or 0), reverse=True)
+        return candidates[0]
+    except Exception:
+        return None
 
 
 def _screen_size(display: str, env: dict[str, str]) -> tuple[int, int]:
