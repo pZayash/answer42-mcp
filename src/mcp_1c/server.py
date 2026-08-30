@@ -2159,6 +2159,25 @@ def _attach_ui_tree_metrics(result: Any, metrics: dict[str, Any]) -> Any:
     return result
 
 
+def _build_ui_tree_timings(tree: Any, *, bridge_ms: float, stages: dict[str, float]) -> dict[str, Any]:
+    timings: dict[str, Any] = {"bridge_ms": round(bridge_ms, 3)}
+    if isinstance(tree, dict) and isinstance(tree.get("_timings"), dict):
+        timings["onec"] = tree.get("_timings")
+    for key, value in stages.items():
+        timings[key] = round(value, 3)
+    timings["python_total_ms"] = round(sum(stages.values()), 3)
+    timings["total_observed_ms"] = round(bridge_ms + sum(stages.values()), 3)
+    return timings
+
+
+def _attach_optional_timings(result: Any, timings: dict[str, Any] | None, include_timings: bool) -> Any:
+    if include_timings and isinstance(result, dict) and timings is not None:
+        result["_timings"] = timings
+    elif not include_timings and isinstance(result, dict):
+        result.pop("_timings", None)
+    return result
+
+
 def _outline_ui_tree(node: Any, indent: int = 0) -> str:
     if not isinstance(node, dict):
         return ""
@@ -2418,6 +2437,8 @@ def _ui_tree_maybe_resource_response(
         preview_max_nodes=preview_max_nodes,
         preview_format=preview_format,
     )
+    if isinstance(inline_response, dict) and isinstance(inline_response.get("_timings"), dict):
+        response["_timings"] = inline_response["_timings"]
     response["delivery_requested"] = delivery
     response["delivery_reason"] = "explicit_resource" if (delivery or "").strip().lower() == "resource" else "auto_threshold_exceeded"
     response["auto_threshold_tokens"] = UI_TREE_RESOURCE_AUTO_THRESHOLD_TOKENS
@@ -5731,6 +5752,7 @@ async def ui_tree(
     rag_snapshot: Annotated[str, "Optional RAG snapshot name/id used for type enrichment"] = "",
     delivery: Annotated[str, "Delivery mode: auto (default) returns small results inline and saves responses above token threshold as resource; inline always returns the selected JSON/outline/yaml; resource always saves full JSON and returns resource_uri + summary + preview"] = "auto",
     preview_max_nodes: Annotated[int, "For delivery=auto/resource, number of top nodes/matches to include in the small inline preview when a resource is returned"] = 40,
+    include_timings: Annotated[bool, "Include diagnostic timing breakdown in the returned _timings field"] = False,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
@@ -5764,6 +5786,11 @@ async def ui_tree(
     `ui_tree_resource_children`, or `ui_tree_diff` instead of loading the whole
     tree into the agent context.
     """
+    stage_timings: dict[str, float] = {}
+
+    def timed_stage(name: str, started: float) -> None:
+        stage_timings[name] = stage_timings.get(name, 0.0) + ((time.monotonic() - started) * 1000)
+
     delivery_key = (delivery or "auto").strip().lower()
     if delivery_key not in {"auto", "inline", "resource"}:
         raise ValueError(f"Unsupported ui_tree delivery: {delivery!r}. Expected auto, inline or resource.")
@@ -5799,6 +5826,7 @@ async def ui_tree(
         "include_hidden": include_hidden,
         "include_data": include_data,
         "include_command_panels": include_command_panels_effective,
+        "include_timings": include_timings,
     }
     if parent_name:
         bridge_params["parent_name"] = parent_name
@@ -5811,15 +5839,20 @@ async def ui_tree(
     bridge_ms = (time.monotonic() - bridge_start) * 1000
     transform_start = time.monotonic()
     if parent_name and isinstance(tree, dict) and tree.get("reason") != "parent_not_found" and tree.get("root_parent_name") != parent_name:
+        parent_lookup_start = time.monotonic()
         parent_node = _find_ui_node_by_name(tree, parent_name)
         if parent_node is None:
             tree = {"found": False, "parent_name": parent_name, "reason": "parent_not_found"}
         else:
             tree = parent_node
             tree["root_parent_name"] = parent_name
+        timed_stage("python_parent_lookup_ms", parent_lookup_start)
+    summary_start = time.monotonic()
     if isinstance(tree, dict):
         tree["tree_summary"] = _summarize_ui_tree(tree, include_hidden=include_hidden)
+    timed_stage("python_summary_ms", summary_start)
     if include_rag_types:
+        rag_start = time.monotonic()
         sess = _session(session_id)
         if _RAG_ENABLED and sess.rag_enabled:
             tree = _enrich_ui_tree_with_rag_types(tree, snapshot=rag_snapshot or sess.rag_snapshot or None)
@@ -5827,14 +5860,18 @@ async def ui_tree(
                 tree["rag_diagnostic"] = _rag_diagnostic(session_id, rag_snapshot)
         elif isinstance(tree, dict):
             tree["rag_diagnostic"] = _rag_diagnostic(session_id, rag_snapshot)
+        timed_stage("python_rag_enrich_ms", rag_start)
 
     if parent_name and isinstance(tree, dict) and tree.get("found") is False and tree.get("reason") == "parent_not_found":
         tree["tree_summary"] = _summarize_ui_tree(tree, include_hidden=include_hidden)
         python_transform_ms = (time.monotonic() - transform_start) * 1000
+        stage_timings["python_transform_ms"] = python_transform_ms
+        ui_timings = _build_ui_tree_timings(tree, bridge_ms=bridge_ms, stages=stage_timings)
         if fmt == "outline":
             response = {"format": "outline", "text": "", "tree_summary": tree.get("tree_summary"), "profile": profile_key, "parent_name": parent_name, "found": False, "reason": "parent_not_found"}
             response = _apply_ui_fields(response, field_names)
             response = _attach_ui_tree_metrics(response, _ui_tree_metrics(tree, bridge_ms=bridge_ms, python_transform_ms=python_transform_ms, result=response))
+            response = _attach_optional_timings(response, ui_timings, include_timings)
             return _ui_tree_maybe_resource_response(
                 response,
                 inline_response=response,
@@ -5848,6 +5885,7 @@ async def ui_tree(
         if fmt == "yaml":
             response = {"format": "yaml", "yaml": _to_simple_yaml(tree), "tree_summary": tree.get("tree_summary"), "profile": profile_key, "parent_name": parent_name}
             response = _attach_ui_tree_metrics(response, _ui_tree_metrics(tree, bridge_ms=bridge_ms, python_transform_ms=python_transform_ms, result=response))
+            response = _attach_optional_timings(response, ui_timings, include_timings)
             return _ui_tree_maybe_resource_response(
                 tree,
                 inline_response=response,
@@ -5860,6 +5898,7 @@ async def ui_tree(
             )
         tree = _apply_ui_fields(tree, field_names)
         tree = _attach_ui_tree_metrics(tree, _ui_tree_metrics(tree, bridge_ms=bridge_ms, python_transform_ms=python_transform_ms, result=tree))
+        tree = _attach_optional_timings(tree, ui_timings, include_timings)
         return _ui_tree_maybe_resource_response(
             tree,
             inline_response=tree,
@@ -5873,6 +5912,7 @@ async def ui_tree(
 
     summary = tree.get("tree_summary") if isinstance(tree, dict) else None
 
+    result_build_start = time.monotonic()
     if filtered:
         if isinstance(tree, dict) and isinstance(tree.get("objects"), list):
             objects = [obj for obj in tree["objects"] if isinstance(obj, dict)]
@@ -5931,8 +5971,13 @@ async def ui_tree(
                 compact_tree["rag_diagnostic"] = tree["rag_diagnostic"]
             result = compact_tree
 
+    timed_stage("python_result_build_ms", result_build_start)
+    field_filter_start = time.monotonic()
     result = _apply_ui_fields(result, field_names)
+    timed_stage("python_field_filter_ms", field_filter_start)
     python_transform_ms = (time.monotonic() - transform_start) * 1000
+    stage_timings["python_transform_ms"] = python_transform_ms
+    ui_timings = _build_ui_tree_timings(tree, bridge_ms=bridge_ms, stages=stage_timings)
     if fmt == "outline":
         format_start = time.monotonic()
         text = _outline_ui_nodes(result.get("objects", [])) if isinstance(result, dict) and "objects" in result else _outline_ui_tree(result)
@@ -5941,6 +5986,7 @@ async def ui_tree(
             response["parent_name"] = parent_name
         metrics = _ui_tree_metrics(tree, bridge_ms=bridge_ms, python_transform_ms=python_transform_ms, format_ms=(time.monotonic() - format_start) * 1000, result=response)
         response = _attach_ui_tree_metrics(response, metrics)
+        response = _attach_optional_timings(response, ui_timings, include_timings)
         return _ui_tree_maybe_resource_response(
             result,
             inline_response=response,
@@ -5958,6 +6004,7 @@ async def ui_tree(
             response["parent_name"] = parent_name
         metrics = _ui_tree_metrics(tree, bridge_ms=bridge_ms, python_transform_ms=python_transform_ms, format_ms=(time.monotonic() - format_start) * 1000, result=response)
         response = _attach_ui_tree_metrics(response, metrics)
+        response = _attach_optional_timings(response, ui_timings, include_timings)
         return _ui_tree_maybe_resource_response(
             result,
             inline_response=response,
@@ -5970,6 +6017,7 @@ async def ui_tree(
         )
     metrics = _ui_tree_metrics(tree, bridge_ms=bridge_ms, python_transform_ms=python_transform_ms, result=result)
     result = _attach_ui_tree_metrics(result, metrics)
+    result = _attach_optional_timings(result, ui_timings, include_timings)
     return _ui_tree_maybe_resource_response(
         result,
         inline_response=result,
