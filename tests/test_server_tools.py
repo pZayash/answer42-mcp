@@ -44,6 +44,7 @@ from mcp_1c.server import (
     _register_dev_tools,
     _state_file_for_scope,
     _summary_rag_config_from_42clouds_url,
+    _tabular_cells_from_binary_mxl_literals,
     _tabular_cells_from_mxl,
     _test_client_startup_error_from_logs,
     _tool_names_for_profile,
@@ -786,6 +787,22 @@ def test_configuration_name_version_reads_main_configuration_from_mxl(monkeypatc
         ("open_navigation_link", {"navigation_link": "e1cib/list/РегистрСведений.ВерсииПодсистем"}),
         ("dynamic_list_output", {"button": "", "wait_seconds": 3, "include_text": False}),
         ("_save_output_tabular_document_to_mxl", {"session_id": "unit", "doc_name": "ТабличныйДокумент", "path_prefix": "configuration_name_version_from_subsystems", "timeout": 120}),
+    ]
+
+
+def test_tabular_cells_from_binary_mxl_literals_parses_subsystems_table():
+    # Real binary MXL UTF-8 strings are separated by binary control bytes;
+    # simulate that so the fallback extractor sees the same literal order.
+    text = (
+        "MOXCEL\x00Arial\x00Имя подсистемы\x00Версия\x000Это основная конфигурация"
+        "\x00WВыполнена регистрация отложенных обработчиков\x00Библиотека1СПлюс"
+        "\x001.0.5.5\x00Нет\x00Да\x002БухгалтерияПредприятия\x003.0.204.22\x00Да\x00Да"
+    )
+
+    assert _tabular_cells_from_binary_mxl_literals(text) == [
+        ["Имя подсистемы", "Версия", "Это основная конфигурация", "Выполнена регистрация отложенных обработчиков"],
+        ["Библиотека1СПлюс", "1.0.5.5", "Нет", "Да"],
+        ["БухгалтерияПредприятия", "3.0.204.22", "Да", "Да"],
     ]
 
 
