@@ -706,8 +706,11 @@ def test_manager_find_button_fast_path_uses_unspecified_empty_search_parameters(
 
     assert 'Варианты.Добавить(Новый Структура("title,name", Неопределено, ИмяКнопки))' in module
     assert 'Варианты.Добавить(Новый Структура("title,name", ЗаголовокКнопки, Неопределено))' in module
-    assert 'Кнопка = НайтиКнопку(АктивноеОкно, ИмяКнопки, ЗаголовокКнопки, 0, Истина, Истина, Ложь, КешПоиска)' in module
-    assert 'Тайминги.Вставить(Префикс + "_find_method", КешПоиска.Статистика.method)' in module
+    assert 'Кнопка = НайтиКнопкуБыстроMCP(АктивноеОкно, ИмяКнопки, ЗаголовокКнопки, КешПоиска)' in module
+    assert 'Кнопка = НайтиКнопку(АктивноеОкно, ИмяКнопки, ЗаголовокКнопки, 1, Истина, Истина, Ложь, КешПоиска)' in module
+    assert 'Сначала проверяем все варианты только быстрым платформенным поиском' in module
+    assert 'dfs_fallback_after_fast_misses' in module
+    assert 'Тайминги.Вставить(Префикс + "_find_method", "fast_platform_search")' in module
     assert 'Тайминги.Вставить(Префикс + "_find_nodes", КешПоиска.Статистика.nodes)' in module
     assert module.index('Новый Структура("name,title", "ФормаВывестиСписок", "")') < module.index('Новый Структура("name,title", "СписокВывестиСписок", "")')
     assert module.index('Новый Структура("name,title", "", "ОК")') < module.index('Новый Структура("name,title", "", "Сформировать")')
