@@ -2906,6 +2906,51 @@ def _strip_bridge_timings(result: Any) -> Any:
     cleaned.pop("_timings", None)
     return cleaned
 
+
+def _compact_window_summary(value: Any) -> Any:
+    if not isinstance(value, dict):
+        return value
+    keep_keys = (
+        "type", "name", "title", "form_name", "navigation_url",
+        "visible", "available", "read_only", "active_form_title", "active_form_name",
+        "source", "maximized", "method", "ok", "error", "geometry", "candidates",
+    )
+    summary = {key: _copy_compact_object(value[key]) for key in keep_keys if key in value and value.get(key) not in (None, "", [], {})}
+    if "enabled" in value and value.get("enabled") != value.get("available"):
+        summary["enabled"] = value.get("enabled")
+    for key in ("main", "home"):
+        if value.get(key) is True:
+            summary[key] = True
+    return summary
+
+
+def _compact_start_test_client_result(result: Any, *, include_timings: bool = False) -> Any:
+    if not isinstance(result, dict):
+        return result
+    keep_keys = (
+        "connected", "base_url", "connection_mode", "connection_value",
+        "target_connection_mode", "port", "client_pid", "client_log",
+        "client_stdout_log", "auto_maximize", "auto_maximize_error",
+    )
+    compact = {key: _copy_compact_object(result[key]) for key in keep_keys if key in result and result.get(key) not in (None, "", [], {})}
+    if isinstance(compact.get("auto_maximize"), dict):
+        compact["auto_maximize"] = _compact_window_summary(compact["auto_maximize"])
+    maximized = result.get("maximized")
+    if isinstance(maximized, dict):
+        compact_maximized = {
+            key: _copy_compact_object(maximized[key])
+            for key in ("maximized", "method", "errors")
+            if key in maximized and maximized.get(key) not in (None, "", [], {})
+        }
+        if maximized.get("window") not in (None, "", [], {}):
+            compact_maximized["window"] = _compact_window_summary(maximized.get("window"))
+        compact["maximized"] = compact_maximized
+    elif maximized not in (None, "", [], {}):
+        compact["maximized"] = maximized
+    if include_timings and isinstance(result.get("_timings"), dict):
+        compact["_timings"] = result["_timings"]
+    return compact
+
 async def _bridge_call_recorded(
     session_id: str,
     method: str,
@@ -4089,8 +4134,18 @@ async def start_session(
     command_parameter: Annotated[str, "Additional test-client /C value; when extra_args already contains /C, this value is appended with ';'"] = "",
     rag_enabled: Annotated[bool, "Enable built-in RAG for this session"] = False,
     summary_rag_config: Annotated[str, "Explicit Summary RAG configuration alias/code, e.g. bp, accounting30, Бухгалтерия предприятия. Enables configuration+fresh summary snapshot without live autodetection."] = "",
+    include_timings: Annotated[bool, "Include diagnostic startup timing breakdown in the returned _timings field"] = False,
 ) -> dict[str, Any]:
     """One-shot session factory: detect version, start infrastructure and connect the 1C test client."""
+    start_monotonic = time.perf_counter()
+    stage_monotonic = start_monotonic
+    timings: dict[str, float] = {}
+
+    def mark_stage(name: str) -> None:
+        nonlocal stage_monotonic
+        now = time.perf_counter()
+        timings[f"{name}_seconds"] = round(now - stage_monotonic, 3)
+        stage_monotonic = now
     credential_ref = _resolve_credential_reference(base_url)
     credential_account_id = _current_account_id()
     saved_credentials_used = False
@@ -4134,6 +4189,7 @@ async def start_session(
     actual_version = _platform.platform_version_from_dir(platform_dir)
     _platform.require_websocket_support(actual_version)
     logging.info("start_session: version=%s platform_dir=%s", actual_version, platform_dir)
+    mark_stage("resolve_credentials_version_platform")
 
     sid = session_id or DEFAULT_SESSION
     if sid in _SESSIONS:
@@ -4171,6 +4227,7 @@ async def start_session(
             sess.client_xvfb_process = runtime.start_xvfb(client_display)
             sess.client_xvfb_pid = sess.client_xvfb_process.pid
         await sess.bridge.start()
+    mark_stage("allocate_ports_start_xvfb_bridge")
     _SESSIONS[sid] = sess
     _persist_sessions()
     logging.info("start_session: bridge listening on ws://127.0.0.1:%s", ws_port)
@@ -4197,6 +4254,7 @@ async def start_session(
             )
             runtime.load_configuration(sess.ibcmd, sess.db_path, cf_path)
             _write_cf_marker(sess.db_path, cf_path)
+        mark_stage("prepare_manager_infobase")
     except Exception:
         await _cleanup_failed_start_session(sess, "infobase preparation failure")
         raise
@@ -4233,6 +4291,7 @@ async def start_session(
         runtime_state.manager_process = manager_proc
         sess.manager_pid = manager_proc.pid
         await _wait_for_bridge_connected(sess, timeout=60.0)
+        mark_stage("start_manager_and_wait_bridge")
     except Exception as exc:
         diagnostic_error = _manager_failure_diagnostics(sess, exc)
         await _cleanup_failed_start_session(sess, "manager startup failure")
@@ -4318,6 +4377,7 @@ async def start_session(
     except Exception:
         await _cleanup_failed_start_session(sess, "demo test-client preparation failure")
         raise
+    mark_stage("prepare_demo_client_if_needed")
 
     connect_result: Any = None
     connect_base_url = base_url
@@ -4336,6 +4396,7 @@ async def start_session(
                 extra_args=extra_args, execute=execute, command_parameter=command_parameter,
                 connection_mode=connect_connection_mode, connection_value=connect_connection_value,
             )
+            mark_stage("connect_test_client")
         except Exception as exc:
             enriched = await _enrich_auth_failure_for_web_base(exc, connect_base_url)
             target_mode = _normalize_connection_mode(
@@ -4349,6 +4410,7 @@ async def start_session(
         if saved_credentials_used:
             _mark_credentials_verified(connect_base_url or connect_connection_value, username, password, credential_account_id)
         _auto_maximize_test_client_result(connect_result, sess.client_display or sess.display)
+        mark_stage("auto_maximize_test_client")
 
     if effective_summary_rag_config:
         sess.rag_notice = _configure_summary_rag_from_config_alias(sess, effective_summary_rag_config)
@@ -4388,12 +4450,15 @@ async def start_session(
             enabled=False,
             reason="rag_not_requested_or_no_web_base_url",
         )
+    mark_stage("configure_rag")
 
     if sess.idle_timeout_seconds > 0:
         asyncio.create_task(_idle_watch_session(sid))
 
     _persist_sessions()
-    return {
+    mark_stage("persist_session")
+    timings["total_seconds"] = round(time.perf_counter() - start_monotonic, 3)
+    response = {
         "session_id": sid, "version": actual_version,
         "platform_dir": str(platform_dir), "display": display,
         "client_display": sess.client_display,
@@ -4404,8 +4469,11 @@ async def start_session(
         "server_rag_enabled": _RAG_ENABLED,
         "rag_notice": sess.rag_notice,
         "idle_timeout_seconds": sess.idle_timeout_seconds,
-        "test_client": connect_result, **pipeline_info,
+        "test_client": _compact_start_test_client_result(connect_result, include_timings=include_timings), **pipeline_info,
     }
+    if include_timings:
+        response["_timings"] = timings
+    return response
 
 
 async def _stop_session_impl(session_id: str = DEFAULT_SESSION, clean_data: bool = False) -> dict[str, Any]:
@@ -4991,8 +5059,19 @@ async def _connect_test_client_impl(
     connection_value: str = "",
 ) -> Any:
     """Launch 1cv8c /TESTCLIENT from Python and attach the test manager to it."""
+    start_monotonic = time.perf_counter()
+    stage_monotonic = start_monotonic
+    timings: dict[str, float] = {}
+
+    def mark_stage(name: str) -> None:
+        nonlocal stage_monotonic
+        now = time.perf_counter()
+        timings[f"{name}_seconds"] = round(now - stage_monotonic, 3)
+        stage_monotonic = now
+
     await _wait_for_bridge_connected(sess, timeout=60.0)
     manager_info = await _verify_manager_protocol(sess)
+    mark_stage("verify_manager_protocol")
     r_base = _platform.normalize_infobase_url(base_url or sess.base_url)
     r_value = connection_value or r_base
     mode = _normalize_connection_mode(connection_mode, r_value, r_base)
@@ -5121,6 +5200,7 @@ async def _connect_test_client_impl(
         log_name=client_stdout_log,
     )
     sess.test_client_pid = sess.test_client_process.pid
+    mark_stage("spawn_test_client_process")
     params = {"base_url": r_base, "username": r_user, "password": r_pass,
               "port": r_port, "host": host, "client_pid": sess.test_client_process.pid,
               "client_log": str(client_out_log), "client_stdout_log": str(sess.client_log_dir / client_stdout_log),
@@ -5132,6 +5212,7 @@ async def _connect_test_client_impl(
     try:
         wait_timeout = float(os.getenv("ONEC_MCP_TEST_CLIENT_READY_TIMEOUT", "55"))
         await _wait_for_test_client_ready(sess, host, r_port, timeout=wait_timeout)
+        mark_stage("wait_test_client_port")
         if sess.test_client_process is not None:
             monitor_task = asyncio.create_task(_wait_for_test_client_process_exit(sess.test_client_process))
         attach_task = asyncio.create_task(sess.bridge.call("attach_test_client", params))
@@ -5159,6 +5240,10 @@ async def _connect_test_client_impl(
         for pending_task in pending:
             pending_task.cancel()
         result = await attach_task
+        mark_stage("attach_test_client")
+        if isinstance(result, dict):
+            timings["total_seconds"] = round(time.perf_counter() - start_monotonic, 3)
+            result["_timings"] = timings
     except Exception as exc:
         runtime.kill_process(sess.test_client_process, "test-client")
         sess.test_client_process = None

@@ -106,7 +106,17 @@ def test_command_interface_search_ranks_matches_by_score():
     assert 'Оценка = КомандныйИнтерфейсОценкаСовпадения(Заголовок, ТекстПути, Ссылка, НормПоиск)' in search_commands
     assert 'Результат.Вставить(ИндексВставки, Совпадение);' in search_commands
     assert 'Результат.Удалить(Результат.Количество() - 1);' in search_commands
+    assert 'КлючиСовпадений = Новый Соответствие;' in search_commands
+    assert 'КомандныйИнтерфейсКлючСовпадения(Заголовок, Ссылка)' in search_commands
     assert 'Если Максимум > 0 И Результат.Количество() >= Максимум Тогда' not in search_commands
+
+
+def test_test_client_maximize_returns_compact_window_summary():
+    module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
+    maximize = _bsl_function_body(module, "РазвернутьОкноКлиентаТестирования")
+
+    assert "КраткоеОписаниеОбъектаMCP(АктивноеОкно)" in maximize
+    assert "ОбъектВСтруктуру(АктивноеОкно, 0)" not in maximize
 
 def test_form_close_does_not_block_on_save_discard_message_box():
     module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
