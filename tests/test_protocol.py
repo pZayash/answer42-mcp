@@ -709,6 +709,8 @@ def test_manager_find_button_fast_path_uses_unspecified_empty_search_parameters(
     assert 'Кнопка = НайтиКнопку(АктивноеОкно, ИмяКнопки, ЗаголовокКнопки, 0, Истина, Истина, Ложь, КешПоиска)' in module
     assert 'Тайминги.Вставить(Префикс + "_find_method", КешПоиска.Статистика.method)' in module
     assert 'Тайминги.Вставить(Префикс + "_find_nodes", КешПоиска.Статистика.nodes)' in module
+    assert module.index('Новый Структура("name,title", "ФормаВывестиСписок", "")') < module.index('Новый Структура("name,title", "СписокВывестиСписок", "")')
+    assert module.index('Новый Структура("name,title", "", "ОК")') < module.index('Новый Структура("name,title", "", "Сформировать")')
 
 def test_ui_tree_current_page_is_shallow_and_command_panels_can_be_disabled():
     module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
