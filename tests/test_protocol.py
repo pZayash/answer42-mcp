@@ -764,4 +764,12 @@ def test_ui_tree_current_page_is_shallow_and_command_panels_can_be_disabled():
     assert 'СвойствоСтруктуры(Параметры, "limit"' not in _bsl_function_body(module, "ПлоскоеДеревоИнтерфейсаMCP")
     assert 'Результат.Вставить("current_page_name", ИмяТекущейСтраницы)' in module
     assert "КешСериализации, ВключатьДанные, Ложь, СчетчикУзлов, Ложь" in module
+    assert "Если ЭтоГруппаСтраницДереваИнтерфейсаMCP(Объект, ТипОбъекта) Тогда" in module
+    assert 'ВидГруппы = НРег(СтрЗаменить(ВидГруппыФормы(Объект), " ", ""))' in module
+    assert "Если Не ТипУзлаДереваИнтерфейсаКонтейнерMCP(ТипОбъекта) Тогда" in module
+
+    body = _bsl_function_body(module, "ОбъектВСтруктуру")
+    decoration_branch = body[body.index("ИначеЕсли ЭтоДекорация Тогда"):body.index("ИначеЕсли Не ВключатьСостояниеДоступности Тогда")]
+    assert "ТекущаяДоступность" not in decoration_branch
+    assert "ТекущееТолькоПросмотр" not in decoration_branch
     assert "Если ВключатьКомандныеПанели И (ТипОбъекта" in module
