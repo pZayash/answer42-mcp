@@ -18,6 +18,7 @@ from mcp_1c.server import (
     _append_available_users_to_auth_error,
     _auto_configure_summary_rag_on_start,
     _cf_marker_matches,
+    _configuration_from_sorted_first_row,
     _configure_session_scope,
     _configure_summary_rag_from_config_alias,
     _configure_universal_report_metadata_settings,
@@ -26,6 +27,7 @@ from mcp_1c.server import (
     _effective_dump_connection,
     _ensure_restored_session,
     _extract_error_lines,
+    _find_main_configuration_in_row_pairs,
     _format_navigation_suggestions,
     _is_ignored_runtime_extension_name,
     _is_placeholder_password,
@@ -44,6 +46,7 @@ from mcp_1c.server import (
     _register_dev_tools,
     _state_file_for_scope,
     _summary_rag_config_from_42clouds_url,
+    _table_row_pairs,
     _tabular_cells_from_binary_mxl_literals,
     _tabular_cells_from_mxl,
     _test_client_startup_error_from_logs,
@@ -758,6 +761,10 @@ def test_configuration_name_version_reads_main_configuration_from_mxl(monkeypatc
 
     async def fake_bridge_call(session_id, method, params):
         calls.append((method, params))
+        if method == "dynamic_list_sort_by_column":
+            return {"ordered": True}
+        if method == "table_current_row":
+            return {"pairs": [{"key": "Это основная конфигурация", "value": "Нет"}]}
         if method == "dynamic_list_output":
             return {"tabular_documents": {"items": [{"name": "ТабличныйДокумент"}]}}
         if method == "tabular_document_text":
@@ -782,12 +789,106 @@ def test_configuration_name_version_reads_main_configuration_from_mxl(monkeypatc
     assert result["found"] is True
     assert result["configuration_name"] == "МенеджерСервиса"
     assert result["configuration_version"] == "1.1.56.26"
-    assert result["warnings"] == ["List output MXL became parseable; path=/tmp/unit.mxl; rows=4"]
+    assert result["source_method"] == "list_output_mxl"
+    assert result["warnings"] == [
+        "Sorted first list row did not expose the main configuration; falling back to MXL list output",
+        "List output MXL became parseable; path=/tmp/unit.mxl; rows=4",
+    ]
     assert calls == [
         ("open_navigation_link", {"navigation_link": "e1cib/list/РегистрСведений.ВерсииПодсистем"}),
+        ("dynamic_list_sort_by_column", {"name": "Список", "title": "", "column_title": "Это основная конфигурация"}),
+        ("table_current_row", {"name": "Список", "title": ""}),
+        ("dynamic_list_sort_by_column", {"name": "Список", "title": "", "column_title": "Это основная конфигурация"}),
+        ("table_current_row", {"name": "Список", "title": ""}),
         ("dynamic_list_output", {"button": "", "wait_seconds": 3, "include_text": False}),
         ("_save_output_tabular_document_to_mxl", {"session_id": "unit", "doc_name": "ТабличныйДокумент", "path_prefix": "configuration_name_version_from_subsystems", "timeout": 120}),
     ]
+
+
+def test_configuration_name_version_from_subsystems_prefers_sorted_first_row(monkeypatch):
+    calls = []
+
+    async def fake_bridge_call(session_id, method, params):
+        calls.append((method, params))
+        if method == "dynamic_list_sort_by_column":
+            return {"ordered": True}
+        if method == "table_current_row":
+            return {"pairs": [
+                {"key": "Имя подсистемы", "value": "МенеджерСервиса"},
+                {"key": "Версия", "value": "1.1.56.26"},
+                {"key": "Это основная конфигурация", "value": "Да"},
+            ]}
+        if method == "dynamic_list_output":
+            raise AssertionError("MXL fallback should not be used when sorted first row is main configuration")
+        return {"ok": True}
+
+    monkeypatch.setattr("mcp_1c.server._bridge_call_recorded", fake_bridge_call)
+
+    result = asyncio.run(configuration_name_version_from_subsystems(session_id="unit"))
+
+    assert result["found"] is True
+    assert result["configuration_name"] == "МенеджерСервиса"
+    assert result["configuration_version"] == "1.1.56.26"
+    assert result["source_method"] == "sorted_first_row"
+    assert result["rows_count"] == 1
+    assert result["sort_attempts"] == [
+        {"attempt": 1, "ordered": True, "read_method": "current_after_sort", "first_row_is_main": True, "first_row_main_marker": "Да"}
+    ]
+    assert calls == [
+        ("open_navigation_link", {"navigation_link": "e1cib/list/РегистрСведений.ВерсииПодсистем"}),
+        ("dynamic_list_sort_by_column", {"name": "Список", "title": "", "column_title": "Это основная конфигурация"}),
+        ("table_current_row", {"name": "Список", "title": ""}),
+    ]
+
+
+def test_table_row_pairs_accepts_current_row_wrapper():
+    wrapped = {
+        "found": True,
+        "current_row": {
+            "available": True,
+            "pairs": [
+                {"key": "Имя подсистемы", "value": "БухгалтерияПредприятия"},
+                {"key": "Версия", "value": "3.0.204.22"},
+                {"key": "Это основная конфигурация", "value": "Да"},
+            ],
+        },
+    }
+
+    assert _find_main_configuration_in_row_pairs([_table_row_pairs(wrapped)]) == {
+        "configuration_name": "БухгалтерияПредприятия",
+        "configuration_version": "3.0.204.22",
+        "Это основная конфигурация": "Да",
+    }
+
+
+def test_configuration_from_sorted_first_row_requires_main_marker():
+    assert _configuration_from_sorted_first_row({
+        "Имя подсистемы": "БухгалтерияПредприятия",
+        "Версия": "3.0.204.22",
+        "Это основная конфигурация": "Да",
+    }) == {
+        "configuration_name": "БухгалтерияПредприятия",
+        "configuration_version": "3.0.204.22",
+        "Это основная конфигурация": "Да",
+    }
+    assert _configuration_from_sorted_first_row({
+        "Имя подсистемы": "БСП",
+        "Версия": "3.1",
+        "Это основная конфигурация": "Нет",
+    }) == {}
+
+
+def test_find_main_configuration_in_row_pairs():
+    rows = [
+        {"Имя подсистемы": "БСП", "Версия": "3.1", "Это основная конфигурация": "Нет"},
+        {"Имя подсистемы": "БухгалтерияПредприятия", "Версия": "3.0.204.22", "Это основная конфигурация": "Да"},
+    ]
+
+    assert _find_main_configuration_in_row_pairs(rows) == {
+        "configuration_name": "БухгалтерияПредприятия",
+        "configuration_version": "3.0.204.22",
+        "Это основная конфигурация": "Да",
+    }
 
 
 def test_tabular_cells_from_binary_mxl_literals_parses_subsystems_table():

@@ -6788,6 +6788,11 @@ def _table_row_pairs(row: Any) -> dict[str, str]:
     result: dict[str, str] = {}
     if not isinstance(row, dict):
         return result
+    nested_row = row.get("current_row") or row.get("row")
+    if isinstance(nested_row, dict):
+        nested = _table_row_pairs(nested_row)
+        if nested:
+            return nested
     values = row.get("values")
     if isinstance(values, dict):
         for key, value in values.items():
@@ -8388,27 +8393,55 @@ async def configuration_name_version_from_subsystems(
     navigation_link = "e1cib/list/РегистрСведений.ВерсииПодсистем"
     await _bridge_call_recorded(session_id, "open_navigation_link", {"navigation_link": navigation_link})
 
-    output_result = await _bridge_call_recorded(session_id, "dynamic_list_output", {
-        "button": "",
-        "wait_seconds": 3,
-        "include_text": False,
-    })
-    tabular_docs = output_result.get("tabular_documents", {}) if isinstance(output_result, dict) else {}
-    items = tabular_docs.get("items", []) if isinstance(tabular_docs, dict) else []
-
     warnings: list[str] = []
     main: dict[str, str] = {}
     cells: list[list[str]] = []
-    if items:
-        first_item = items[0]
-        doc_name = first_item.get("name", "") if isinstance(first_item, dict) else ""
-        cells = await _save_output_tabular_document_to_mxl(
-            session_id,
-            doc_name,
-            "configuration_name_version_from_subsystems",
-            warnings,
-        )
-        main = _find_main_configuration_in_tabular_cells(cells)
+    source_method = "sorted_first_row"
+    current_row: dict[str, str] = {}
+    sort_attempts: list[dict[str, Any]] = []
+
+    for attempt in range(1, 3):
+        sort_result = await _bridge_call_recorded(session_id, "dynamic_list_sort_by_column", {
+            "name": "Список",
+            "title": "",
+            "column_title": "Это основная конфигурация",
+        })
+        # УстановитьПорядок() toggles the sort direction if the list is already
+        # sorted by the same column. Read the current/top row after sorting; if
+        # the first direction puts Нет first, toggle once and read again.
+        row_result = await _bridge_call_recorded(session_id, "table_current_row", {"name": "Список", "title": ""})
+        current_row = _table_row_pairs(row_result)
+        main = _configuration_from_sorted_first_row(current_row)
+        sort_attempts.append({
+            "attempt": attempt,
+            "ordered": bool(sort_result.get("ordered")) if isinstance(sort_result, dict) else False,
+            "read_method": "current_after_sort",
+            "first_row_is_main": bool(main),
+            "first_row_main_marker": _row_value(current_row, "Это основная конфигурация", "ЭтоОсновнаяКонфигурация"),
+        })
+        if main:
+            break
+
+    if not main:
+        warnings.append("Sorted first list row did not expose the main configuration; falling back to MXL list output")
+        source_method = "list_output_mxl"
+        output_result = await _bridge_call_recorded(session_id, "dynamic_list_output", {
+            "button": "",
+            "wait_seconds": 3,
+            "include_text": False,
+        })
+        tabular_docs = output_result.get("tabular_documents", {}) if isinstance(output_result, dict) else {}
+        items = tabular_docs.get("items", []) if isinstance(tabular_docs, dict) else []
+        if items:
+            first_item = items[0]
+            doc_name = first_item.get("name", "") if isinstance(first_item, dict) else ""
+            cells = await _save_output_tabular_document_to_mxl(
+                session_id,
+                doc_name,
+                "configuration_name_version_from_subsystems",
+                warnings,
+            )
+            main = _find_main_configuration_in_tabular_cells(cells)
 
     return {
         "found": bool(main),
@@ -8416,11 +8449,36 @@ async def configuration_name_version_from_subsystems(
         "configuration_version": main.get("configuration_version", ""),
         "main_configuration_row": main,
         "main_configuration_rows_count": 1 if main else 0,
-        "rows_count": max(0, len(cells) - 1),
+        "rows_count": 1 if source_method == "sorted_first_row" and current_row else max(0, len(cells) - 1),
         "warnings": warnings,
         "navigation_link": navigation_link,
         "source": "РегистрСведений.ВерсииПодсистем",
+        "source_method": source_method,
+        "sort_attempts": sort_attempts,
     }
+
+
+def _configuration_from_sorted_first_row(row: dict[str, str]) -> dict[str, str]:
+    """Return configuration data when a sorted first row is the main configuration."""
+    if not row:
+        return {}
+    main_marker = _row_value(row, "Это основная конфигурация", "ЭтоОсновнаяКонфигурация")
+    if not _is_truthy_1c(main_marker):
+        return {}
+    return {
+        "configuration_name": _row_value(row, "Имя подсистемы", "ИмяПодсистемы"),
+        "configuration_version": _row_value(row, "Версия"),
+        "Это основная конфигурация": main_marker,
+    }
+
+
+def _find_main_configuration_in_row_pairs(rows: list[dict[str, str]]) -> dict[str, str]:
+    """Scan list-form table rows for the main configuration row."""
+    for row in rows:
+        main = _configuration_from_sorted_first_row(row)
+        if main:
+            return main
+    return {}
 
 
 def _find_main_configuration_in_tabular_cells(cells: list[list[str]]) -> dict[str, str]:
