@@ -93,6 +93,7 @@ def test_command_interface_search_without_section_scans_sections():
 
     assert "КомандыВсехРазделовКомандногоИнтерфейса(АктивноеОкно, Интерфейс, СтрокаПоиска, Максимум, Тайминги)" in search
     assert 'Тайминги.Вставить("sections_count", Разделы.Количество())' in all_sections
+    assert 'КомандныйИнтерфейсСлужебныйРазделMCP(ЗаголовокРаздела)' in all_sections
     assert 'КнопкаРаздела.Нажать();' in all_sections
     assert 'Команда.Вставить("section", ЗаголовокРаздела);' in all_sections
     assert 'Тайминги.Вставить("sections_scanned", ПросмотреноРазделов)' in all_sections
@@ -773,3 +774,18 @@ def test_ui_tree_current_page_is_shallow_and_command_panels_can_be_disabled():
     assert "ТекущаяДоступность" not in decoration_branch
     assert "ТекущееТолькоПросмотр" not in decoration_branch
     assert "Если ВключатьКомандныеПанели И (ТипОбъекта" in module
+
+
+def test_command_interface_search_closes_help_panel_after_cleanup():
+    module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
+    help_window = _bsl_function_body(module, "ЭтоОкноПомощиКомандногоИнтерфейсаMCP")
+    service_section = _bsl_function_body(module, "КомандныйИнтерфейсСлужебныйРазделMCP")
+
+    assert "Процедура ЗакрытьКомандныйИнтерфейсПослеРаботыMCP" in module
+    assert "Процедура ЗакрытьПанелиПомощиПослеКомандногоИнтерфейсаMCP" in module
+    assert "ЗакрытьПанелиПомощиПослеКомандногоИнтерфейсаMCP(Окно)" in module
+    assert "ТестируемоеПриложение.ПолучитьАктивноеОкно()" in module
+    assert "АктивноеОкно.Закрыть();" in module
+    assert "ТекущееОкно.Закрыть();" in module
+    assert 'СтрНайти(ЗаголовокОкна, "помощ") > 0' in help_window
+    assert 'Заголовок = "помощь" Или Заголовок = "help"' in service_section
