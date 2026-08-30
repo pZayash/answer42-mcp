@@ -44,7 +44,7 @@ from .window_control import maximize_test_client_window as _maximize_external_wi
 mcp = MCPServer("Answer42")
 _RAG = RagService()
 _RAG_ENABLED = os.getenv("ONEC_MCP_DISABLE_RAG", "").strip().lower() not in {"1", "true", "yes", "on"}
-AUTO_SUMMARY_RAG_ON_START = os.getenv("ONEC_MCP_AUTO_SUMMARY_RAG_ON_START", "1").strip().lower() not in {"0", "false", "no", "off"}
+AUTO_SUMMARY_RAG_ON_START = os.getenv("ONEC_MCP_AUTO_SUMMARY_RAG_ON_START", "0").strip().lower() in {"1", "true", "yes", "on"}
 _CREDENTIAL_STORE_ENABLED = os.getenv("ONEC_MCP_DISABLE_CREDENTIAL_STORE", "").strip().lower() not in {"1", "true", "yes", "on"}
 _DEV_TOOLS_ENABLED = os.getenv("ONEC_MCP_DEV_TOOLS", "").strip().lower() in {"1", "true", "yes", "on"}
 DEFAULT_SESSION = os.getenv("ONEC_MCP_DEFAULT_SESSION", f"default-{os.getpid()}")
@@ -1423,6 +1423,7 @@ def _summary_rag_notice(
     enabled: bool,
     reason: str = "",
     message: str = "",
+    auto: bool = True,
     snapshot: str = "",
     config_code: str = "",
     identifier: str = "",
@@ -1433,7 +1434,7 @@ def _summary_rag_notice(
     backend = getattr(_RAG, "summary_backend", None)
     notice: dict[str, Any] = {
         "enabled": enabled,
-        "auto": True,
+        "auto": auto,
         "backend": "configuration-summary" if enabled else "",
         "summary_backend": None if backend is None else {
             "enabled": bool(getattr(backend, "enabled", False)),
@@ -1458,6 +1459,89 @@ def _summary_rag_notice(
     else:
         notice["message"] = reason or "Summary RAG was not enabled automatically."
     return notice
+
+
+def _configure_summary_rag_from_config_alias(sess: SessionState, config_alias: str) -> dict[str, Any]:
+    requested = str(config_alias or "").strip()
+    if not requested:
+        return _summary_rag_notice(
+            enabled=False,
+            auto=False,
+            reason="summary_rag_config_not_specified",
+        )
+    if not _RAG_ENABLED:
+        return _summary_rag_notice(enabled=False, auto=False, reason="rag_disabled_for_server")
+    summary_backend = getattr(_RAG, "summary_backend", None)
+    if summary_backend is None:
+        return _summary_rag_notice(enabled=False, auto=False, reason="summary_backend_unavailable")
+    if not summary_backend.enabled:
+        return _summary_rag_notice(enabled=False, auto=False, reason="summary_backend_disabled")
+
+    try:
+        summary_candidate = summary_backend.find_configuration(requested)
+        if not summary_candidate:
+            return _summary_rag_notice(
+                enabled=False,
+                auto=False,
+                reason="summary_configuration_not_found",
+                message=(
+                    "Summary RAG was not enabled: configuration alias "
+                    f"{requested!r} was not found in {summary_backend.project}@{summary_backend.ref}."
+                ),
+            )
+
+        warnings: list[str] = list(summary_candidate.get("warnings") or [])
+        extra_layers: list[dict[str, Any]] = []
+        skipped_layers: list[dict[str, Any]] = []
+        config_code = str(summary_candidate["config_code"])
+        fresh_layer = summary_backend.find_extension(config_code, "fresh")
+        if fresh_layer is None:
+            skipped_layers.append({"layer": "fresh", "reason": "summary_layer_not_found"})
+            warnings.append("Summary RAG layer 'fresh' was not found; using configuration layer only.")
+        else:
+            warnings.extend(fresh_layer.get("warnings") or [])
+            extra_layers.append({
+                "layer": str(fresh_layer.get("layer") or "fresh"),
+                "role": "extension",
+                "manifest": fresh_layer.get("manifest") or {},
+            })
+
+        summary_snapshot = summary_backend.create_snapshot(
+            config_code=config_code,
+            layer=str(summary_candidate.get("layer") or "configuration"),
+            identifier=str(summary_candidate.get("identifier") or ""),
+            version=str(summary_candidate.get("version") or ""),
+            manifest=summary_candidate.get("manifest") or None,
+            warnings=warnings,
+            extra_layers=extra_layers,
+        )
+        sess.rag_enabled = True
+        sess.rag_snapshot = str(summary_snapshot.get("name") or "")
+        if sess.base_url:
+            _save_rag_binding(sess.base_url, sess.rag_snapshot)
+        layers = [str(layer.get("layer") or "") for layer in summary_snapshot.get("summary_layers", [])]
+        return _summary_rag_notice(
+            enabled=True,
+            auto=False,
+            snapshot=sess.rag_snapshot,
+            config_code=config_code,
+            identifier=str(summary_snapshot.get("identifier") or ""),
+            version=str(summary_snapshot.get("version") or ""),
+            layers=layers,
+            warnings=warnings,
+            message=(
+                "Summary RAG enabled from explicit configuration alias "
+                f"{requested!r}: snapshot {sess.rag_snapshot}."
+            ),
+        ) | {"requested_config": requested, "skipped_layers": skipped_layers}
+    except Exception as exc:
+        logging.warning("Explicit Summary RAG setup failed for session %s: %s", sess.session_id, exc)
+        return _summary_rag_notice(
+            enabled=False,
+            auto=False,
+            reason="summary_rag_config_failed",
+            message=f"Summary RAG was not enabled from explicit configuration alias {requested!r}: {exc}",
+        )
 
 
 async def _auto_configure_summary_rag_on_start(sess: SessionState) -> dict[str, Any]:
@@ -3971,7 +4055,8 @@ async def start_session(
     extra_args: Annotated[str, "Extra raw 1C command-line arguments for the test client"] = "",
     execute: Annotated[str, "External data processor/report path for the test-client /Execute command-line parameter"] = "",
     command_parameter: Annotated[str, "Additional test-client /C value; when extra_args already contains /C, this value is appended with ';'"] = "",
-    rag_enabled: Annotated[bool, "Enable built-in RAG for this session"] = True,
+    rag_enabled: Annotated[bool, "Enable built-in RAG for this session"] = False,
+    summary_rag_config: Annotated[str, "Explicit Summary RAG configuration alias/code, e.g. bp, accounting30, Бухгалтерия предприятия. Enables configuration+fresh summary snapshot without live autodetection."] = "",
 ) -> dict[str, Any]:
     """One-shot session factory: detect version, start infrastructure and connect the 1C test client."""
     credential_ref = _resolve_credential_reference(base_url)
@@ -4038,7 +4123,7 @@ async def start_session(
         sess.rag_enabled = bool(rag_enabled)
         sess.idle_timeout_seconds = max(0, int(idle_timeout_minutes)) * 60
         _cleanup_stale_session_processes(sess, "before start_session")
-        if base_url and _RAG_ENABLED and sess.rag_enabled:
+        if base_url and _RAG_ENABLED and sess.rag_enabled and not summary_rag_config:
             bound_snapshot = _snapshot_for_base_url(base_url)
             if bound_snapshot:
                 sess.rag_snapshot = bound_snapshot
@@ -4231,7 +4316,30 @@ async def start_session(
             _mark_credentials_verified(connect_base_url or connect_connection_value, username, password, credential_account_id)
         _auto_maximize_test_client_result(connect_result, sess.client_display or sess.display)
 
-    if base_url and _RAG_ENABLED and sess.rag_enabled:
+    if summary_rag_config:
+        sess.rag_notice = _configure_summary_rag_from_config_alias(sess, summary_rag_config)
+    elif (
+        base_url
+        and _RAG_ENABLED
+        and sess.rag_enabled
+        and getattr(_RAG, "summary_backend", None) is not None
+        and _RAG.summary_backend.is_summary_snapshot(sess.rag_snapshot)
+    ):
+        info = _RAG.summary_backend.resolve_snapshot(sess.rag_snapshot) or {}
+        layers = [str(layer.get("layer") or "") for layer in info.get("summary_layers", [])]
+        sess.rag_notice = _summary_rag_notice(
+            enabled=True,
+            auto=False,
+            reason="existing_summary_binding",
+            snapshot=sess.rag_snapshot,
+            config_code=str(info.get("config_code") or ""),
+            identifier=str(info.get("identifier") or ""),
+            version=str(info.get("version") or ""),
+            layers=layers,
+            warnings=list(info.get("warnings") or []),
+            message=f"Summary RAG enabled from existing base URL binding: {sess.rag_snapshot}.",
+        )
+    elif base_url and _RAG_ENABLED and sess.rag_enabled:
         sess.rag_notice = await _auto_configure_summary_rag_on_start(sess)
     else:
         sess.rag_notice = _summary_rag_notice(

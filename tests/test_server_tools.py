@@ -19,6 +19,7 @@ from mcp_1c.server import (
     _auto_configure_summary_rag_on_start,
     _cf_marker_matches,
     _configure_session_scope,
+    _configure_summary_rag_from_config_alias,
     _configure_universal_report_metadata_settings,
     _convert_1c_guid_navigation_link,
     _decode_log_bytes,
@@ -429,7 +430,8 @@ def test_selected_new_tool_schemas():
     assert tools["metadata_objects_from_catalog"].input_schema["properties"]["watchdog_timeout"]["default"] == 90
     assert "session_id" in tools["metadata_objects_catalog_cache_clear"].input_schema["properties"]
     assert tools["window_command_interface"].input_schema["properties"]["window_title"]["default"] == ""
-    assert tools["start_session"].input_schema["properties"]["rag_enabled"]["default"] is True
+    assert tools["start_session"].input_schema["properties"]["rag_enabled"]["default"] is False
+    assert tools["start_session"].input_schema["properties"]["summary_rag_config"]["default"] == ""
     assert tools["rag_sources_add_from_directory"].input_schema["required"] == ["path"]
     assert tools["rag_sources_add_from_directory"].input_schema["properties"]["watch"]["default"] is True
     assert tools["rag_available_configurations"].input_schema["properties"]["sync"]["default"] is True
@@ -882,6 +884,74 @@ def test_auto_configure_summary_rag_on_start(monkeypatch, tmp_path):
     assert notice["summary_backend"]["backend"] == "gitlab-stream"
     assert notice["snapshot"] == "summary:bp:configuration+fresh:Accounting30:3.0.204.22"
     assert notice["layers"] == ["configuration", "fresh"]
+    assert sess.rag_snapshot == notice["snapshot"]
+    assert saved_bindings == [("https://example.invalid/bp/", notice["snapshot"])]
+
+
+def test_configure_summary_rag_from_config_alias_enables_bp_fresh(tmp_path, monkeypatch):
+    class FakeSummaryBackend:
+        enabled = True
+        backend = "gitlab-stream"
+        project = "platform42/configurations/summary"
+        ref = "beta"
+
+        def find_configuration(self, config_name, config_version=""):
+            assert config_name == "bp"
+            assert config_version == ""
+            return {
+                "config_code": "bp",
+                "layer": "configuration",
+                "identifier": "Accounting30",
+                "version": "3.0.204.22",
+                "manifest": {"identifier": "Accounting30", "version": "3.0.204.22", "chunkCount": 591902},
+                "warnings": [],
+            }
+
+        def find_extension(self, config_code, extension_name, extension_version=""):
+            assert config_code == "bp"
+            assert extension_name == "fresh"
+            assert extension_version == ""
+            return {
+                "config_code": "bp",
+                "layer": "fresh",
+                "role": "extension",
+                "name": "fresh",
+                "version": "3.0.204.22",
+                "manifest": {"identifier": "Accounting30", "extensionVersion": "3.0.204.22", "chunkCount": 4531},
+                "warnings": [],
+            }
+
+        def create_snapshot(self, **kwargs):
+            assert kwargs["config_code"] == "bp"
+            assert kwargs["layer"] == "configuration"
+            assert kwargs["extra_layers"][0]["layer"] == "fresh"
+            return {
+                "name": "summary:bp:configuration+fresh:Accounting30:3.0.204.22",
+                "config_code": "bp",
+                "identifier": "Accounting30",
+                "version": "3.0.204.22",
+                "summary_layers": [{"layer": "configuration"}, {"layer": "fresh"}],
+            }
+
+    fake_rag = types.SimpleNamespace(summary_backend=FakeSummaryBackend())
+    saved_bindings = []
+    monkeypatch.setattr("mcp_1c.server._RAG", fake_rag)
+    monkeypatch.setattr("mcp_1c.server._RAG_ENABLED", True)
+    monkeypatch.setattr("mcp_1c.server._save_rag_binding", lambda base_url, snapshot: saved_bindings.append((base_url, snapshot)))
+
+    sess = SessionState("summary_alias", "", Path("."), 10021, 10022, 10023, tmp_path, base_url="https://example.invalid/bp/")
+    sess.rag_enabled = False
+
+    notice = _configure_summary_rag_from_config_alias(sess, "bp")
+
+    assert notice["enabled"] is True
+    assert notice["auto"] is False
+    assert notice["requested_config"] == "bp"
+    assert notice["backend"] == "configuration-summary"
+    assert notice["summary_backend"]["backend"] == "gitlab-stream"
+    assert notice["snapshot"] == "summary:bp:configuration+fresh:Accounting30:3.0.204.22"
+    assert notice["layers"] == ["configuration", "fresh"]
+    assert sess.rag_enabled is True
     assert sess.rag_snapshot == notice["snapshot"]
     assert saved_bindings == [("https://example.invalid/bp/", notice["snapshot"])]
 

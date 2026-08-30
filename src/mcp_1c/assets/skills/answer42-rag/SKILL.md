@@ -21,13 +21,25 @@ description: "RAG-индекс 1С metadata через Answer42"
 
 ### Быстрый старт (live-сессия)
 
-`start_session(rag_enabled=true)` по умолчанию пытается автоматически включить
-summary RAG для web-базы: читает live-конфигурацию, ищет её в
-`platform42/configurations/summary` и возвращает `rag_notice` с результатом.
-Если конфигурация найдена, `rag_notice.enabled=true`,
-`rag_notice.backend="configuration-summary"`, а `rag_notice.summary_backend`
-показывает транспорт (`gitlab-stream`/`local-stream`), project и ref. Если не
-найдена или RAG выключен — `rag_notice.enabled=false` с `reason` и `message`.
+`start_session()` по умолчанию запускается с `rag_enabled=false`, чтобы не
+удлинять старт live-чтением регистров конфигурации. Для быстрого включения
+summary RAG передай явный алиас конфигурации:
+
+```text
+start_session(base_url="https://...", summary_rag_config="bp")
+```
+
+Поддерживаются алиасы `bp`, `accounting30`, `Бухгалтерия предприятия`. Такой
+старт включает RAG для сессии и создаёт summary snapshot из слоёв
+`configuration+fresh` без live-автодетекта через `ВерсииПодсистем`/
+`ВерсииРасширений`. Результат возвращается в `rag_notice`: при успехе
+`rag_notice.enabled=true`, `rag_notice.backend="configuration-summary"`, а
+`rag_notice.summary_backend` показывает транспорт (`gitlab-stream`/`local-stream`),
+project и ref. Если конфигурация не найдена или RAG выключен —
+`rag_notice.enabled=false` с `reason` и `message`.
+
+Автоматический live-автодетект при `rag_enabled=true` отключён по умолчанию и
+включается только переменной окружения `ONEC_MCP_AUTO_SUMMARY_RAG_ON_START=1`.
 
 Для ручной перенастройки или fallback-выгрузки используй:
 
