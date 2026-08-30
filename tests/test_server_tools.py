@@ -44,6 +44,7 @@ from mcp_1c.server import (
     _register_dev_tools,
     _state_file_for_scope,
     _summary_rag_config_from_42clouds_url,
+    _tabular_cells_from_mxl,
     _test_client_startup_error_from_logs,
     _tool_names_for_profile,
     _update_global_session_registry,
@@ -749,45 +750,9 @@ def test_ui_tree_summary_reports_type_counts_for_flat_objects():
     assert summary["types_count"]["by_type"]["ТестируемаяКнопкаФормы"] == 2
 
 
-def test_configuration_name_version_reuses_cells_from_list_output(monkeypatch):
-    calls = []
+def test_configuration_name_version_reads_main_configuration_from_mxl(monkeypatch):
+    from mcp_1c import server
 
-    async def fake_bridge_call(session_id, method, params):
-        calls.append((method, params))
-        if method == "dynamic_list_output":
-            return {
-                "tabular_documents": {
-                    "items": [
-                        {
-                            "name": "ТабличныйДокумент",
-                            "cells": [
-                                ["Имя подсистемы", "Версия", "Это основная конфигурация"],
-                                ["Platform42", "1.1.9.728", "Нет"],
-                                ["МенеджерСервиса", "1.1.56.26", "Да"],
-                                ["СтандартныеПодсистемы", "2.3.2.44", "Нет"],
-                            ],
-                        }
-                    ]
-                }
-            }
-        if method == "tabular_document_text":
-            raise AssertionError("configuration_name_version_from_subsystems must not reread cells already returned by dynamic_list_output")
-        return {"ok": True}
-
-    monkeypatch.setattr("mcp_1c.server._bridge_call_recorded", fake_bridge_call)
-
-    result = asyncio.run(configuration_name_version_from_subsystems(session_id="unit"))
-
-    assert result["found"] is True
-    assert result["configuration_name"] == "МенеджерСервиса"
-    assert result["configuration_version"] == "1.1.56.26"
-    assert calls == [
-        ("open_navigation_link", {"navigation_link": "e1cib/list/РегистрСведений.ВерсииПодсистем"}),
-        ("dynamic_list_output", {"button": "", "wait_seconds": 3, "include_text": True, "max_rows": 50, "max_columns": 20}),
-    ]
-
-
-def test_configuration_name_version_falls_back_to_tabular_document_text(monkeypatch):
     calls = []
 
     async def fake_bridge_call(session_id, method, params):
@@ -795,23 +760,52 @@ def test_configuration_name_version_falls_back_to_tabular_document_text(monkeypa
         if method == "dynamic_list_output":
             return {"tabular_documents": {"items": [{"name": "ТабличныйДокумент"}]}}
         if method == "tabular_document_text":
-            return {
-                "cells": [
-                    ["Имя подсистемы", "Версия", "Это основная конфигурация"],
-                    ["Platform42", "1.1.9.728", "Нет"],
-                    ["МенеджерСервиса", "1.1.56.26", "Да"],
-                ]
-            }
+            raise AssertionError("configuration_name_version_from_subsystems must read saved MXL instead of UI cells")
         return {"ok": True}
 
+    async def fake_save_to_mxl(session_id, doc_name, path_prefix, warnings, *, timeout=120):
+        calls.append(("_save_output_tabular_document_to_mxl", {"session_id": session_id, "doc_name": doc_name, "path_prefix": path_prefix, "timeout": timeout}))
+        warnings.append("List output MXL became parseable; path=/tmp/unit.mxl; rows=4")
+        return [
+            ["Имя подсистемы", "Версия", "Это основная конфигурация"],
+            ["Platform42", "1.1.9.728", "Нет"],
+            ["МенеджерСервиса", "1.1.56.26", "Да"],
+            ["СтандартныеПодсистемы", "2.3.2.44", "Нет"],
+        ]
+
     monkeypatch.setattr("mcp_1c.server._bridge_call_recorded", fake_bridge_call)
+    monkeypatch.setattr(server, "_save_output_tabular_document_to_mxl", fake_save_to_mxl)
 
     result = asyncio.run(configuration_name_version_from_subsystems(session_id="unit"))
 
     assert result["found"] is True
     assert result["configuration_name"] == "МенеджерСервиса"
-    assert calls[1] == ("dynamic_list_output", {"button": "", "wait_seconds": 3, "include_text": True, "max_rows": 50, "max_columns": 20})
-    assert calls[2][0] == "tabular_document_text"
+    assert result["configuration_version"] == "1.1.56.26"
+    assert result["warnings"] == ["List output MXL became parseable; path=/tmp/unit.mxl; rows=4"]
+    assert calls == [
+        ("open_navigation_link", {"navigation_link": "e1cib/list/РегистрСведений.ВерсииПодсистем"}),
+        ("dynamic_list_output", {"button": "", "wait_seconds": 3, "include_text": False}),
+        ("_save_output_tabular_document_to_mxl", {"session_id": "unit", "doc_name": "ТабличныйДокумент", "path_prefix": "configuration_name_version_from_subsystems", "timeout": 120}),
+    ]
+
+
+def test_tabular_cells_from_mxl_parses_simple_saved_cells(tmp_path):
+    path = tmp_path / "subsystems.mxl"
+    path.write_text(
+        'MOXCEL\n'
+        '{16,1,{1,1,{"#","Имя подсистемы"}},0},1,\n'
+        '{16,1,{1,1,{"#","Версия"}},0},2,\n'
+        '{16,1,{1,1,{"#","Это основная конфигурация"}},0},3,\n'
+        '{20,2,{"#",11111111-1111-1111-1111-111111111111,{2}},{1,1,{"#","МенеджерСервиса"}},0},1,\n'
+        '{20,2,{"#",11111111-1111-1111-1111-111111111111,{3}},{1,1,{"#","1.1.56.26"}},0},2,\n'
+        '{20,2,{"#",11111111-1111-1111-1111-111111111111,{4}},{1,1,{"#","Да"}},0},3,\n',
+        encoding="utf-8",
+    )
+
+    assert _tabular_cells_from_mxl(path) == [
+        ["Имя подсистемы", "Версия", "Это основная конфигурация"],
+        ["МенеджерСервиса", "1.1.56.26", "Да"],
+    ]
 
 
 def test_dynamic_list_output_passes_include_text_and_limits_to_bridge(monkeypatch):

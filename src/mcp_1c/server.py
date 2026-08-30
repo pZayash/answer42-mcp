@@ -7800,6 +7800,35 @@ def _metadata_catalog_rows_from_xlsx(path: Path) -> list[dict[str, str]]:
     return _metadata_catalog_rows_from_tabular_cells(cells)
 
 
+def _tabular_cells_from_mxl(path: Path) -> list[list[str]]:
+    """Parse a simple row/column/text cell matrix from a 1C MXL text stream."""
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return []
+    if not _looks_like_mxl(data):
+        return []
+    text = data.decode("utf-8", errors="ignore")
+    rows: dict[int, dict[int, str]] = {}
+    cell_re = re.compile(
+        r"\{(?:16|20),(\d+),.*?\{1,1,\s*\{\"#\",\"((?:\"\"|[^\"])*)\"\}\s*\}.*?\},(\d+)(?=,|\r?\n)",
+        re.DOTALL,
+    )
+    for match in cell_re.finditer(text):
+        row = int(match.group(1))
+        value = match.group(2).replace('""', '"').strip()
+        column = int(match.group(3))
+        rows.setdefault(row, {})[column] = value
+    if not rows:
+        return []
+    max_row = max(rows)
+    max_column = max(max(row_cells) for row_cells in rows.values() if row_cells)
+    return [
+        [rows.get(row, {}).get(column, "") for column in range(1, max_column + 1)]
+        for row in range(1, max_row + 1)
+    ]
+
+
 def _metadata_catalog_rows_from_mxl(path: Path) -> list[dict[str, str]]:
     """Parse the textual MOXCEL stream saved by 1C tabular documents.
 
@@ -8250,6 +8279,50 @@ async def metadata_objects_catalog_cache_clear(
     return {"cleared": existed, "cache_key": cache_key}
 
 
+async def _save_output_tabular_document_to_mxl(
+    session_id: str,
+    doc_name: str,
+    path_prefix: str,
+    warnings: list[str],
+    *,
+    timeout: int = 120,
+) -> list[list[str]]:
+    if not doc_name:
+        warnings.append("List output did not return a tabular document name for MXL save")
+        return []
+    mxl_path = Path("/tmp/answer42") / f"{path_prefix}_{session_id}_{uuid.uuid4().hex}.mxl"
+    try:
+        selected_result = await _tabular_document_save_filter_by_filter(
+            session_id,
+            {
+                "name": doc_name,
+                "path": str(mxl_path),
+                "format": "mxl",
+                "exact_filter_only": True,
+            },
+            "mxl",
+            timeout=timeout,
+            danger=f"{path_prefix}_file_save_may_block_thin_client",
+        )
+        if isinstance(selected_result, dict) and selected_result.get("interface_blocked"):
+            warnings.append(f"List output MXL save blocked the interface: {_truncate_value(selected_result)}")
+            return []
+        selected = selected_result.get("selected") if isinstance(selected_result, dict) else None
+        selected_path = selected.get("copied_to") or selected.get("path") if isinstance(selected, dict) else ""
+        if not selected_path:
+            warnings.append(f"List output MXL save returned no selected file: {_truncate_value(selected_result)}")
+            return []
+        cells = _tabular_cells_from_mxl(Path(selected_path))
+        if cells:
+            warnings.append(f"List output MXL became parseable; path={selected_path}; rows={len(cells)}")
+            return cells
+        warnings.append(f"List output MXL contained no parseable cells; path={selected_path}")
+        return []
+    except Exception as exc:
+        warnings.append(f"List output MXL save/read failed: {exc}")
+        return []
+
+
 @mcp.tool()
 async def configuration_name_version_from_subsystems(
     *,
@@ -8268,28 +8341,23 @@ async def configuration_name_version_from_subsystems(
     output_result = await _bridge_call_recorded(session_id, "dynamic_list_output", {
         "button": "",
         "wait_seconds": 3,
-        "include_text": True,
-        "max_rows": 50,
-        "max_columns": 20,
+        "include_text": False,
     })
     tabular_docs = output_result.get("tabular_documents", {}) if isinstance(output_result, dict) else {}
     items = tabular_docs.get("items", []) if isinstance(tabular_docs, dict) else []
 
+    warnings: list[str] = []
     main: dict[str, str] = {}
     cells: list[list[str]] = []
     if items:
         first_item = items[0]
-        item_cells = first_item.get("cells") if isinstance(first_item, dict) else None
-        if isinstance(item_cells, list):
-            cells = item_cells
-        else:
-            doc_name = first_item.get("name", "") if isinstance(first_item, dict) else ""
-            text_result = await _bridge_call_recorded(session_id, "tabular_document_text", {
-                "name": doc_name,
-                "max_rows": 50,
-                "max_columns": 20,
-            })
-            cells = text_result.get("cells", []) if isinstance(text_result, dict) else []
+        doc_name = first_item.get("name", "") if isinstance(first_item, dict) else ""
+        cells = await _save_output_tabular_document_to_mxl(
+            session_id,
+            doc_name,
+            "configuration_name_version_from_subsystems",
+            warnings,
+        )
         main = _find_main_configuration_in_tabular_cells(cells)
 
     return {
@@ -8299,6 +8367,7 @@ async def configuration_name_version_from_subsystems(
         "main_configuration_row": main,
         "main_configuration_rows_count": 1 if main else 0,
         "rows_count": max(0, len(cells) - 1),
+        "warnings": warnings,
         "navigation_link": navigation_link,
         "source": "РегистрСведений.ВерсииПодсистем",
     }
