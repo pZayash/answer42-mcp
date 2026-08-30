@@ -7801,7 +7801,13 @@ def _metadata_catalog_rows_from_xlsx(path: Path) -> list[dict[str, str]]:
 
 
 def _tabular_cells_from_mxl(path: Path) -> list[list[str]]:
-    """Parse a simple row/column/text cell matrix from a 1C MXL text stream."""
+    """Parse a simple row/column/text cell matrix from a 1C MXL stream.
+
+    1C can save MXL either as a mostly textual MOXCEL stream (common for the
+    Universal report) or as a compact binary MOXCEL stream with UTF-8 literals.
+    Prefer coordinate-aware text parsing, then fall back to ordered literals for
+    small dynamic-list outputs such as `ВерсииПодсистем`.
+    """
     try:
         data = path.read_bytes()
     except OSError:
@@ -7819,14 +7825,58 @@ def _tabular_cells_from_mxl(path: Path) -> list[list[str]]:
         value = match.group(2).replace('""', '"').strip()
         column = int(match.group(3))
         rows.setdefault(row, {})[column] = value
-    if not rows:
-        return []
-    max_row = max(rows)
-    max_column = max(max(row_cells) for row_cells in rows.values() if row_cells)
-    return [
-        [rows.get(row, {}).get(column, "") for column in range(1, max_column + 1)]
-        for row in range(1, max_row + 1)
+    if rows:
+        max_row = max(rows)
+        max_column = max(max(row_cells) for row_cells in rows.values() if row_cells)
+        return [
+            [rows.get(row, {}).get(column, "") for column in range(1, max_column + 1)]
+            for row in range(1, max_row + 1)
+        ]
+    return _tabular_cells_from_binary_mxl_literals(text)
+
+
+def _clean_binary_mxl_literal(value: str) -> str:
+    value = value.strip()
+    # Binary MXL decode may leave one-character length/control artifacts before
+    # Cyrillic strings, for example `0Это основная конфигурация` or
+    # `2БиблиотекаИнтеграцииВЕТИС`.
+    if re.match(r"^[0-9A-FW:](?=[А-ЯЁ])", value):
+        value = value[1:]
+    return value.strip()
+
+
+def _tabular_cells_from_binary_mxl_literals(text: str) -> list[list[str]]:
+    values = [
+        _clean_binary_mxl_literal(match.group(0))
+        for match in re.finditer(r"[A-Za-zА-Яа-яЁё0-9_.: -]{2,}", text)
     ]
+    values = [value for value in values if value and not value.isspace() and value != "Arial"]
+    if not values:
+        return []
+    header_idx = -1
+    for index in range(len(values) - 2):
+        if (
+            values[index] == "Имя подсистемы"
+            and values[index + 1] == "Версия"
+            and values[index + 2] == "Это основная конфигурация"
+        ):
+            header_idx = index
+            break
+    if header_idx < 0:
+        return []
+    header = values[header_idx : header_idx + 3]
+    next_idx = header_idx + 3
+    if next_idx < len(values) and values[next_idx] == "Выполнена регистрация отложенных обработчиков":
+        header.append(values[next_idx])
+        next_idx += 1
+    columns = len(header)
+    cells = [header]
+    for index in range(next_idx, len(values), columns):
+        row = values[index : index + columns]
+        if len(row) < columns:
+            break
+        cells.append(row)
+    return cells
 
 
 def _metadata_catalog_rows_from_mxl(path: Path) -> list[dict[str, str]]:
