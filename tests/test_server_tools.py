@@ -43,6 +43,7 @@ from mcp_1c.server import (
     _reap_global_orphan_sessions,
     _register_dev_tools,
     _state_file_for_scope,
+    _summary_rag_config_from_42clouds_url,
     _test_client_startup_error_from_logs,
     _tool_names_for_profile,
     _update_global_session_registry,
@@ -748,7 +749,45 @@ def test_ui_tree_summary_reports_type_counts_for_flat_objects():
     assert summary["types_count"]["by_type"]["ТестируемаяКнопкаФормы"] == 2
 
 
-def test_configuration_name_version_reads_main_configuration_from_list_output(monkeypatch):
+def test_configuration_name_version_reuses_cells_from_list_output(monkeypatch):
+    calls = []
+
+    async def fake_bridge_call(session_id, method, params):
+        calls.append((method, params))
+        if method == "dynamic_list_output":
+            return {
+                "tabular_documents": {
+                    "items": [
+                        {
+                            "name": "ТабличныйДокумент",
+                            "cells": [
+                                ["Имя подсистемы", "Версия", "Это основная конфигурация"],
+                                ["Platform42", "1.1.9.728", "Нет"],
+                                ["МенеджерСервиса", "1.1.56.26", "Да"],
+                                ["СтандартныеПодсистемы", "2.3.2.44", "Нет"],
+                            ],
+                        }
+                    ]
+                }
+            }
+        if method == "tabular_document_text":
+            raise AssertionError("configuration_name_version_from_subsystems must not reread cells already returned by dynamic_list_output")
+        return {"ok": True}
+
+    monkeypatch.setattr("mcp_1c.server._bridge_call_recorded", fake_bridge_call)
+
+    result = asyncio.run(configuration_name_version_from_subsystems(session_id="unit"))
+
+    assert result["found"] is True
+    assert result["configuration_name"] == "МенеджерСервиса"
+    assert result["configuration_version"] == "1.1.56.26"
+    assert calls == [
+        ("open_navigation_link", {"navigation_link": "e1cib/list/РегистрСведений.ВерсииПодсистем"}),
+        ("dynamic_list_output", {"button": "", "wait_seconds": 3, "include_text": True, "max_rows": 50, "max_columns": 20}),
+    ]
+
+
+def test_configuration_name_version_falls_back_to_tabular_document_text(monkeypatch):
     calls = []
 
     async def fake_bridge_call(session_id, method, params):
@@ -761,7 +800,6 @@ def test_configuration_name_version_reads_main_configuration_from_list_output(mo
                     ["Имя подсистемы", "Версия", "Это основная конфигурация"],
                     ["Platform42", "1.1.9.728", "Нет"],
                     ["МенеджерСервиса", "1.1.56.26", "Да"],
-                    ["СтандартныеПодсистемы", "2.3.2.44", "Нет"],
                 ]
             }
         return {"ok": True}
@@ -772,10 +810,25 @@ def test_configuration_name_version_reads_main_configuration_from_list_output(mo
 
     assert result["found"] is True
     assert result["configuration_name"] == "МенеджерСервиса"
-    assert result["configuration_version"] == "1.1.56.26"
-    assert calls[0] == ("open_navigation_link", {"navigation_link": "e1cib/list/РегистрСведений.ВерсииПодсистем"})
-    assert calls[1][0] == "dynamic_list_output"
+    assert calls[1] == ("dynamic_list_output", {"button": "", "wait_seconds": 3, "include_text": True, "max_rows": 50, "max_columns": 20})
     assert calls[2][0] == "tabular_document_text"
+
+
+def test_dynamic_list_output_passes_include_text_and_limits_to_bridge(monkeypatch):
+    from mcp_1c.server import dynamic_list_output
+
+    calls = []
+
+    async def fake_bridge_call(session_id, method, params):
+        calls.append((session_id, method, params))
+        return {"ok": True}
+
+    monkeypatch.setattr("mcp_1c.server._bridge_call_recorded", fake_bridge_call)
+
+    result = asyncio.run(dynamic_list_output(button="СписокВывестиСписок", wait_seconds=1, include_text=False, max_rows=5, max_columns=7, session_id="unit"))
+
+    assert result == {"ok": True}
+    assert calls == [("unit", "dynamic_list_output", {"button": "СписокВывестиСписок", "wait_seconds": 1, "include_text": False, "max_rows": 5, "max_columns": 7})]
 
 
 def test_rag_diagnostic_reports_missing_session_snapshot():
@@ -1380,6 +1433,15 @@ def test_json_list_accepts_json_and_delimited_strings():
     assert _json_list('["a.cf", "b.cfe"]') == ["a.cf", "b.cfe"]
     assert _json_list("a.cf,b.cfe\nc.cf") == ["a.cf", "b.cfe", "c.cf"]
     assert _json_list("") == []
+
+
+def test_summary_rag_config_from_42clouds_url_detects_publication_prefix():
+    assert _summary_rag_config_from_42clouds_url("https://base.42clouds.com/bp/123456") == "bp"
+    assert _summary_rag_config_from_42clouds_url("https://beta-base.42clouds.com/bp_base54-int") == "bp"
+    assert _summary_rag_config_from_42clouds_url("https://dev-area-06.42clouds.com/bp_base732/46678") == "bp"
+    assert _summary_rag_config_from_42clouds_url("https://dev-area-06.42clouds.com/ka_base7/123") == "ka"
+    assert _summary_rag_config_from_42clouds_url("https://example.invalid/bp/123456") == ""
+    assert _summary_rag_config_from_42clouds_url("dev-area-06.42clouds.com/bp_base732/46678") == ""
 
 
 def test_effective_dump_connection_uses_direct_session_target(tmp_path):

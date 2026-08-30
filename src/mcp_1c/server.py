@@ -1080,6 +1080,27 @@ def _snapshot_for_base_url(base_url: str) -> str:
     return _load_rag_bindings().get(_normalize_base_url(base_url), "")
 
 
+def _summary_rag_config_from_42clouds_url(base_url: str) -> str:
+    """Infer Summary RAG configuration code from 42clouds publication URL."""
+    normalized = _platform.normalize_infobase_url(str(base_url or "").strip())
+    parts = urlsplit(normalized)
+    if parts.scheme.lower() not in {"http", "https"}:
+        return ""
+    hostname = (parts.hostname or "").casefold().rstrip(".")
+    if not (hostname == "42clouds.com" or hostname.endswith(".42clouds.com")):
+        return ""
+    path_parts = [unquote(part).strip() for part in parts.path.split("/") if part.strip()]
+    if not path_parts:
+        return ""
+    publication = path_parts[0].casefold()
+    match = re.fullmatch(r"([a-z0-9]+)_base\d+(?:-int)?", publication)
+    if match:
+        return match.group(1)
+    if re.fullmatch(r"[a-z0-9]+", publication):
+        return publication
+    return ""
+
+
 def _normalize_connection_mode(mode: str, value: str, base_url: str = "") -> str:
     requested = (mode or "auto").strip().lower()
     if requested in {"http", "url"}:
@@ -4090,6 +4111,8 @@ async def start_session(
         # a file infobase path (/F or ibsrv) or a server/infobase string (/S).
         connection_value = base_url
         base_url = ""
+    inferred_summary_rag_config = "" if summary_rag_config else _summary_rag_config_from_42clouds_url(base_url)
+    effective_summary_rag_config = summary_rag_config or inferred_summary_rag_config
     resolved_version = version or None
     if not resolved_version and base_url and initial_connection_mode == "ws":
         resolved_version = _platform.detect_version_from_url(base_url)
@@ -4123,7 +4146,7 @@ async def start_session(
         sess.rag_enabled = bool(rag_enabled)
         sess.idle_timeout_seconds = max(0, int(idle_timeout_minutes)) * 60
         _cleanup_stale_session_processes(sess, "before start_session")
-        if base_url and _RAG_ENABLED and sess.rag_enabled and not summary_rag_config:
+        if base_url and _RAG_ENABLED and sess.rag_enabled and not effective_summary_rag_config:
             bound_snapshot = _snapshot_for_base_url(base_url)
             if bound_snapshot:
                 sess.rag_snapshot = bound_snapshot
@@ -4316,8 +4339,16 @@ async def start_session(
             _mark_credentials_verified(connect_base_url or connect_connection_value, username, password, credential_account_id)
         _auto_maximize_test_client_result(connect_result, sess.client_display or sess.display)
 
-    if summary_rag_config:
-        sess.rag_notice = _configure_summary_rag_from_config_alias(sess, summary_rag_config)
+    if effective_summary_rag_config:
+        sess.rag_notice = _configure_summary_rag_from_config_alias(sess, effective_summary_rag_config)
+        if inferred_summary_rag_config and isinstance(sess.rag_notice, dict):
+            sess.rag_notice["auto"] = True
+            sess.rag_notice["auto_source"] = "42clouds_url"
+            sess.rag_notice["detected_config"] = inferred_summary_rag_config
+            sess.rag_notice["message"] = (
+                "Summary RAG enabled automatically from 42clouds URL "
+                f"configuration alias {inferred_summary_rag_config!r}: snapshot {sess.rag_snapshot}."
+            )
     elif (
         base_url
         and _RAG_ENABLED
@@ -8237,6 +8268,9 @@ async def configuration_name_version_from_subsystems(
     output_result = await _bridge_call_recorded(session_id, "dynamic_list_output", {
         "button": "",
         "wait_seconds": 3,
+        "include_text": True,
+        "max_rows": 50,
+        "max_columns": 20,
     })
     tabular_docs = output_result.get("tabular_documents", {}) if isinstance(output_result, dict) else {}
     items = tabular_docs.get("items", []) if isinstance(tabular_docs, dict) else []
@@ -8244,13 +8278,18 @@ async def configuration_name_version_from_subsystems(
     main: dict[str, str] = {}
     cells: list[list[str]] = []
     if items:
-        doc_name = items[0].get("name", "")
-        text_result = await _bridge_call_recorded(session_id, "tabular_document_text", {
-            "name": doc_name,
-            "max_rows": 50,
-            "max_columns": 20,
-        })
-        cells = text_result.get("cells", []) if isinstance(text_result, dict) else []
+        first_item = items[0]
+        item_cells = first_item.get("cells") if isinstance(first_item, dict) else None
+        if isinstance(item_cells, list):
+            cells = item_cells
+        else:
+            doc_name = first_item.get("name", "") if isinstance(first_item, dict) else ""
+            text_result = await _bridge_call_recorded(session_id, "tabular_document_text", {
+                "name": doc_name,
+                "max_rows": 50,
+                "max_columns": 20,
+            })
+            cells = text_result.get("cells", []) if isinstance(text_result, dict) else []
         main = _find_main_configuration_in_tabular_cells(cells)
 
     return {
@@ -8695,11 +8734,14 @@ async def dynamic_list_sort_by_column(
 async def dynamic_list_output(
     button: Annotated[str, "Optional exact 1C button name/title; empty tries common Вывести список buttons"] = "",
     wait_seconds: Annotated[int, "Seconds to wait for the tabular document form"] = 2,
+    include_text: Annotated[bool, "Read tabular document cells after output; disable when only document metadata/dimensions are needed"] = True,
+    max_rows: Annotated[int, "Maximum rows to read when include_text=true"] = 50,
+    max_columns: Annotated[int, "Maximum columns to read when include_text=true"] = 20,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
-    """Press dynamic list 'Вывести список' button and return detected tabular document(s), including text when possible."""
-    return await _bridge_call_recorded(session_id, "dynamic_list_output", {"button": button, "wait_seconds": wait_seconds})
+    """Press dynamic list 'Вывести список' button and return detected tabular document(s), optionally including text."""
+    return await _bridge_call_recorded(session_id, "dynamic_list_output", {"button": button, "wait_seconds": wait_seconds, "include_text": include_text, "max_rows": max_rows, "max_columns": max_columns})
 
 
 @mcp.tool()
