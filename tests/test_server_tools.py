@@ -440,6 +440,7 @@ def test_selected_new_tool_schemas():
     assert tools["window_command_interface"].input_schema["properties"]["window_title"]["default"] == ""
     assert tools["start_session"].input_schema["properties"]["rag_enabled"]["default"] is False
     assert tools["start_session"].input_schema["properties"]["summary_rag_config"]["default"] == ""
+    assert tools["start_session"].input_schema["properties"]["include_timings"]["default"] is False
     assert tools["rag_sources_add_from_directory"].input_schema["required"] == ["path"]
     assert tools["rag_sources_add_from_directory"].input_schema["properties"]["watch"]["default"] is True
     assert tools["rag_available_configurations"].input_schema["properties"]["sync"]["default"] is True
@@ -490,6 +491,33 @@ def test_command_diagnostic_timings_are_opt_in(monkeypatch):
         ("unit", "command_interface_search", {"query": "Номенклатура", "section": "", "max_results": 20, "window_title": ""}, None),
         ("unit", "command_interface_search", {"query": "Номенклатура", "section": "", "max_results": 20, "window_title": ""}, None),
     ]
+
+
+def test_start_session_test_client_result_is_compact_and_timings_opt_in():
+    from mcp_1c.server import _compact_start_test_client_result
+
+    result = {
+        "connected": True,
+        "base_url": "https://example/ib",
+        "port": 1538,
+        "maximized": {
+            "maximized": True,
+            "method": "activate_only",
+            "window": {"type": "Window", "title": "Start", "children": [{"type": "Form", "title": "Huge"}]},
+        },
+        "_timings": {"total_seconds": 12.3},
+        "debug_noise": {"children": [1, 2, 3]},
+    }
+
+    compact = _compact_start_test_client_result(result)
+    compact_with_timings = _compact_start_test_client_result(result, include_timings=True)
+
+    assert compact["connected"] is True
+    assert compact["maximized"]["window"]["title"] == "Start"
+    assert "children" not in compact["maximized"]["window"]
+    assert "debug_noise" not in compact
+    assert "_timings" not in compact
+    assert compact_with_timings["_timings"] == {"total_seconds": 12.3}
 
 def test_metadata_objects_catalog_self_entry_is_searchable():
     item = _metadata_objects_catalog_self_entry()
