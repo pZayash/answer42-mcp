@@ -1839,6 +1839,7 @@ def test_ui_tree_filtering_and_presentations():
         _to_simple_yaml,
         _transform_ui_groups,
         _ui_tree_field_names,
+        _ui_tree_state_options,
         _validate_ui_tree_choice,
     )
 
@@ -1872,6 +1873,18 @@ def test_ui_tree_filtering_and_presentations():
     assert _dedupe_ui_nodes([{"type": "Тестируемая командная панель", "name": "Панель"}, {"type": "Тестируемая командная панель", "name": "Панель"}]) == [{"type": "Тестируемая командная панель", "name": "Панель"}]
     assert _validate_ui_tree_choice("format", "yml", {"json", "yaml", "yml"}) == "yaml"
     assert _ui_tree_field_names("minimal", "navigation") == {"type", "name", "title"}
+    assert _ui_tree_state_options({"type", "name", "title"}, include_hidden=False) == {
+        "include_visibility_state": True,
+        "include_availability_state": False,
+        "include_read_only_state": False,
+        "include_current_state": False,
+    }
+    assert _ui_tree_state_options({"type", "name", "title"}, include_hidden=True) == {
+        "include_visibility_state": False,
+        "include_availability_state": False,
+        "include_read_only_state": False,
+        "include_current_state": False,
+    }
     assert _apply_ui_fields({"type": "T", "name": "N", "data": "D", "children": []}, {"type", "name"}) == {"type": "T", "name": "N", "children": []}
     outline = _outline_ui_tree(flattened)
     assert "Тестируемая таблица формы Товары" in outline
@@ -1903,7 +1916,7 @@ def test_ui_tree_default_params_and_filtered_flat_result(monkeypatch):
 
     result = asyncio.run(ui_tree(name="Товары", fields="minimal", session_id="unit"))
 
-    assert calls == [("unit", "ui_tree", {"include_hidden": False, "include_data": False, "include_command_panels": False, "include_timings": False, "flat": True, "name": "Товары", "title": "", "type": ""})]
+    assert calls == [("unit", "ui_tree", {"include_hidden": False, "include_data": False, "include_command_panels": False, "include_timings": False, "include_visibility_state": True, "include_availability_state": False, "include_read_only_state": False, "include_current_state": False, "flat": True, "name": "Товары", "title": "", "type": ""})]
     assert result["found"] is True
     assert result["count"] == 1
     assert result["objects"] == [{"type": "Тестируемая таблица формы", "name": "Товары", "title": "Товары"}]
@@ -1964,7 +1977,7 @@ def test_ui_tree_parent_name_is_passed_to_bridge(monkeypatch):
     assert calls == [(
         "unit",
         "ui_tree",
-        {"include_hidden": False, "include_data": False, "include_command_panels": False, "include_timings": False, "parent_name": "Родитель"},
+        {"include_hidden": False, "include_data": False, "include_command_panels": False, "include_timings": False, "include_visibility_state": True, "include_availability_state": True, "include_read_only_state": True, "include_current_state": False, "parent_name": "Родитель"},
     )]
     assert result["parent_name"] == "Родитель"
     assert "Тестируемая кнопка формы Кнопка" in result["text"]
@@ -1998,7 +2011,16 @@ def test_ui_tree_profile_full_enables_expensive_options(monkeypatch):
 
     result = asyncio.run(ui_tree(profile="full", include_rag_types=False, session_id="unit"))
 
-    assert calls == [{"include_hidden": False, "include_data": True, "include_command_panels": True, "include_timings": False}]
+    assert calls == [{
+        "include_hidden": False,
+        "include_data": True,
+        "include_command_panels": True,
+        "include_timings": False,
+        "include_visibility_state": True,
+        "include_availability_state": True,
+        "include_read_only_state": True,
+        "include_current_state": True,
+    }]
     assert result["type"] == "Тестируемое окно клиентского приложения"
     assert "metrics" in result
 
