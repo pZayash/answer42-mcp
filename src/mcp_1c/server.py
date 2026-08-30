@@ -2897,6 +2897,15 @@ def _rag_fields_for_object(object_full_name: str, snapshot: str | int | None = N
     return list(dedup.values())
 
 
+
+
+def _strip_bridge_timings(result: Any) -> Any:
+    if not isinstance(result, dict) or "_timings" not in result:
+        return result
+    cleaned = dict(result)
+    cleaned.pop("_timings", None)
+    return cleaned
+
 async def _bridge_call_recorded(
     session_id: str,
     method: str,
@@ -5557,15 +5566,17 @@ async def command_interface_search(
     section: Annotated[str, "Optional top-level section title substring to activate before searching"] = "",
     max_results: Annotated[int, "Maximum number of matches to return; 0 means no limit"] = 20,
     window_title: Annotated[str, "Optional window title substring to activate before reading command interface"] = "",
+    include_timings: Annotated[bool, "Include diagnostic timing breakdown in the returned _timings field"] = False,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
     """Search live command-interface commands by title, path or navigation URL."""
-    return await _bridge_call_recorded(
+    result = await _bridge_call_recorded(
         session_id,
         "command_interface_search",
         {"query": query, "section": section, "max_results": max_results, "window_title": window_title},
     )
+    return result if include_timings else _strip_bridge_timings(result)
 
 
 @mcp.tool()
@@ -6084,7 +6095,9 @@ async def ui_tree_resource_action(
     raise ValueError(f"Unsupported ui_tree_resource_action action: {action!r}. Expected focus, click_button, activate_field, field_value_text, or field_info.")
 
 @mcp.tool()
-async def command_bar(*,
+async def command_bar(
+    include_timings: Annotated[bool, "Include diagnostic timing breakdown in the returned _timings field"] = False,
+    *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
     """Low-level diagnostic: return active window/form command-bar data when available.
@@ -6092,7 +6105,8 @@ async def command_bar(*,
     Prefer command_interface_sections/commands/search for application navigation commands,
     and object_command_panel/object_context_menu for commands of a specific UI object.
     """
-    return await _bridge_call_recorded(session_id, "command_bar", {})
+    result = await _bridge_call_recorded(session_id, "command_bar", {})
+    return result if include_timings else _strip_bridge_timings(result)
 
 
 
@@ -8412,34 +8426,40 @@ async def configuration_name_version_from_subsystems(
     warnings: list[str] = []
     main: dict[str, str] = {}
     cells: list[list[str]] = []
-    source_method = "sorted_first_row"
+    source_method = "sorted_edge_row"
     current_row: dict[str, str] = {}
     sort_attempts: list[dict[str, Any]] = []
 
-    for attempt in range(1, 3):
-        sort_result = await _bridge_call_recorded(session_id, "dynamic_list_sort_by_column", {
+    sort_result = await _bridge_call_recorded(session_id, "dynamic_list_sort_by_column", {
+        "name": "Список",
+        "title": "",
+        "column_title": "Это основная конфигурация",
+    })
+    ordered = bool(sort_result.get("ordered")) if isinstance(sort_result, dict) else False
+    for direction, label in (("first", "first_after_sort"), ("last", "last_after_sort")):
+        move_result = await _bridge_call_recorded(session_id, "table_move_row", {
             "name": "Список",
             "title": "",
-            "column_title": "Это основная конфигурация",
+            "direction": direction,
+            "steps": 1,
         })
-        # УстановитьПорядок() toggles the sort direction if the list is already
-        # sorted by the same column. Read the current/top row after sorting; if
-        # the first direction puts Нет first, toggle once and read again.
         row_result = await _bridge_call_recorded(session_id, "table_current_row", {"name": "Список", "title": ""})
         current_row = _table_row_pairs(row_result)
         main = _configuration_from_sorted_first_row(current_row)
         sort_attempts.append({
-            "attempt": attempt,
-            "ordered": bool(sort_result.get("ordered")) if isinstance(sort_result, dict) else False,
-            "read_method": "current_after_sort",
-            "first_row_is_main": bool(main),
-            "first_row_main_marker": _row_value(current_row, "Это основная конфигурация", "ЭтоОсновнаяКонфигурация"),
+            "attempt": len(sort_attempts) + 1,
+            "ordered": ordered,
+            "move_direction": direction,
+            "move_result": move_result if isinstance(move_result, dict) else {},
+            "read_method": label,
+            "row_is_main": bool(main),
+            "row_main_marker": _row_value(current_row, "Это основная конфигурация", "ЭтоОсновнаяКонфигурация"),
         })
         if main:
             break
 
     if not main:
-        warnings.append("Sorted first list row did not expose the main configuration; falling back to MXL list output")
+        warnings.append("Sorted edge list rows did not expose the main configuration; falling back to MXL list output")
         source_method = "list_output_mxl"
         output_result = await _bridge_call_recorded(session_id, "dynamic_list_output", {
             "button": "",
@@ -8465,7 +8485,7 @@ async def configuration_name_version_from_subsystems(
         "configuration_version": main.get("configuration_version", ""),
         "main_configuration_row": main,
         "main_configuration_rows_count": 1 if main else 0,
-        "rows_count": 1 if source_method == "sorted_first_row" and current_row else max(0, len(cells) - 1),
+        "rows_count": 1 if source_method == "sorted_edge_row" and current_row else max(0, len(cells) - 1),
         "warnings": warnings,
         "navigation_link": navigation_link,
         "source": "РегистрСведений.ВерсииПодсистем",

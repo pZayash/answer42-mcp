@@ -428,6 +428,8 @@ def test_selected_new_tool_schemas():
     assert "max_depth" not in tools["command_interface_commands"].input_schema["properties"]
     assert tools["command_interface_search"].input_schema["required"] == ["query"]
     assert tools["command_interface_search"].input_schema["properties"]["max_results"]["default"] == 20
+    assert tools["command_interface_search"].input_schema["properties"]["include_timings"]["default"] is False
+    assert tools["command_bar"].input_schema["properties"]["include_timings"]["default"] is False
     assert "session_id" in tools["configuration_name_version_from_subsystems"].input_schema["properties"]
     assert "session_id" in tools["installed_extensions_from_catalog"].input_schema["properties"]
     assert tools["metadata_objects_from_catalog"].input_schema["properties"]["query"]["default"] == ""
@@ -460,6 +462,34 @@ def test_selected_new_tool_schemas():
     assert tools["search_objects"].input_schema["properties"]["limit"]["default"] == 50
     assert "max_depth" not in tools["search_objects"].input_schema["properties"]
 
+
+
+def test_command_diagnostic_timings_are_opt_in(monkeypatch):
+    from mcp_1c import server
+
+    calls = []
+
+    async def fake_bridge_call(session_id, method, params, *, timeout=None):
+        calls.append((session_id, method, params, timeout))
+        return {"available": False, "reason": "not_supported", "_timings": {"total_ms": 2}}
+
+    monkeypatch.setattr(server, "_bridge_call_recorded", fake_bridge_call)
+
+    without_timings = asyncio.run(server.command_bar(session_id="unit"))
+    with_timings = asyncio.run(server.command_bar(include_timings=True, session_id="unit"))
+    search_without_timings = asyncio.run(server.command_interface_search("Номенклатура", session_id="unit"))
+    search_with_timings = asyncio.run(server.command_interface_search("Номенклатура", include_timings=True, session_id="unit"))
+
+    assert "_timings" not in without_timings
+    assert with_timings["_timings"] == {"total_ms": 2}
+    assert "_timings" not in search_without_timings
+    assert search_with_timings["_timings"] == {"total_ms": 2}
+    assert calls == [
+        ("unit", "command_bar", {}, None),
+        ("unit", "command_bar", {}, None),
+        ("unit", "command_interface_search", {"query": "Номенклатура", "section": "", "max_results": 20, "window_title": ""}, None),
+        ("unit", "command_interface_search", {"query": "Номенклатура", "section": "", "max_results": 20, "window_title": ""}, None),
+    ]
 
 def test_metadata_objects_catalog_self_entry_is_searchable():
     item = _metadata_objects_catalog_self_entry()
@@ -763,6 +793,8 @@ def test_configuration_name_version_reads_main_configuration_from_mxl(monkeypatc
         calls.append((method, params))
         if method == "dynamic_list_sort_by_column":
             return {"ordered": True}
+        if method == "table_move_row":
+            return {"moved": True, "direction": params.get("direction")}
         if method == "table_current_row":
             return {"pairs": [{"key": "Это основная конфигурация", "value": "Нет"}]}
         if method == "dynamic_list_output":
@@ -791,14 +823,15 @@ def test_configuration_name_version_reads_main_configuration_from_mxl(monkeypatc
     assert result["configuration_version"] == "1.1.56.26"
     assert result["source_method"] == "list_output_mxl"
     assert result["warnings"] == [
-        "Sorted first list row did not expose the main configuration; falling back to MXL list output",
+        "Sorted edge list rows did not expose the main configuration; falling back to MXL list output",
         "List output MXL became parseable; path=/tmp/unit.mxl; rows=4",
     ]
     assert calls == [
         ("open_navigation_link", {"navigation_link": "e1cib/list/РегистрСведений.ВерсииПодсистем"}),
         ("dynamic_list_sort_by_column", {"name": "Список", "title": "", "column_title": "Это основная конфигурация"}),
+        ("table_move_row", {"name": "Список", "title": "", "direction": "first", "steps": 1}),
         ("table_current_row", {"name": "Список", "title": ""}),
-        ("dynamic_list_sort_by_column", {"name": "Список", "title": "", "column_title": "Это основная конфигурация"}),
+        ("table_move_row", {"name": "Список", "title": "", "direction": "last", "steps": 1}),
         ("table_current_row", {"name": "Список", "title": ""}),
         ("dynamic_list_output", {"button": "", "wait_seconds": 3, "include_text": False}),
         ("_save_output_tabular_document_to_mxl", {"session_id": "unit", "doc_name": "ТабличныйДокумент", "path_prefix": "configuration_name_version_from_subsystems", "timeout": 120}),
@@ -812,6 +845,8 @@ def test_configuration_name_version_from_subsystems_prefers_sorted_first_row(mon
         calls.append((method, params))
         if method == "dynamic_list_sort_by_column":
             return {"ordered": True}
+        if method == "table_move_row":
+            return {"moved": True, "direction": params.get("direction")}
         if method == "table_current_row":
             return {"pairs": [
                 {"key": "Имя подсистемы", "value": "МенеджерСервиса"},
@@ -829,14 +864,15 @@ def test_configuration_name_version_from_subsystems_prefers_sorted_first_row(mon
     assert result["found"] is True
     assert result["configuration_name"] == "МенеджерСервиса"
     assert result["configuration_version"] == "1.1.56.26"
-    assert result["source_method"] == "sorted_first_row"
+    assert result["source_method"] == "sorted_edge_row"
     assert result["rows_count"] == 1
     assert result["sort_attempts"] == [
-        {"attempt": 1, "ordered": True, "read_method": "current_after_sort", "first_row_is_main": True, "first_row_main_marker": "Да"}
+        {"attempt": 1, "ordered": True, "move_direction": "first", "move_result": {"moved": True, "direction": "first"}, "read_method": "first_after_sort", "row_is_main": True, "row_main_marker": "Да"}
     ]
     assert calls == [
         ("open_navigation_link", {"navigation_link": "e1cib/list/РегистрСведений.ВерсииПодсистем"}),
         ("dynamic_list_sort_by_column", {"name": "Список", "title": "", "column_title": "Это основная конфигурация"}),
+        ("table_move_row", {"name": "Список", "title": "", "direction": "first", "steps": 1}),
         ("table_current_row", {"name": "Список", "title": ""}),
     ]
 
