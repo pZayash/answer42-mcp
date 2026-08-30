@@ -85,6 +85,29 @@ def test_bridge_timeout_deadline_extends_after_recent_progress(monkeypatch):
     assert bridge._effective_timeout_deadline(20.0, {"received_monotonic": 16.4}) == 26.4
 
 
+
+def test_command_interface_search_without_section_scans_sections():
+    module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
+    search = _bsl_function_body(module, "ПоискКомандногоИнтерфейсаMCP")
+    all_sections = _bsl_function_body(module, "КомандыВсехРазделовКомандногоИнтерфейса")
+
+    assert "КомандыВсехРазделовКомандногоИнтерфейса(АктивноеОкно, Интерфейс, СтрокаПоиска, Максимум, Тайминги)" in search
+    assert 'Тайминги.Вставить("sections_count", Разделы.Количество())' in all_sections
+    assert 'КнопкаРаздела.Нажать();' in all_sections
+    assert 'Команда.Вставить("section", ЗаголовокРаздела);' in all_sections
+    assert 'Тайминги.Вставить("sections_scanned", ПросмотреноРазделов)' in all_sections
+    assert "Совпадения = ПоискВКомандахКомандногоИнтерфейса(Результат, СтрокаПоиска, Максимум)" not in all_sections
+
+
+def test_command_interface_search_ranks_matches_by_score():
+    module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
+    search_commands = _bsl_function_body(module, "ПоискВКомандахКомандногоИнтерфейса")
+
+    assert 'Оценка = КомандныйИнтерфейсОценкаСовпадения(Заголовок, ТекстПути, Ссылка, НормПоиск)' in search_commands
+    assert 'Результат.Вставить(ИндексВставки, Совпадение);' in search_commands
+    assert 'Результат.Удалить(Результат.Количество() - 1);' in search_commands
+    assert 'Если Максимум > 0 И Результат.Количество() >= Максимум Тогда' not in search_commands
+
 def test_form_close_does_not_block_on_save_discard_message_box():
     module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
 
