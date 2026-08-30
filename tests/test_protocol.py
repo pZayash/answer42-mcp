@@ -700,6 +700,16 @@ def test_manager_search_objects_serializes_matches_shallow_by_default():
     assert "СтрНайти(ТипОбъекта, ИскомыйТипНорм)" in module
 
 
+
+def test_manager_find_button_fast_path_uses_unspecified_empty_search_parameters():
+    module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
+
+    assert 'Варианты.Добавить(Новый Структура("title,name", Неопределено, ИмяКнопки))' in module
+    assert 'Варианты.Добавить(Новый Структура("title,name", ЗаголовокКнопки, Неопределено))' in module
+    assert 'Кнопка = НайтиКнопку(АктивноеОкно, ИмяКнопки, ЗаголовокКнопки, 0, Истина, Истина, Ложь, КешПоиска)' in module
+    assert 'Тайминги.Вставить(Префикс + "_find_method", КешПоиска.Статистика.method)' in module
+    assert 'Тайминги.Вставить(Префикс + "_find_nodes", КешПоиска.Статистика.nodes)' in module
+
 def test_ui_tree_current_page_is_shallow_and_command_panels_can_be_disabled():
     module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
 
