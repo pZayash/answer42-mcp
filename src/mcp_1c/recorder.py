@@ -23,7 +23,7 @@ class RecordingSession:
 
     def start(self, output_dir: str, display: str = "", window: bool = False) -> dict[str, Any]:
         self.active = True
-        self.output_dir = Path(output_dir)
+        self.output_dir = Path(output_dir).expanduser().resolve()
         self.display = display
         self.window = window
         self.frames_dir = self.output_dir / "frames"
@@ -122,7 +122,7 @@ class RecordingSession:
                 html_deck.unlink()
             except OSError:
                 pass
-        return {"pdf": str(pdf) if pdf.exists() else ""}
+        return {"pdf": str(pdf.resolve()) if pdf.exists() else ""}
 
 
 def make_html_deck(slides: list[Path]) -> str:
