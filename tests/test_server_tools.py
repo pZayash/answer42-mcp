@@ -1624,6 +1624,8 @@ def test_tabular_document_save_filter_order_uses_likely_format_index_first():
 
     assert _tabular_document_save_filter_order("xlsx", max_filter_index=5) == [1, 2, 3, 4, 5]
     assert _tabular_document_save_filter_order("mxl", max_filter_index=5) == [1, 2, 3, 4, 5]
+    assert _tabular_document_save_filter_order("mxl", max_filter_index=12) == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+    assert _tabular_document_save_filter_order("mxl", max_filter_index=12, preferred_filter_indexes=[12, 1]) == [12, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
     assert _tabular_document_save_filter_order("pdf", max_filter_index=5) == [2, 1, 3, 4, 5]
     assert _tabular_document_save_filter_order("html", max_filter_index=5) == [4, 1, 2, 3, 5]
     assert _tabular_document_save_filter_order("unknown", max_filter_index=3) == [1, 2, 3]

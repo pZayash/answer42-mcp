@@ -61,6 +61,8 @@ TABULAR_DOCUMENT_SAVE_PREFERRED_FILTER_INDEXES: dict[str, list[int]] = {
     "txt": [5],
     "mxl": [1],
 }
+DYNAMIC_LIST_OUTPUT_MXL_PREFERRED_FILTER_INDEXES = [12, 1]
+
 SESSION_SCOPE_ID = os.getenv("ONEC_MCP_SESSION_SCOPE_ID") or os.getenv("ONEC_MCP_SESSION_SCOPE") or ""
 STATE_FILE = os_support.runtime_path("ONEC_MCP_SESSION_STATE", "sessions.json")
 SCOPE_DIR: Path | None = None
@@ -6531,10 +6533,15 @@ async def _tabular_document_save_filter_by_filter(
     timeout: int,
     danger: str = "tabular_document_file_save_may_block_thin_client",
     max_filter_index: int = 30,
+    preferred_filter_indexes: list[int] | None = None,
 ) -> Any:
     """Try file-dialog filters one bridge call at a time until a valid file appears."""
     attempts: list[Any] = []
-    filter_indexes = _tabular_document_save_filter_order(format, max_filter_index=max_filter_index)
+    filter_indexes = _tabular_document_save_filter_order(
+        format,
+        max_filter_index=max_filter_index,
+        preferred_filter_indexes=preferred_filter_indexes,
+    )
     for filter_index in filter_indexes:
         attempt_params = dict(params)
         attempt_params["exact_filter_only"] = True
@@ -6570,12 +6577,20 @@ async def _tabular_document_save_filter_by_filter(
     }
 
 
-def _tabular_document_save_filter_order(format: str, *, max_filter_index: int = 30) -> list[int]:
+def _tabular_document_save_filter_order(
+    format: str,
+    *,
+    max_filter_index: int = 30,
+    preferred_filter_indexes: list[int] | None = None,
+) -> list[int]:
     """Return configured likely file-dialog filter indexes first, then the rest."""
     wanted = format.strip().lower()
+    preferred = preferred_filter_indexes
+    if preferred is None:
+        preferred = TABULAR_DOCUMENT_SAVE_PREFERRED_FILTER_INDEXES.get(wanted, [])
     seen: set[int] = set()
     ordered: list[int] = []
-    for index in [*TABULAR_DOCUMENT_SAVE_PREFERRED_FILTER_INDEXES.get(wanted, []), *range(1, max_filter_index + 1)]:
+    for index in [*preferred, *range(1, max_filter_index + 1)]:
         if 1 <= index <= max_filter_index and index not in seen:
             ordered.append(index)
             seen.add(index)
@@ -8358,6 +8373,7 @@ async def _save_output_tabular_document_to_mxl(
             "mxl",
             timeout=timeout,
             danger=f"{path_prefix}_file_save_may_block_thin_client",
+            preferred_filter_indexes=DYNAMIC_LIST_OUTPUT_MXL_PREFERRED_FILTER_INDEXES,
         )
         if isinstance(selected_result, dict) and selected_result.get("interface_blocked"):
             warnings.append(f"List output MXL save blocked the interface: {_truncate_value(selected_result)}")
