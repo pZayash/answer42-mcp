@@ -1903,7 +1903,7 @@ def test_ui_tree_default_params_and_filtered_flat_result(monkeypatch):
 
     result = asyncio.run(ui_tree(name="Товары", fields="minimal", session_id="unit"))
 
-    assert calls == [("unit", "ui_tree", {"include_hidden": False, "include_data": False, "include_command_panels": False, "flat": True, "name": "Товары", "title": "", "type": ""})]
+    assert calls == [("unit", "ui_tree", {"include_hidden": False, "include_data": False, "include_command_panels": False, "include_timings": False, "flat": True, "name": "Товары", "title": "", "type": ""})]
     assert result["found"] is True
     assert result["count"] == 1
     assert result["objects"] == [{"type": "Тестируемая таблица формы", "name": "Товары", "title": "Товары"}]
@@ -1914,6 +1914,29 @@ def test_ui_tree_default_params_and_filtered_flat_result(monkeypatch):
     assert result["metrics"]["json_bytes"] > 0
     assert result["metrics"]["estimated_tokens"] > 0
 
+
+
+def test_ui_tree_timings_are_opt_in(monkeypatch):
+    from mcp_1c.server import ui_tree
+
+    async def fake_bridge_call(session_id, method, params):
+        return {
+            "type": "Window",
+            "title": "Test",
+            "children": [],
+            "_tree_ms": 10,
+            "_nodes_serialized": 1,
+            "_timings": {"active_window_ms": 1, "serialize_tree_ms": 9, "total_ms": 10},
+        }
+
+    monkeypatch.setattr("mcp_1c.server._bridge_call_recorded", fake_bridge_call)
+
+    without_timings = asyncio.run(ui_tree(session_id="unit"))
+    with_timings = asyncio.run(ui_tree(include_timings=True, session_id="unit"))
+
+    assert "_timings" not in without_timings
+    assert with_timings["_timings"]["onec"] == {"active_window_ms": 1, "serialize_tree_ms": 9, "total_ms": 10}
+    assert "bridge_ms" in with_timings["_timings"]
 
 def test_ui_tree_parent_name_is_passed_to_bridge(monkeypatch):
     from mcp_1c.server import ui_tree
@@ -1941,7 +1964,7 @@ def test_ui_tree_parent_name_is_passed_to_bridge(monkeypatch):
     assert calls == [(
         "unit",
         "ui_tree",
-        {"include_hidden": False, "include_data": False, "include_command_panels": False, "parent_name": "Родитель"},
+        {"include_hidden": False, "include_data": False, "include_command_panels": False, "include_timings": False, "parent_name": "Родитель"},
     )]
     assert result["parent_name"] == "Родитель"
     assert "Тестируемая кнопка формы Кнопка" in result["text"]
@@ -1975,7 +1998,7 @@ def test_ui_tree_profile_full_enables_expensive_options(monkeypatch):
 
     result = asyncio.run(ui_tree(profile="full", include_rag_types=False, session_id="unit"))
 
-    assert calls == [{"include_hidden": False, "include_data": True, "include_command_panels": True}]
+    assert calls == [{"include_hidden": False, "include_data": True, "include_command_panels": True, "include_timings": False}]
     assert result["type"] == "Тестируемое окно клиентского приложения"
     assert "metrics" in result
 
