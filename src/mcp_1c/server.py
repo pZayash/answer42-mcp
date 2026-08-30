@@ -1907,6 +1907,28 @@ def _ui_tree_field_names(fields: str, profile: str) -> set[str] | None:
     raise ValueError(f"Unsupported ui_tree fields: {fields!r}. Expected one of: {allowed}.")
 
 
+def _ui_tree_state_options(field_names: set[str] | None, *, include_hidden: bool) -> dict[str, bool]:
+    if field_names is None:
+        return {
+            "include_visibility_state": True,
+            "include_availability_state": True,
+            "include_read_only_state": True,
+            "include_current_state": True,
+        }
+    # Visibility is also a traversal/filtering input: with include_hidden=False the
+    # 1C side must still read it even when the selected field set later omits it.
+    include_visibility_state = not include_hidden or bool({"visible", "current_visible", "hidden_children_count"} & field_names)
+    include_availability_state = bool({"available", "enabled", "current_available"} & field_names)
+    include_read_only_state = bool({"read_only", "current_read_only"} & field_names)
+    include_current_state = bool({"current_visible", "current_available", "current_read_only"} & field_names)
+    return {
+        "include_visibility_state": include_visibility_state,
+        "include_availability_state": include_availability_state,
+        "include_read_only_state": include_read_only_state,
+        "include_current_state": include_current_state,
+    }
+
+
 def _apply_ui_fields(value: Any, allowed: set[str] | None) -> Any:
     if allowed is None:
         return value
@@ -5799,6 +5821,7 @@ async def ui_tree(
     group_mode_key = _validate_ui_tree_choice("group_mode", group_mode, _UI_TREE_GROUP_MODES)
     fmt = _validate_ui_tree_choice("format", format, _UI_TREE_FORMATS)
     field_names = _ui_tree_field_names(fields, profile_key)
+    state_options = _ui_tree_state_options(field_names, include_hidden=include_hidden)
     if profile_key in {"full", "diagnostic", "data"}:
         profile_include_command_panels = True
     elif profile_key == "command_panels":
@@ -5827,6 +5850,7 @@ async def ui_tree(
         "include_data": include_data,
         "include_command_panels": include_command_panels_effective,
         "include_timings": include_timings,
+        **state_options,
     }
     if parent_name:
         bridge_params["parent_name"] = parent_name
