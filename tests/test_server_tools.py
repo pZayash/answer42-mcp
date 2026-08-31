@@ -454,6 +454,14 @@ def test_form_hints_set_and_get_explicit_context(monkeypatch, tmp_path):
     assert found["hints"][0]["hints"] == hints
     assert found["hints"][0]["tags"] == ["bp", "receipt"]
     assert found["hints"][0]["match"] == "exact_form_name+operation+base"
+    assert found["operations"] == [
+        {
+            "operation": "create-receipt",
+            "count": 1,
+            "base_urls": ["https://base.42clouds.com/bp/186690/"],
+            "titles": ["Поступление товаров: Накладная, УПД"],
+        }
+    ]
 
     any_operation = asyncio.run(server.form_hints_get(
         form_name="Документ.ПоступлениеТоваровУслуг.Форма.ФормаДокумента",
@@ -463,6 +471,7 @@ def test_form_hints_set_and_get_explicit_context(monkeypatch, tmp_path):
     assert any_operation["found"] is True
     assert any_operation["hints"][0]["operation"] == "create-receipt"
     assert any_operation["hints"][0]["match"] == "exact_form_name+any_operation+base"
+    assert any_operation["operations"][0]["operation"] == "create-receipt"
 
 
 def test_form_hints_global_scope_and_text_payload(monkeypatch, tmp_path):
@@ -496,6 +505,13 @@ def test_form_hints_global_scope_and_text_payload(monkeypatch, tmp_path):
     assert found["hints"][0]["hints"] == "Use table_set_field(row=...) for classifier checkboxes."
     assert found["hints"][0]["tags"] == ["okei", "checkbox"]
     assert found["hints"][0]["match"] == "exact_form_name+operation+global"
+    assert found["operations"] == [
+        {
+            "operation": "load-okei",
+            "count": 1,
+            "titles": ["Загрузка из классификатора единиц измерения"],
+        }
+    ]
 
 
 

@@ -1238,6 +1238,34 @@ async def _resolve_form_hints_context(
     }
 
 
+def _summarize_form_hints_operations(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    counts: dict[str, dict[str, Any]] = {}
+    for entry in entries:
+        operation = _normalize_form_hint_part(str(entry.get("operation") or ""))
+        key = operation or "(default)"
+        bucket = counts.setdefault(key, {"operation": operation, "count": 0, "base_urls": set(), "titles": set()})
+        bucket["count"] += 1
+        base_url = _normalize_base_url(str(entry.get("base_url") or ""))
+        if base_url:
+            bucket["base_urls"].add(base_url)
+        title = _normalize_form_hint_part(str(entry.get("form_title") or ""))
+        if title:
+            bucket["titles"].add(title)
+    result: list[dict[str, Any]] = []
+    for key, bucket in counts.items():
+        item = {
+            "operation": bucket["operation"],
+            "count": bucket["count"],
+        }
+        if bucket["base_urls"]:
+            item["base_urls"] = sorted(bucket["base_urls"])
+        if bucket["titles"]:
+            item["titles"] = sorted(bucket["titles"])
+        result.append(item)
+    result.sort(key=lambda item: (-int(item.get("count") or 0), str(item.get("operation") or "").casefold()))
+    return result
+
+
 def _summary_rag_config_from_42clouds_url(base_url: str) -> str:
     """Infer Summary RAG configuration code from 42clouds publication URL."""
     normalized = _platform.normalize_infobase_url(str(base_url or "").strip())
@@ -5523,12 +5551,13 @@ async def form_hints_get(
     )
     target_operation = _normalize_form_hint_part(operation)
     matches: list[dict[str, Any]] = []
+    operation_entries: list[dict[str, Any]] = []
     with os_support.file_lock(FORM_HINTS_LOCK):
         data = _load_form_hints_unlocked()
         for key, entry in data.get("entries", {}).items():
             if not isinstance(entry, dict):
                 continue
-            matched, score, match = _form_hints_entry_matches(
+            form_matched, score, match = _form_hints_entry_matches(
                 entry,
                 base_url=context["base_url"],
                 form_name=context["form_name"],
@@ -5536,13 +5565,22 @@ async def form_hints_get(
                 operation=target_operation,
                 include_global=include_global,
             )
-            if not matched:
-                continue
-            item = dict(entry)
-            item["key"] = str(entry.get("key") or key)
-            item["score"] = score
-            item["match"] = match
-            matches.append(item)
+            if form_matched:
+                item = dict(entry)
+                item["key"] = str(entry.get("key") or key)
+                item["score"] = score
+                item["match"] = match
+                matches.append(item)
+            operation_matched, _, _ = _form_hints_entry_matches(
+                entry,
+                base_url=context["base_url"],
+                form_name=context["form_name"],
+                form_title=context["form_title"],
+                operation="",
+                include_global=include_global,
+            )
+            if operation_matched:
+                operation_entries.append(dict(entry))
     matches.sort(key=lambda item: (int(item.get("score") or 0), str(item.get("updated_at") or "")), reverse=True)
     limited = matches[: max(0, int(limit))]
     result = {
@@ -5550,6 +5588,7 @@ async def form_hints_get(
         "count": len(limited),
         "total_matches": len(matches),
         "context": {**context, "operation": target_operation},
+        "operations": _summarize_form_hints_operations(operation_entries),
         "hints": limited,
         "storage": str(FORM_HINTS_FILE),
     }
