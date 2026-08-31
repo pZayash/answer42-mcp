@@ -75,6 +75,8 @@ AUTORELOAD_PID_FILE = os_support.runtime_path("ONEC_MCP_AUTORELOAD_PID_FILE", "a
 AUTORELOAD_LOG_FILE = os_support.runtime_path("ONEC_MCP_AUTORELOAD_LOG_FILE", "answer42-autoreload.log")
 RAG_BINDINGS_FILE = os_support.runtime_path("ONEC_MCP_RAG_BINDINGS", "rag-bindings.json")
 UI_TREE_SNAPSHOTS_DIR = os_support.runtime_path("ONEC_MCP_UI_TREE_SNAPSHOTS_DIR", "ui-tree-snapshots")
+FORM_HINTS_FILE = os_support.runtime_path("ONEC_MCP_FORM_HINTS_FILE", "form-hints.json")
+FORM_HINTS_LOCK = os_support.runtime_path("ONEC_MCP_FORM_HINTS_LOCK", "form-hints.lock")
 UI_TREE_RESOURCE_AUTO_THRESHOLD_TOKENS = int(os.getenv("ONEC_MCP_UI_TREE_RESOURCE_AUTO_THRESHOLD_TOKENS", "50000"))
 UI_TREE_RESOURCE_AUTO_THRESHOLD_BYTES = int(os.getenv("ONEC_MCP_UI_TREE_RESOURCE_AUTO_THRESHOLD_BYTES", "0"))  # deprecated fallback; 0 disables
 NOTIFY_TOOLS_CHANGED_ON_STARTUP = os.getenv("ONEC_MCP_NOTIFY_TOOLS_CHANGED_ON_STARTUP", "1").strip().lower() not in {"0", "false", "no", "off"}
@@ -139,7 +141,7 @@ TOOL_PROFILE_GROUPS: dict[str, set[str]] = {
         "command_bar", "click_button", "find_object", "search_objects", "get_object", "focus_object",
         "open_navigation_link", "current_element", "field_dropdown_state", "field_dropdown_close", "toggle_field",
         "set_field_value", "activate_field", "choose_field_from_list", "choose_field_first_row", "choose_current_row",
-        "set_form_fields", "save_form", "close_form", "form_open_settings",
+        "set_form_fields", "save_form", "close_form", "form_open_settings", "form_hints_get", "form_hints_set",
     },
     "tables": {
         "table_current_row", "table_selected_rows", "table_cell_text", "table_rows", "table_find_row", "table_goto_row",
@@ -172,7 +174,7 @@ TOOL_PROFILE_CORE: set[str] = TOOL_PROFILE_GROUPS["sessions"] | {
     "table_rows", "table_find_row", "table_goto_row", "table_move_row", "table_add_row", "table_set_field", "table_set_row_values",
     "table_choose_field_from_list", "table_edit_info", "table_begin_edit", "table_end_edit", "table_editing_state",
     "tabular_documents", "tabular_document_text", "tabular_document_save", "screenshot",
-    "ui_tree",
+    "ui_tree", "form_hints_get", "form_hints_set",
 }
 TOOL_PROFILE_ALIASES: dict[str, set[str]] = {
     "core": TOOL_PROFILE_CORE,
@@ -1080,6 +1082,160 @@ def _save_rag_binding(base_url: str, snapshot: str) -> None:
 
 def _snapshot_for_base_url(base_url: str) -> str:
     return _load_rag_bindings().get(_normalize_base_url(base_url), "")
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _load_form_hints_unlocked() -> dict[str, Any]:
+    if not FORM_HINTS_FILE.exists():
+        return {"version": 1, "entries": {}}
+    try:
+        raw = json.loads(FORM_HINTS_FILE.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logging.warning("Could not read form hints %s: %s", FORM_HINTS_FILE, exc)
+        return {"version": 1, "entries": {}}
+    if not isinstance(raw, dict):
+        return {"version": 1, "entries": {}}
+    entries = raw.get("entries")
+    if not isinstance(entries, dict):
+        raw["entries"] = {}
+    raw.setdefault("version", 1)
+    return raw
+
+
+def _save_form_hints_unlocked(data: dict[str, Any]) -> None:
+    FORM_HINTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    FORM_HINTS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _normalize_form_hint_part(value: str) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip())
+
+
+def _form_hint_key(base_url: str, form_name: str, form_title: str, operation: str) -> str:
+    parts = [
+        _normalize_base_url(base_url).casefold(),
+        _normalize_form_hint_part(form_name).casefold(),
+        _normalize_form_hint_part(form_title).casefold(),
+        _normalize_form_hint_part(operation).casefold(),
+    ]
+    return hashlib.sha1("\x1f".join(parts).encode("utf-8")).hexdigest()[:16]
+
+
+def _parse_form_hints_payload(hints: str) -> tuple[Any, str]:
+    text = str(hints or "").strip()
+    if not text:
+        raise ValueError("hints must not be empty")
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        return text, "text"
+    return parsed, "json"
+
+
+def _parse_hint_tags(tags: str) -> list[str]:
+    raw = str(tags or "").strip()
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        parsed = re.split(r"[,;\n]+", raw)
+    if not isinstance(parsed, list):
+        parsed = [parsed]
+    result: list[str] = []
+    for item in parsed:
+        tag = _normalize_form_hint_part(str(item))
+        if tag and tag not in result:
+            result.append(tag)
+    return result
+
+
+def _form_hints_entry_matches(
+    entry: dict[str, Any],
+    *,
+    base_url: str,
+    form_name: str,
+    form_title: str,
+    operation: str,
+    include_global: bool,
+) -> tuple[bool, int, str]:
+    entry_base = _normalize_base_url(str(entry.get("base_url") or ""))
+    target_base = _normalize_base_url(base_url)
+    base_exact = bool(target_base) and entry_base == target_base
+    base_global = include_global and not entry_base
+    if target_base and not (base_exact or base_global):
+        return False, 0, ""
+    if not target_base and entry_base:
+        return False, 0, ""
+
+    entry_name = _normalize_form_hint_part(str(entry.get("form_name") or "")).casefold()
+    entry_title = _normalize_form_hint_part(str(entry.get("form_title") or "")).casefold()
+    target_name = _normalize_form_hint_part(form_name).casefold()
+    target_title = _normalize_form_hint_part(form_title).casefold()
+    if target_name:
+        if entry_name != target_name:
+            return False, 0, ""
+        score = 80
+        match = "exact_form_name"
+    elif target_title:
+        if entry_title != target_title:
+            return False, 0, ""
+        score = 60
+        match = "exact_form_title"
+    else:
+        score = 10
+        match = "unfiltered"
+
+    entry_operation = _normalize_form_hint_part(str(entry.get("operation") or "")).casefold()
+    target_operation = _normalize_form_hint_part(operation).casefold()
+    if target_operation:
+        if entry_operation != target_operation:
+            return False, 0, ""
+        score += 30
+        match += "+operation"
+    elif not entry_operation:
+        score += 5
+        match += "+default_operation"
+    else:
+        match += "+any_operation"
+    if base_exact:
+        score += 20
+        match += "+base"
+    elif base_global:
+        match += "+global"
+    return True, score, match
+
+
+async def _resolve_form_hints_context(
+    session_id: str,
+    *,
+    base_url: str,
+    form_name: str,
+    form_title: str,
+) -> dict[str, str]:
+    sess: SessionState | None = None
+    with suppress(Exception):
+        sess = await _ensure_restored_session(session_id)
+    resolved_base_url = _normalize_base_url(base_url or (sess.base_url if sess else ""))
+    resolved_form_name = _normalize_form_hint_part(form_name)
+    resolved_form_title = _normalize_form_hint_part(form_title)
+    active: Any = None
+    if sess is not None and (not resolved_form_name or not resolved_form_title):
+        try:
+            active = await _bridge_call_recorded(session_id, "active_window", {})
+        except Exception as exc:
+            logging.debug("Could not read active window for form hints context: %s", exc)
+    if isinstance(active, dict):
+        resolved_form_name = resolved_form_name or _normalize_form_hint_part(str(active.get("active_form_name") or active.get("form_name") or ""))
+        resolved_form_title = resolved_form_title or _normalize_form_hint_part(str(active.get("active_form_title") or active.get("title") or ""))
+    return {
+        "base_url": resolved_base_url,
+        "form_name": resolved_form_name,
+        "form_title": resolved_form_title,
+    }
 
 
 def _summary_rag_config_from_42clouds_url(base_url: str) -> str:
@@ -5345,6 +5501,130 @@ async def windows_list(*,
 ) -> Any:
     """Return all windows of the tested 1C client application."""
     return await _bridge_call_recorded(session_id, "windows_list", {})
+
+
+@mcp.tool()
+async def form_hints_get(
+    form_name: Annotated[str, "1C active form technical name. Empty means current active form when a session is available"] = "",
+    form_title: Annotated[str, "Visible form/window title. Used when form_name is unknown"] = "",
+    base_url: Annotated[str, "Infobase URL scope. Empty means current session base URL; empty stored hints are global"] = "",
+    operation: Annotated[str, "Optional scenario/operation name, e.g. create-receipt or load-okei"] = "",
+    include_global: Annotated[bool, "Also return hints saved without base_url for the same form"] = True,
+    limit: Annotated[int, "Maximum hints to return"] = 10,
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> dict[str, Any]:
+    """Return saved operator hints for a 1C form/scenario to avoid repeated UI analysis."""
+    context = await _resolve_form_hints_context(
+        session_id,
+        base_url=base_url,
+        form_name=form_name,
+        form_title=form_title,
+    )
+    target_operation = _normalize_form_hint_part(operation)
+    matches: list[dict[str, Any]] = []
+    with os_support.file_lock(FORM_HINTS_LOCK):
+        data = _load_form_hints_unlocked()
+        for key, entry in data.get("entries", {}).items():
+            if not isinstance(entry, dict):
+                continue
+            matched, score, match = _form_hints_entry_matches(
+                entry,
+                base_url=context["base_url"],
+                form_name=context["form_name"],
+                form_title=context["form_title"],
+                operation=target_operation,
+                include_global=include_global,
+            )
+            if not matched:
+                continue
+            item = dict(entry)
+            item["key"] = str(entry.get("key") or key)
+            item["score"] = score
+            item["match"] = match
+            matches.append(item)
+    matches.sort(key=lambda item: (int(item.get("score") or 0), str(item.get("updated_at") or "")), reverse=True)
+    limited = matches[: max(0, int(limit))]
+    result = {
+        "found": bool(limited),
+        "count": len(limited),
+        "total_matches": len(matches),
+        "context": {**context, "operation": target_operation},
+        "hints": limited,
+        "storage": str(FORM_HINTS_FILE),
+    }
+    return _record_tool_if_session(session_id, "form_hints_get", {
+        "form_name": form_name,
+        "form_title": form_title,
+        "base_url": base_url,
+        "operation": operation,
+        "include_global": include_global,
+        "limit": limit,
+    }, result)
+
+
+@mcp.tool()
+async def form_hints_set(
+    hints: Annotated[str, "Hints to save: plain text or JSON object/list with stable field names, buttons, row specs, gotchas"],
+    form_name: Annotated[str, "1C active form technical name. Empty means current active form when a session is available"] = "",
+    form_title: Annotated[str, "Visible form/window title. Used when form_name is unknown"] = "",
+    base_url: Annotated[str, "Infobase URL scope. Empty means current session base URL; set use_global=true for cross-base hints"] = "",
+    operation: Annotated[str, "Optional scenario/operation name, e.g. create-receipt or load-okei"] = "",
+    tags: Annotated[str, "Optional comma-separated or JSON list tags"] = "",
+    use_global: Annotated[bool, "Store without base_url so the hint can be reused on the same form in other bases"] = False,
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> dict[str, Any]:
+    """Save operator hints for a 1C form/scenario."""
+    context = await _resolve_form_hints_context(
+        session_id,
+        base_url="" if use_global else base_url,
+        form_name=form_name,
+        form_title=form_title,
+    )
+    if use_global:
+        context["base_url"] = ""
+    if not context["form_name"] and not context["form_title"]:
+        raise ValueError("form_hints_set needs form_name/form_title or an active 1C form in the session")
+    parsed_hints, hints_format = _parse_form_hints_payload(hints)
+    clean_operation = _normalize_form_hint_part(operation)
+    key = _form_hint_key(context["base_url"], context["form_name"], context["form_title"], clean_operation)
+    entry = {
+        "key": key,
+        "base_url": context["base_url"],
+        "form_name": context["form_name"],
+        "form_title": context["form_title"],
+        "operation": clean_operation,
+        "hints": parsed_hints,
+        "hints_format": hints_format,
+        "tags": _parse_hint_tags(tags),
+        "updated_at": _utc_now_iso(),
+        "source_session_id": session_id,
+    }
+    with os_support.file_lock(FORM_HINTS_LOCK):
+        data = _load_form_hints_unlocked()
+        entries = data.setdefault("entries", {})
+        created = key not in entries
+        previous = entries.get(key) if isinstance(entries.get(key), dict) else None
+        entry["created_at"] = str(previous.get("created_at") or entry["updated_at"]) if previous else entry["updated_at"]
+        entries[key] = entry
+        _save_form_hints_unlocked(data)
+    result = {
+        "saved": True,
+        "created": created,
+        "key": key,
+        "context": {**context, "operation": clean_operation},
+        "hints_format": hints_format,
+        "storage": str(FORM_HINTS_FILE),
+    }
+    return _record_tool_if_session(session_id, "form_hints_set", {
+        "form_name": form_name,
+        "form_title": form_title,
+        "base_url": base_url,
+        "operation": operation,
+        "tags": tags,
+        "use_global": use_global,
+    }, result)
 
 
 @mcp.tool()
