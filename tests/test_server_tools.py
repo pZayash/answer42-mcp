@@ -124,6 +124,8 @@ EXPECTED_NEW_TOOLS = {
     "tabular_document_state_display",
     "search_objects",
     "convert_1c_guid_navigation_link",
+    "form_hints_get",
+    "form_hints_set",
 }
 
 
@@ -408,6 +410,95 @@ def test_reference_setters_pass_create_if_missing_to_bridge(monkeypatch):
 
 
 
+def test_form_hints_set_and_get_explicit_context(monkeypatch, tmp_path):
+    from mcp_1c import server
+
+    monkeypatch.setattr(server, "FORM_HINTS_FILE", tmp_path / "form-hints.json")
+    monkeypatch.setattr(server, "FORM_HINTS_LOCK", tmp_path / "form-hints.lock")
+
+    hints = {
+        "fields": {"Контрагент": "Контрагент", "Организация": "Организация"},
+        "tables": {"Товары": {"row_tool": "table_set_row_values"}},
+        "gotchas": ["Склад обязателен для проведения"],
+    }
+    saved = asyncio.run(server.form_hints_set(
+        json.dumps(hints, ensure_ascii=False),
+        form_name="Документ.ПоступлениеТоваровУслуг.Форма.ФормаДокумента",
+        form_title="Поступление товаров: Накладная, УПД",
+        base_url="https://base.42clouds.com/bp/186690/",
+        operation="create-receipt",
+        tags='["bp", "receipt"]',
+        session_id="missing-session",
+    ))
+
+    assert saved["saved"] is True
+    assert saved["created"] is True
+    assert saved["hints_format"] == "json"
+    assert saved["context"] == {
+        "base_url": "https://base.42clouds.com/bp/186690/",
+        "form_name": "Документ.ПоступлениеТоваровУслуг.Форма.ФормаДокумента",
+        "form_title": "Поступление товаров: Накладная, УПД",
+        "operation": "create-receipt",
+    }
+
+    found = asyncio.run(server.form_hints_get(
+        form_name="Документ.ПоступлениеТоваровУслуг.Форма.ФормаДокумента",
+        base_url="https://base.42clouds.com/bp/186690",
+        operation="create-receipt",
+        session_id="missing-session",
+    ))
+
+    assert found["found"] is True
+    assert found["count"] == 1
+    assert found["hints"][0]["key"] == saved["key"]
+    assert found["hints"][0]["hints"] == hints
+    assert found["hints"][0]["tags"] == ["bp", "receipt"]
+    assert found["hints"][0]["match"] == "exact_form_name+operation+base"
+
+    any_operation = asyncio.run(server.form_hints_get(
+        form_name="Документ.ПоступлениеТоваровУслуг.Форма.ФормаДокумента",
+        base_url="https://base.42clouds.com/bp/186690",
+        session_id="missing-session",
+    ))
+    assert any_operation["found"] is True
+    assert any_operation["hints"][0]["operation"] == "create-receipt"
+    assert any_operation["hints"][0]["match"] == "exact_form_name+any_operation+base"
+
+
+def test_form_hints_global_scope_and_text_payload(monkeypatch, tmp_path):
+    from mcp_1c import server
+
+    monkeypatch.setattr(server, "FORM_HINTS_FILE", tmp_path / "form-hints.json")
+    monkeypatch.setattr(server, "FORM_HINTS_LOCK", tmp_path / "form-hints.lock")
+
+    saved = asyncio.run(server.form_hints_set(
+        "Use table_set_field(row=...) for classifier checkboxes.",
+        form_name="Обработка.РаботаСОблачнымиКлассификаторами.Форма.КлассификаторЕдиницИзмерения",
+        form_title="Загрузка из классификатора единиц измерения",
+        base_url="https://base.42clouds.com/bp/186690/",
+        operation="load-okei",
+        tags="okei, checkbox",
+        use_global=True,
+        session_id="missing-session",
+    ))
+
+    assert saved["context"]["base_url"] == ""
+    assert saved["hints_format"] == "text"
+
+    found = asyncio.run(server.form_hints_get(
+        form_name="Обработка.РаботаСОблачнымиКлассификаторами.Форма.КлассификаторЕдиницИзмерения",
+        base_url="https://other.example/base",
+        operation="load-okei",
+        session_id="missing-session",
+    ))
+
+    assert found["found"] is True
+    assert found["hints"][0]["hints"] == "Use table_set_field(row=...) for classifier checkboxes."
+    assert found["hints"][0]["tags"] == ["okei", "checkbox"]
+    assert found["hints"][0]["match"] == "exact_form_name+operation+global"
+
+
+
 def test_selected_new_tool_schemas():
     tools = _tools_by_name()
 
@@ -420,6 +511,10 @@ def test_selected_new_tool_schemas():
     assert tools["table_set_field"].input_schema["properties"]["create_if_missing"]["default"] is False
     assert tools["table_set_row_values"].input_schema["properties"]["create_if_missing"]["default"] is False
     assert tools["set_form_fields"].input_schema["properties"]["create_if_missing"]["default"] is False
+    assert tools["form_hints_set"].input_schema["required"] == ["hints"]
+    assert tools["form_hints_set"].input_schema["properties"]["use_global"]["default"] is False
+    assert tools["form_hints_get"].input_schema["properties"]["include_global"]["default"] is True
+    assert tools["form_hints_get"].input_schema["properties"]["limit"]["default"] == 10
     assert "max_depth" not in tools["field_dropdown_items"].input_schema["properties"]
     assert "search_depth" not in tools["field_dropdown_items"].input_schema["properties"]
     assert "max_depth" not in tools["toggle_field"].input_schema["properties"]
