@@ -409,6 +409,32 @@ def test_reference_setters_pass_create_if_missing_to_bridge(monkeypatch):
     ]
 
 
+def test_set_field_value_normalizes_creation_window_from_post_step_diagnostics(monkeypatch):
+    from mcp_1c import server
+
+    async def fake_bridge_call(session_id, method, params, *, timeout=None):
+        return {
+            "set": True,
+            "field": "Контрагент",
+            "value": "Новый контрагент",
+            "method": "ВвестиТекст",
+            "client_diagnostics": {
+                "active_window_changed": True,
+                "active_window_title": "Контрагент (создание)",
+                "active_form_name": "Справочник.Контрагенты.Форма.ФормаЭлемента",
+            },
+        }
+
+    monkeypatch.setattr(server, "_bridge_call_recorded", fake_bridge_call)
+
+    result = asyncio.run(server.set_field_value("Контрагент", "Новый контрагент", create_if_missing=True, session_id="unit"))
+
+    assert result["set"] is False
+    assert result["creation_window_opened"] is True
+    assert result["modal_title"] == "Контрагент (создание)"
+    assert result["modal_form_name"] == "Справочник.Контрагенты.Форма.ФормаЭлемента"
+
+
 
 def test_form_hints_set_and_get_explicit_context(monkeypatch, tmp_path):
     from mcp_1c import server
