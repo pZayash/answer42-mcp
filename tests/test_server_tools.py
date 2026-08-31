@@ -401,10 +401,12 @@ def test_reference_setters_pass_create_if_missing_to_bridge(monkeypatch):
 
     assert calls == [
         ("unit", "set_field_value", {"field_name": "Номенклатура", "value": "Новый товар", "search_by_title": False, "create_if_missing": True}, None),
-        ("unit", "table_set_field", {"table": "Товары", "field": "Номенклатура", "value": "Новый товар", "search_by_title": False, "create_if_missing": True}, None),
+        ("unit", "table_set_field", {"table": "Товары", "field": "Номенклатура", "value": "Новый товар", "search_by_title": False, "create_if_missing": True, "row": "", "search_limit": 2000}, None),
         ("unit", "table_set_row_values", {"table": "Товары", "values": '{"Номенклатура":"Новый товар"}', "search_by_title": False, "create_if_missing": True}, None),
         ("unit", "set_form_fields", {"values": '{"Контрагент":"Новый контрагент"}', "search_by_title": False, "create_if_missing": True}, None),
     ]
+
+
 
 def test_selected_new_tool_schemas():
     tools = _tools_by_name()

@@ -6949,11 +6949,12 @@ async def choose_field_first_row(
 @mcp.tool()
 async def choose_current_row(
     name: Annotated[str, "Table technical name"] = "Список",
+    expected_text: Annotated[str, "Optional text that must be present in the row to choose; the tool will position to it first"] = "",
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
     """Choose the current row in the active selection/list form."""
-    return await _bridge_call_recorded(session_id, "choose_current_row", {"name": name})
+    return await _bridge_call_recorded(session_id, "choose_current_row", {"name": name, "expected_text": expected_text})
 
 
 @mcp.tool()
@@ -7505,7 +7506,7 @@ async def _add_universal_report_filter(
             "field_name": "СтрокаПоискаДоступныеПоля",
             "value": field,
         }, timeout=10)
-        await _bridge_call_recorded(session_id, "choose_current_row", {"name": "ДоступныеПоля"}, timeout=15)
+        await _bridge_call_recorded(session_id, "choose_current_row", {"name": "ДоступныеПоля", "expected_text": ""}, timeout=15)
     except Exception as exc:
         warnings.append(f"Universal report filter {field!r} could not be selected; continuing without report-level filter: {exc}")
         try:
@@ -7657,7 +7658,7 @@ async def _add_universal_report_selected_field(session_id: str, field: str, warn
             "field_name": "СтрокаПоискаДоступныеПоля",
             "value": field,
         }, timeout=10)
-        await _bridge_call_recorded(session_id, "choose_current_row", {"name": "ДоступныеПоля"}, timeout=15)
+        await _bridge_call_recorded(session_id, "choose_current_row", {"name": "ДоступныеПоля", "expected_text": ""}, timeout=15)
         return True
     except Exception as exc:
         warnings.append(f"Universal report selected field {field!r} could not be added: {exc}")
@@ -8834,6 +8835,8 @@ async def table_set_field(
     value: Annotated[str, "Value to set"],
     search_by_title: Annotated[bool, "If true, match visible title instead of object name"] = False,
     create_if_missing: Annotated[bool, "Allow choosing dropdown items like 'Create: ...' for missing reference values"] = False,
+    row: Annotated[str, "Optional row search spec before editing: text, JSON list of texts, or JSON object with text/texts/code/name fields"] = "",
+    search_limit: Annotated[int, "Maximum rows to scan when row is set"] = 2000,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
@@ -8848,6 +8851,8 @@ async def table_set_field(
         "value": value,
         "search_by_title": search_by_title,
         "create_if_missing": create_if_missing,
+        "row": row,
+        "search_limit": search_limit,
     })
 
 
