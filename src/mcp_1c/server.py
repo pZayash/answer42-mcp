@@ -1608,6 +1608,35 @@ def _record_tool_if_session(
     return result
 
 
+def _normalize_creation_window_result(result: Any, *, create_if_missing: bool) -> Any:
+    """Make reference creation explicit when 1C opens a creation form after input.
+
+    Web-client input can return from the BSL setter before its inline check sees
+    the new active window.  The post-step diagnostics appended by the manager are
+    authoritative in that case: if create-if-missing was requested and a
+    `(создание)` form became active, the value was not set yet — the caller must
+    handle the creation form.
+    """
+    if not create_if_missing or not isinstance(result, dict):
+        return result
+    if result.get("creation_window_opened"):
+        return result
+    diagnostics = result.get("client_diagnostics")
+    if not isinstance(diagnostics, dict):
+        return result
+    title = str(diagnostics.get("active_window_title") or diagnostics.get("modal_title") or "")
+    if not bool(diagnostics.get("active_window_changed")) or "(создание" not in title.casefold():
+        return result
+    normalized = dict(result)
+    normalized["set"] = False
+    normalized["creation_window_opened"] = True
+    normalized["modal_title"] = title
+    form_name = diagnostics.get("active_form_name") or diagnostics.get("modal_form_name") or ""
+    if form_name:
+        normalized["modal_form_name"] = form_name
+    return normalized
+
+
 def _rag_disabled_result(session_rag_enabled: bool = True) -> dict[str, Any]:
     reason = "rag_disabled_for_session" if _RAG_ENABLED and not session_rag_enabled else "rag_disabled"
     message = (
@@ -7224,12 +7253,13 @@ async def set_field_value(
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
     """Set a value in a form field by name or title."""
-    return await _bridge_call_recorded(session_id, "set_field_value", {
+    result = await _bridge_call_recorded(session_id, "set_field_value", {
         "field_name": field_name,
         "value": value,
         "search_by_title": search_by_title,
         "create_if_missing": create_if_missing,
     })
+    return _normalize_creation_window_result(result, create_if_missing=create_if_missing)
 
 
 @mcp.tool()

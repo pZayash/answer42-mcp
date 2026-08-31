@@ -16,6 +16,12 @@ def _bsl_function_body(module: str, name: str) -> str:
     return module[start:end]
 
 
+def _bsl_procedure_body(module: str, name: str) -> str:
+    start = module.index(f"Процедура {name}")
+    end = module.index("КонецПроцедуры", start) + len("КонецПроцедуры")
+    return module[start:end]
+
+
 def test_manager_protocol_version_is_embedded_in_cf_sources():
     module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
     assert f'Возврат "{MANAGER_PROTOCOL_VERSION}"' in module
@@ -247,6 +253,44 @@ def test_table_set_field_suggests_missing_reference_when_value_not_confirmed():
     assert "Если это ссылочное поле, значение могло не найтись в справочнике" in module
     assert 'ПодсказкаСозданияСсылочногоЗначенияMCP(ИмяПоля, Значение)' in module
 
+
+
+
+def test_set_field_value_reports_creation_window_after_direct_input():
+    module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
+    setter = _bsl_function_body(module, "УстановитьЗначениеПоля")
+    modal_diagnostics = _bsl_procedure_body(module, "ДобавитьДиагностикуМодальногоОкнаЕслиОткрылосьMCP")
+
+    assert 'РезультатВвода = Новый Структура("set,field,value,method", Истина, ИмяПоля, Значение, "ВвестиТекст")' in setter
+    assert "ДобавитьДиагностикуМодальногоОкнаЕслиОткрылосьMCP(РезультатВвода, ЗаголовокОкнаДоВвода)" in setter
+    assert 'РезультатВвода.Вставить("creation_window_opened", Истина)' in setter
+    assert "РезультатВвода.set = Ложь" in setter
+    assert "Возврат РезультатВвода" in setter
+    assert "НачалоОжиданияОкна = ТекущаяУниверсальнаяДатаВМиллисекундах()" in modal_diagnostics
+    assert "ТекущаяУниверсальнаяДатаВМиллисекундах() - НачалоОжиданияОкна < 2000" in modal_diagnostics
+    assert 'Результат.Вставить("modal_form_name", БезопасноеСвойство(ФормаАктивногоОкна, "ИмяФормы", ""))' in modal_diagnostics
+    assert 'СвойствоСтруктуры(ДиагностикаКлиента, "active_window_changed", Ложь)' in module
+    assert 'Результат.Вставить("creation_window_opened", Истина)' in module
+    assert "Результат.set = Ложь" in module
+
+
+def test_table_set_field_checkbox_fast_path_requires_boolean_like_value():
+    module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
+    setter = _bsl_function_body(module, "УстановитьПолеТаблицыMCP")
+
+    checkbox_detector = _bsl_function_body(module, "НайтиПолеФлажкаТекущейСтрокиТаблицыMCP")
+
+    assert "ЭтоБулевоПоСтроке = ПроверкаФлажкаДоРедактирования.found И ЗначениеПохожеНаБулевоMCP(ПроверкаФлажкаДоРедактирования.value)" in setter
+    assert "ЭтоБулевоПоПолю = ЗначениеПохожеНаБулевоMCP(ПолеФлажкаТекущейСтроки.presentation)" in setter
+    assert 'ЭтоПолеФлажка = СвойствоСтруктуры(ПолеФлажкаТекущейСтроки, "kind", "") = "Поле флажка"' in setter
+    assert "Если ПолеФлажкаТекущейСтроки.found И (ЭтоПолеФлажка Или ЭтоБулевоПоСтроке Или ЭтоБулевоПоПолю) Тогда" in setter
+    assert "Если ПолеФлажкаТекущейСтроки.found И (ПроверкаФлажкаДоРедактирования.found Или ЗначениеПохожеНаБулевоMCP" not in setter
+    assert 'ВидПоля = Строка(Поле.Вид)' in checkbox_detector
+    assert 'Если ВидПоля = "Поле флажка" Или ЗначениеПохожеНаБулевоMCP(Представление) Тогда' in checkbox_detector
+    assert 'Возврат Новый Структура("found,field,presentation,kind,control", Истина, Кандидат, Представление, ВидПоля, Поле)' in checkbox_detector
+    assert 'ПереключитьПолеОбъектMCP(ПолеФлажкаТекущейСтроки.control, ПолеФлажкаТекущейСтроки.field, Значение)' in setter
+    assert 'НажатьПослеОшибкиУстановитьОтметку' in module
+    assert 'НажатьПослеОшибкиСнятьОтметку' in module
 
 def test_table_set_field_requires_edit_mode_before_cell_input():
     module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
