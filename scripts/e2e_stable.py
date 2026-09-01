@@ -225,6 +225,7 @@ async def common_start(session: ClientSession, sid: str, suffix: str) -> tuple[P
     start = await call_ok(session, "start_session", {
         "session_id": sid,
         "command_parameter": "E2E_COMMAND_PARAMETER",
+        "rag_enabled": True,
     })
     assert start["session_id"] == sid, start
     assert start.get("client_ibsrv_port"), start

@@ -306,6 +306,19 @@ def test_table_set_field_requires_edit_mode_before_cell_input():
     assert "запрещен" in module
 
 
+def test_table_set_field_reenters_edit_mode_after_row_positioning_race():
+    module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
+    setter = _bsl_function_body(module, "УстановитьПолеТаблицыMCP")
+
+    assert "РезультатПозиционированияСтроки = ВыбратьСтрокуТаблицыПоТекстамMCP" in setter
+    assert "РезультатПовторногоРедактированияПослеАктивизации = ОбеспечитьРедактированиеТекущейСтрокиТаблицыMCP" in setter
+    assert "РезультатАктивизацииКолонки = АктивизироватьКолонкуТаблицыMCP(Таблица, ИмяПоля, ИскатьПоЗаголовку)" in setter
+    assert "РезультатПовторногоРедактированияПередВводом = ОбеспечитьРедактированиеТекущейСтрокиТаблицыMCP" in setter
+    assert "АктивноеОкноПовторногоВвода = ТестируемоеПриложение.ПолучитьАктивноеОкно()" in setter
+    assert "ПовторноеПоле = НайтиПолеРедактораТаблицыMCP" in setter
+    assert "Таблица " + '" + ИмяТаблицы + "' + " вышла из режима редактирования перед вводом" in setter
+
+
 def test_close_form_returns_structured_message_box_diagnostics_instead_of_blank_error():
     module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
 
