@@ -435,6 +435,78 @@ def test_set_field_value_normalizes_creation_window_from_post_step_diagnostics(m
     assert result["modal_form_name"] == "Справочник.Контрагенты.Форма.ФормаЭлемента"
 
 
+def test_set_field_value_post_verifies_persisted_value(monkeypatch):
+    from mcp_1c import server
+
+    calls = []
+
+    async def fake_bridge_call(session_id, method, params, *, timeout=None):
+        calls.append((method, params, timeout))
+        if method == "set_field_value":
+            return {"set": True, "field": "ВидНоменклатуры", "value": "Товары", "method": "ВвестиТекст"}
+        if method == "field_value_text":
+            return {"found": True, "value_text": ""}
+        raise AssertionError(method)
+
+    monkeypatch.setattr(server, "_bridge_call_recorded", fake_bridge_call)
+
+    result = asyncio.run(server.set_field_value("ВидНоменклатуры", "Товары", session_id="unit"))
+
+    assert result["set"] is False
+    assert result["post_verified"] is False
+    assert result["post_verified_value"] == ""
+    assert "did not persist" in result["post_verify_error"]
+    assert calls == [
+        ("set_field_value", {"field_name": "ВидНоменклатуры", "value": "Товары", "search_by_title": False, "create_if_missing": False}, None),
+        ("field_value_text", {"field_name": "ВидНоменклатуры", "search_by_title": False}, 15),
+    ]
+
+
+def test_set_field_value_post_verify_accepts_matching_value(monkeypatch):
+    from mcp_1c import server
+
+    async def fake_bridge_call(session_id, method, params, *, timeout=None):
+        if method == "set_field_value":
+            return {"set": True, "field": "ЕдиницаИзмерения", "value": "кг", "method": "ВвестиТекст"}
+        if method == "field_value_text":
+            return {"found": True, "value_text": "Килограмм, кг"}
+        raise AssertionError(method)
+
+    monkeypatch.setattr(server, "_bridge_call_recorded", fake_bridge_call)
+
+    result = asyncio.run(server.set_field_value("ЕдиницаИзмерения", "кг", session_id="unit"))
+
+    assert result["set"] is True
+    assert result["post_verified"] is True
+    assert result["post_verified_value"] == "Килограмм, кг"
+
+
+def test_set_field_value_post_verifies_empty_value(monkeypatch):
+    from mcp_1c import server
+
+    calls = []
+
+    async def fake_bridge_call(session_id, method, params, *, timeout=None):
+        calls.append((method, params, timeout))
+        if method == "set_field_value":
+            return {"set": True, "field": "Комментарий", "value": "", "method": "ВвестиТекст"}
+        if method == "field_value_text":
+            return {"found": True, "value_text": "old value"}
+        raise AssertionError(method)
+
+    monkeypatch.setattr(server, "_bridge_call_recorded", fake_bridge_call)
+
+    result = asyncio.run(server.set_field_value("Комментарий", "", session_id="unit"))
+
+    assert result["set"] is False
+    assert result["post_verified"] is False
+    assert result["post_verified_value"] == "old value"
+    assert "did not persist" in result["post_verify_error"]
+    assert calls == [
+        ("set_field_value", {"field_name": "Комментарий", "value": "", "search_by_title": False, "create_if_missing": False}, None),
+        ("field_value_text", {"field_name": "Комментарий", "search_by_title": False}, 15),
+    ]
+
 
 def test_form_hints_set_and_get_explicit_context(monkeypatch, tmp_path):
     from mcp_1c import server

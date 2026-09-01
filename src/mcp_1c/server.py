@@ -1608,6 +1608,19 @@ def _record_tool_if_session(
     return result
 
 
+def _normalized_text_for_value_check(value: Any) -> str:
+    text = str(value or "").casefold().strip()
+    return text.replace("\u00a0", "").replace(" ", "").replace(",", ".")
+
+
+def _values_match_for_verification(actual: Any, expected: Any) -> bool:
+    actual_text = _normalized_text_for_value_check(actual)
+    expected_text = _normalized_text_for_value_check(expected)
+    if actual_text == expected_text:
+        return True
+    return bool(actual_text and expected_text and (actual_text in expected_text or expected_text in actual_text))
+
+
 def _normalize_creation_window_result(result: Any, *, create_if_missing: bool) -> Any:
     """Make reference creation explicit when 1C opens a creation form after input.
 
@@ -7253,13 +7266,40 @@ async def set_field_value(
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
     """Set a value in a form field by name or title."""
-    result = await _bridge_call_recorded(session_id, "set_field_value", {
+    params = {
         "field_name": field_name,
         "value": value,
         "search_by_title": search_by_title,
         "create_if_missing": create_if_missing,
-    })
-    return _normalize_creation_window_result(result, create_if_missing=create_if_missing)
+    }
+    result = await _bridge_call_recorded(session_id, "set_field_value", params)
+    result = _normalize_creation_window_result(result, create_if_missing=create_if_missing)
+    if isinstance(result, dict) and result.get("set") is True:
+        try:
+            verification = await _bridge_call_recorded(
+                session_id,
+                "field_value_text",
+                {"field_name": field_name, "search_by_title": search_by_title},
+                timeout=15,
+            )
+        except Exception as exc:
+            verified = dict(result)
+            verified["post_verify_error"] = str(exc)
+            return verified
+        verified_value = verification.get("value_text") if isinstance(verification, dict) else ""
+        if not _values_match_for_verification(verified_value, value):
+            verified = dict(result)
+            verified["set"] = False
+            verified["post_verified"] = False
+            verified["post_verified_value"] = verified_value or ""
+            verified["post_verify_error"] = (
+                f"Field value did not persist after set_field_value; expected {value!r}, current {verified_value!r}"
+            )
+            return verified
+        result = dict(result)
+        result["post_verified"] = True
+        result["post_verified_value"] = verified_value
+    return result
 
 
 @mcp.tool()

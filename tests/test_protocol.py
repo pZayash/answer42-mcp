@@ -190,7 +190,7 @@ def test_set_field_value_closes_missing_dropdown_variant_before_fallbacks():
     assert setter.index("ЗакрытьВсеВыпадающиеСпискиMCP(АктивноеОкно);") < setter.index("Поле = НайтиОбъектРекурсивно")
     assert setter.index("ЗакрытьВсеВыпадающиеСпискиMCP(ТестируемоеПриложение.ПолучитьАктивноеОкно())") < setter.index('ВызватьИсключение "Не удалось установить поле ')
     explicit_open = setter[setter.index("// Поля со стандартным выпадающим списком."):setter.index("// Последние fallback-варианты")]
-    cleanup_call = "Поле = ЗакрытьВыпадающийСписокПоляИАктуализироватьMCP(Поле, ИмяПоля, ЗаголовокПоля);"
+    cleanup_call = "Поле = ЗакрытьВыпадающийСписокПоляИАктуализироватьMCP(Поле, ИскомоеИмяПоля, ЗаголовокПоля);"
     assert cleanup_call in explicit_open
     assert "Прямой ВыполнитьВыборИзСпискаВыбора пропущен: create_if_missing=false" in explicit_open
     assert explicit_open.index("Если СоздатьЕслиОтсутствует Тогда") < explicit_open.index("Поле.ВыполнитьВыборИзСпискаВыбора(Значение);")
@@ -204,7 +204,8 @@ def test_set_field_value_closes_missing_dropdown_variant_before_fallbacks():
     assert "Fallback-и выбора из списка пропущены" in setter
     assert setter.index("СписокВыбораПроверенИЗначениеНеНайдено = Истина") < setter.index("Если Не СписокВыбораПроверенИЗначениеНеНайдено Тогда")
     assert "retry_after_exception" in setter
-    assert "НайтиОбъектРекурсивно(АктивноеОкноПослеОшибкиВвода, ИмяПоля, ЗаголовокПоля, \"\", 0)" in setter
+    assert "ИскомоеИмяПоля = ?(ИскатьПоЗаголовку, \"\", ИмяПоля);" in setter
+    assert "НайтиОбъектРекурсивно(АктивноеОкноПослеОшибкиВвода, ИскомоеИмяПоля, ЗаголовокПоля, \"ТестируемоеПолеФормы\", 0)" in setter
     assert "ФормаПоля.ПерейтиКСледующемуЭлементу()" in module
     assert "ВосстановитьПолеПослеНеудачногоВводаMCP" in module
     assert "У ТестируемоеПолеФормы нет отдельного метода ОтменитьРедактирование" in module
@@ -229,10 +230,11 @@ def test_set_field_value_restores_previous_editor_value_after_missing_dropdown()
     assert 'Результат.Вставить("diagnostic"' in restore
     assert "внешние клавиши" in restore
 
-    assert "ТекущееПредставлениеДоВвода = ПредставлениеДанныхПоля(Поле);" in setter
+    assert "ТекущееПредставлениеДоВвода = СтрогоеПредставлениеДанныхПоляMCP(Поле);" in setter
+    assert "ЗначенияСовпадаютДляПроверкиMCP(ТекущееПредставлениеДоВвода, Значение)" in setter
     assert "ПолеПослеВосстановленияРедактора = Неопределено;" in setter
     first_missing = setter.index("СписокВыбораПроверенИЗначениеНеНайдено = Истина")
-    restore_call = setter.index("ВосстановитьПолеПослеНеудачногоВводаMCP(Поле, ИмяПоля, ЗаголовокПоля, ТекущееПредставлениеДоВвода)")
+    restore_call = setter.index("ВосстановитьПолеПослеНеудачногоВводаMCP(Поле, ИскомоеИмяПоля, ЗаголовокПоля, ТекущееПредставлениеДоВвода)")
     skip_list_fallbacks = setter.index("Fallback-и выбора из списка пропущены")
     assert first_missing < restore_call < skip_list_fallbacks
     assert "восстановление редактора" in setter
@@ -245,6 +247,66 @@ def test_set_field_value_has_no_new_python_x11_editor_reset():
     assert "_x11_reset_test_client_editor" not in server
     assert "ONEC_MCP_DISABLE_X11_EDITOR_RESET" not in server
     assert 'xdotool", "key' not in server
+
+
+def test_set_field_value_direct_choice_fallbacks_require_bsl_confirmation():
+    module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
+    setter = _bsl_function_body(module, "УстановитьЗначениеПоля")
+
+    optimistic_returns = [
+        'Возврат Новый Структура("set,field,value,method", Истина, ИмяПоля, Значение, "ВвестиТекст.retry_after_exception")',
+        'Возврат Новый Структура("set,field,value,method", Истина, ИмяПоля, Значение, "Форма.ВыполнитьВыборИзСписка")',
+        'Возврат Новый Структура("set,field,value,method", Истина, ИмяПоля, Значение, "Форма.ВыполнитьВыборИзМеню")',
+        'Возврат Новый Структура("set,field,value,method", Истина, ИмяПоля, Значение, "Поле.ВыполнитьВыборИзСписка")',
+        'Возврат Новый Структура("set,field,value,method", Истина, ИмяПоля, Значение, "Поле.ВыполнитьВыборИзМеню")',
+    ]
+    for optimistic_return in optimistic_returns:
+        assert optimistic_return not in setter
+
+    assert "ПроверкаПовторногоВвода = ПодтвердитьУстановкуПоляMCP" in setter
+    assert "ПроверкаВыбораФормы = ПодтвердитьУстановкуПоляMCP" in setter
+    assert "ПроверкаВыбораМенюФормы = ПодтвердитьУстановкуПоляMCP" in setter
+    assert "ПроверкаВыбораПоля = ПодтвердитьУстановкуПоляMCP" in setter
+    assert "ПроверкаВыбораМенюПоля = ПодтвердитьУстановкуПоляMCP" in setter
+
+
+def test_table_row_text_matching_does_not_use_json_for_user_values():
+    module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
+    find_row = _bsl_function_body(module, "НайтиСтрокуТаблицы")
+    goto_row = _bsl_function_body(module, "ПерейтиКСтрокеТаблицыMCP")
+    choose_positioning = _bsl_function_body(module, "ПерейтиКСтрокеТаблицыПоТекстуMCP")
+
+    assert "Процедура ДобавитьТекстЗначенияСтрокиТаблицыMCP" in module
+    assert 'Тип("Структура") Или ТипЗнч(Значение) = Тип("Соответствие")' in module
+    for body in (find_row, goto_row, choose_positioning):
+        assert "ТекстСтрокиТаблицыMCP(СтрокаТаблицы)" in body
+        assert "СтрНайти(НРег(ЗначениеВJSON(СтрокаТаблицы))" not in body
+
+
+def test_structured_table_row_matching_requires_all_tokens():
+    module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
+    matcher = _bsl_function_body(module, "СтрокаСоответствуетТекстамMCP")
+    selector = _bsl_function_body(module, "ВыбратьСтрокуТаблицыПоТекстамMCP")
+    table_setter = _bsl_function_body(module, "УстановитьПолеТаблицыMCP")
+
+    assert "ВсеТекстыОбязательны" in matcher
+    assert "Возврат ВсеТекстыОбязательны И ЕстьНепустойПоиск" in matcher
+    assert "ВыбратьСтрокуТаблицыПоТекстамMCP(Таблица, ТекстыПоиска, Лимит = 1000, ВсеТекстыОбязательны = Ложь)" in selector
+    assert "СпецификацияСтрокиТаблицыТребуетВсехТекстовMCP" in module
+    assert "ВсеТекстыСтрокиОбязательны = СпецификацияСтрокиТаблицыТребуетВсехТекстовMCP(СпецификацияСтроки)" in table_setter
+    assert "ВыбратьСтрокуТаблицыПоТекстамMCP(Таблица, ТекстыПоискаСтроки, ЛимитПоискаСтроки, ВсеТекстыСтрокиОбязательны)" in table_setter
+
+
+def test_choose_current_row_confirms_selection_window_changed():
+    module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
+    chooser = _bsl_function_body(module, "ВыбратьТекущуюСтрокуMCP")
+    form_selector = _bsl_function_body(module, "ВыбратьЗначениеПоляЧерезФормуВыбораMCP")
+
+    assert "current_row_unavailable" in chooser
+    assert "selection_confirmed" in chooser
+    assert "ОкноЗакрылосьИлиСменилось" in chooser
+    assert "selection_closed" in form_selector
+    assert 'Возврат Новый Структура("selected,source_window,selection_window,search,selection_closed,active_window_after", Ложь' in form_selector
 
 
 def test_table_set_field_suggests_missing_reference_when_value_not_confirmed():
