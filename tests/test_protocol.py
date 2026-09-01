@@ -306,6 +306,16 @@ def test_table_set_field_requires_edit_mode_before_cell_input():
     assert "запрещен" in module
 
 
+def test_table_field_matcher_rejects_longer_neighbor_column_names():
+    module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
+    matcher = _bsl_function_body(module, "ПолеТаблицыСовпадаетMCP")
+
+    assert "ТоварыНоменклатураЕдиницаИзмерения" in matcher
+    assert "ИмяОканчиваетсяНаПоле" in matcher
+    assert "Прав(НормИмяТек, СтрДлина(НормИмяПоля)) = НормИмяПоля" in matcher
+    assert "СтрНайти(НормИмяТек, НормИмяПоля) > 0" not in matcher
+
+
 def test_table_set_field_reenters_edit_mode_after_row_positioning_race():
     module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
     setter = _bsl_function_body(module, "УстановитьПолеТаблицыMCP")
