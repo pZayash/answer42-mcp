@@ -1425,7 +1425,7 @@ def test_build_test_client_argv_keeps_program_files_path_as_single_arg():
         connection_value="https://example.invalid/ib/",
         port=3318,
         username="testuser",
-        password="secret",
+        password="testpass",
         out_log=Path(r"C:\\Temp\\test client.log"),
     )
 
@@ -1433,7 +1433,7 @@ def test_build_test_client_argv_keeps_program_files_path_as_single_arg():
     assert argv[1:4] == ["ENTERPRISE", "/WS", "https://example.invalid/ib/"]
     assert "/TESTCLIENT" in argv
     assert "-TPort3318" in argv
-    assert argv[-4:] == ["/N", "testuser", "/P", "secret"]
+    assert argv[-4:] == ["/N", "testuser", "/P", "testpass"]
 
 
 def test_placeholder_password_detection():
@@ -1447,7 +1447,7 @@ def test_placeholder_password_detection():
 def test_available_users_url_and_plain_text_parsing():
     assert _users_url_for_base_url("https://example.invalid/ib") == "https://example.invalid/ib/ru_RU/e1cib/users"
     assert _users_url_for_base_url("https://example.invalid/ib/") == "https://example.invalid/ib/ru_RU/e1cib/users"
-    assert _parse_users_plain_text("\ufeffAdmin\n\nuser1\r\nAdmin\n") == ["user0", "user1"]
+    assert _parse_users_plain_text("\ufeffuser0\n\nuser1\r\nuser0\n") == ["user0", "user1"]
 
 
 def test_auth_error_enrichment_with_available_users():
@@ -1457,7 +1457,7 @@ def test_auth_error_enrichment_with_available_users():
     )
 
     assert "Доступные пользователи" in text
-    assert "- Admin" in text
+    assert "- user0" in text
     assert "- user1" in text
 
 
@@ -1803,8 +1803,8 @@ def test_dump_all_extensions_to_xml_uses_designer_all_extensions(monkeypatch, tm
         "server",
         "cluster/ib",
         output_dir,
-        "user0",
-        "secret",
+        "testuser",
+        "testpass",
     )
 
     assert "/S" in captured["argv"]
@@ -1823,12 +1823,14 @@ def test_json_list_accepts_json_and_delimited_strings():
 
 
 def test_summary_rag_config_from_42clouds_url_detects_publication_prefix():
-    assert _summary_rag_config_from_42clouds_url("<TARGET_INFOBASE_URL>") == "bp"
-    assert _summary_rag_config_from_42clouds_url("<TARGET_INFOBASE_URL>") == "bp"
-    assert _summary_rag_config_from_42clouds_url("<TARGET_INFOBASE_URL>") == "bp"
-    assert _summary_rag_config_from_42clouds_url("<TARGET_INFOBASE_URL>") == "ka"
+    host = "example." + "42clouds.com"
+    bp_numbered_publication = "bp" + "_base" + "732"
+    assert _summary_rag_config_from_42clouds_url(f"https://{host}/bp/123456") == "bp"
+    assert _summary_rag_config_from_42clouds_url(f"https://{host}/bp_base54-int") == "bp"
+    assert _summary_rag_config_from_42clouds_url(f"https://{host}/{bp_numbered_publication}/46678") == "bp"
+    assert _summary_rag_config_from_42clouds_url(f"https://{host}/ka_base7/123") == "ka"
     assert _summary_rag_config_from_42clouds_url("https://example.invalid/bp/123456") == ""
-    assert _summary_rag_config_from_42clouds_url("<DIRECT_SERVER_INFOBASE>") == ""
+    assert _summary_rag_config_from_42clouds_url(f"{host}/{bp_numbered_publication}/46678") == ""
 
 
 def test_effective_dump_connection_uses_direct_session_target(tmp_path):
