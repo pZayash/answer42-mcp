@@ -1969,6 +1969,8 @@ def _walk_ui_tree(node: Any):
     yield node
     for child in node.get("children") or []:
         yield from _walk_ui_tree(child)
+    for child in node.get("objects") or []:
+        yield from _walk_ui_tree(child)
 
 
 def _walk_ui_snapshot(node: Any):
@@ -2108,7 +2110,8 @@ _UI_TREE_FIELD_PRESETS: dict[str, set[str] | None] = {
     "diagnostic": {
         "type", "name", "title", "form_name", "navigation_url", "visible", "available", "read_only", "enabled",
         "main", "home", "current", "selected", "data_path", "current_page_name", "current_page", "pages",
-        "hidden_children_count", "_tree_ms", "_nodes_serialized", "_nodes_visited", "metrics", "flat", "source",
+        "hidden_children_count", "rag_type", "rag", "_tree_ms", "_nodes_serialized", "_nodes_visited",
+        "metrics", "flat", "source",
     },
     "data": {
         "type", "name", "title", "form_name", "navigation_url", "text", "value", "presentation", "data",
@@ -2131,6 +2134,19 @@ def _ui_tree_field_names(fields: str, profile: str) -> set[str] | None:
             return parsed
     allowed = ", ".join(sorted(_UI_TREE_FIELD_PRESETS)) + ", or a comma-separated field list"
     raise ValueError(f"Unsupported ui_tree fields: {fields!r}. Expected one of: {allowed}.")
+
+
+def _ui_tree_rag_enabled(value: bool | str | None, profile: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    raw = str(value if value is not None else "auto").strip().lower()
+    if raw in {"", "auto", "default", "profile"}:
+        return profile in _UI_TREE_RAG_AUTO_PROFILES
+    if raw in {"1", "true", "yes", "on", "enable", "enabled"}:
+        return True
+    if raw in {"0", "false", "no", "off", "disable", "disabled", "none"}:
+        return False
+    raise ValueError("Unsupported ui_tree include_rag_types: " f"{value!r}. Expected bool or one of: auto, true, false.")
 
 
 def _ui_tree_state_options(field_names: set[str] | None, *, include_hidden: bool) -> dict[str, bool]:
@@ -2339,6 +2355,7 @@ _UI_TREE_PROFILES = {"navigation", "diagnostic", "data", "full", "command_panels
 _UI_TREE_COMMAND_PANEL_MODES = {"auto", "include", "full", "with", "all", "exclude", "without", "none", "off", "no", "only"}
 _UI_TREE_GROUP_MODES = {"include", "flatten", "flatten_layout", "exclude", "exclude_empty", "pages_only"}
 _UI_TREE_FORMATS = {"json", "outline", "yaml", "yml"}
+_UI_TREE_RAG_AUTO_PROFILES = {"diagnostic", "data", "full"}
 
 
 def _validate_ui_tree_choice(kind: str, value: str, allowed: set[str]) -> str:
@@ -3007,9 +3024,15 @@ def _convert_1c_guid_navigation_link(
     }
 
 
-def _rag_form_element_index(snapshot: str | int | None = None) -> dict[str, list[dict[str, Any]]]:
+def _rag_form_element_index(snapshot: str | int | None = None, *, active_object: str = "") -> dict[str, list[dict[str, Any]]]:
+    lookup_object = _metadata_name_to_rag_name(active_object) if active_object else ""
     try:
-        items = _RAG.lookup_form_element_types(snapshot=snapshot).get("items", [])
+        try:
+            result = _RAG.lookup_form_element_types(snapshot=snapshot, object_full_name=lookup_object or None)
+        except TypeError:
+            # Backward compatibility for tests or external RagService-like stubs.
+            result = _RAG.lookup_form_element_types(snapshot=snapshot)
+        items = result.get("items", [])
     except Exception as exc:
         logging.debug("RAG form element lookup failed: %s", exc)
         return {}
@@ -3022,21 +3045,72 @@ def _rag_form_element_index(snapshot: str | int | None = None) -> dict[str, list
     return index
 
 
+def _ui_tree_form_short_name(value: Any) -> str:
+    text = str(value or "")
+    marker = ".Форма."
+    if marker in text:
+        return text.rsplit(marker, 1)[1]
+    marker = ".Form."
+    if marker in text:
+        return text.rsplit(marker, 1)[1]
+    return text
+
+
+def _metadata_name_from_ui_tree(tree: dict[str, Any]) -> str:
+    value = _metadata_name_from_navigation_url(str(tree.get("navigation_url") or ""))
+    if value:
+        return value
+    diagnostics = tree.get("client_diagnostics")
+    if isinstance(diagnostics, dict):
+        form_name = str(diagnostics.get("active_form_name") or diagnostics.get("modal_form_name") or "")
+        for marker in (".Форма.", ".Form."):
+            if marker in form_name:
+                return form_name.split(marker, 1)[0]
+    for node in _walk_ui_tree(tree):
+        form_name = str(node.get("form_name") or "")
+        for marker in (".Форма.", ".Form."):
+            if marker in form_name:
+                return form_name.split(marker, 1)[0]
+    return ""
+
+
+def _ui_node_rag_lookup_keys(node: dict[str, Any]) -> list[str]:
+    values = [node.get("name"), node.get("title"), node.get("data_path")]
+    keys: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        keys.append(_norm_key(text))
+        if "." in text:
+            keys.append(_norm_key(text.rsplit(".", 1)[1]))
+    return list(dict.fromkeys(key for key in keys if key))
+
+
 def _pick_rag_element(ui_node: dict[str, Any], candidates: list[dict[str, Any]], active_object: str = "") -> dict[str, Any] | None:
     if not candidates:
         return None
-    active_norm = _norm_key(active_object)
-    form_name = _norm_key(ui_node.get("form_name"))
+    active_names = {_norm_key(active_object), _norm_key(_metadata_name_to_rag_name(active_object))}
+    active_names.discard("")
+    form_name = _norm_key(_ui_tree_form_short_name(ui_node.get("form_name")))
 
     def score(item: dict[str, Any]) -> int:
         value = 0
-        if active_norm and active_norm in _norm_key(item.get("object_full_name")):
+        item_object = _norm_key(item.get("object_full_name"))
+        if active_names and item_object in active_names:
             value += 20
-        if form_name and form_name == _norm_key(item.get("form_name")):
+        item_form = _norm_key(_ui_tree_form_short_name(item.get("form_name")))
+        if form_name and form_name == item_form:
             value += 5
-        if _norm_key(ui_node.get("name")) == _norm_key(item.get("name")):
+        elif item_form == "<auto>":
+            value += 1
+        node_name = _norm_key(ui_node.get("name"))
+        item_name = _norm_key(item.get("name"))
+        item_data_path = _norm_key(item.get("data_path"))
+        if node_name and (node_name == item_name or node_name == item_data_path):
             value += 3
-        if _norm_key(ui_node.get("title")) == _norm_key(item.get("title")):
+        node_title = _norm_key(ui_node.get("title"))
+        if node_title and node_title == _norm_key(item.get("title")):
             value += 2
         return value
 
@@ -3046,12 +3120,12 @@ def _pick_rag_element(ui_node: dict[str, Any], candidates: list[dict[str, Any]],
 def _enrich_ui_tree_with_rag_types(tree: Any, snapshot: str | int | None = None) -> Any:
     if not isinstance(tree, dict):
         return tree
-    index = _rag_form_element_index(snapshot=snapshot)
+    active_object = _metadata_name_from_ui_tree(tree)
+    index = _rag_form_element_index(snapshot=snapshot, active_object=active_object)
     if not index:
         return tree
-    active_object = _metadata_name_from_navigation_url(str(tree.get("navigation_url") or ""))
     for node in _walk_ui_tree(tree):
-        keys = [_norm_key(node.get("name")), _norm_key(node.get("title")), _norm_key(node.get("data_path"))]
+        keys = _ui_node_rag_lookup_keys(node)
         candidates: list[dict[str, Any]] = []
         seen: set[int] = set()
         for key in keys:
@@ -6118,7 +6192,7 @@ async def decoration_click(name: Annotated[str, "Decoration technical name"] = "
 
 @mcp.tool()
 async def ui_tree(
-    include_rag_types: Annotated[bool, "Enrich UI elements with best-effort types from the local RAG index; disabled by default because it may add lookup cost and verbose metadata"] = False,
+    include_rag_types: Annotated[bool | str, "Enrich UI elements with best-effort types from the RAG index. Use true/false to force; auto/default enables it for diagnostic, data and full profiles when session RAG is enabled"] = "auto",
     include_hidden: Annotated[bool, "Include invisible form elements/pages; visible/available/read_only flags are returned for serialized nodes"] = False,
     compact: Annotated[bool | None, "Return compact node fields; default follows ONEC_MCP_RESULT_VERBOSITY"] = None,
     include_data: Annotated[bool, "Include data presentations from UI nodes; expensive on large forms, prefer field_value_text/table_rows/tabular_document_text for values"] = False,
@@ -6143,6 +6217,8 @@ async def ui_tree(
 
     Default profile is `navigation`: visible elements, compact fields, no data
     presentations, no RAG enrichment, and command panels excluded unless requested.
+    `include_rag_types` defaults to `auto`: RAG enrichment is enabled for
+    `diagnostic`, `data` and `full` profiles and disabled for navigation profiles.
     The tree has no depth limit. Use `include_hidden=true` for hidden pages/elements.
     Pass `parent_name` to serialize only the subtree rooted at a specific form element.
     Use `fields=minimal|navigation|diagnostic|data|full` (or a comma-separated
@@ -6181,6 +6257,7 @@ async def ui_tree(
     command_mode = _validate_ui_tree_choice("command_panels", command_panels, _UI_TREE_COMMAND_PANEL_MODES)
     group_mode_key = _validate_ui_tree_choice("group_mode", group_mode, _UI_TREE_GROUP_MODES)
     fmt = _validate_ui_tree_choice("format", format, _UI_TREE_FORMATS)
+    include_rag_types_effective = _ui_tree_rag_enabled(include_rag_types, profile_key)
     field_names = _ui_tree_field_names(fields, profile_key)
     state_options = _ui_tree_state_options(field_names, include_hidden=include_hidden)
     if profile_key in {"full", "diagnostic", "data"}:
@@ -6236,13 +6313,14 @@ async def ui_tree(
     if isinstance(tree, dict):
         tree["tree_summary"] = _summarize_ui_tree(tree, include_hidden=include_hidden)
     timed_stage("python_summary_ms", summary_start)
-    if include_rag_types:
+    if include_rag_types_effective:
         rag_start = time.monotonic()
         sess = _session(session_id)
         if _RAG_ENABLED and sess.rag_enabled:
-            tree = _enrich_ui_tree_with_rag_types(tree, snapshot=rag_snapshot or sess.rag_snapshot or None)
+            effective_rag_snapshot = rag_snapshot or sess.rag_snapshot or str(sess.rag_notice.get("snapshot") or "") or None
+            tree = _enrich_ui_tree_with_rag_types(tree, snapshot=effective_rag_snapshot)
             if isinstance(tree, dict):
-                tree["rag_diagnostic"] = _rag_diagnostic(session_id, rag_snapshot)
+                tree["rag_diagnostic"] = _rag_diagnostic(session_id, effective_rag_snapshot or "")
         elif isinstance(tree, dict):
             tree["rag_diagnostic"] = _rag_diagnostic(session_id, rag_snapshot)
         timed_stage("python_rag_enrich_ms", rag_start)

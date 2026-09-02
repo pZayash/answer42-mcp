@@ -205,3 +205,50 @@ def test_summary_query_skips_vector_for_metadata_query(monkeypatch, tmp_path: Pa
     assert layer_meta["enabled"] is True
     assert layer_meta["skipped"] == "non_code_query"
     assert result["fts"][0]["chunk_id"] == "bp:configuration:metadata-object:Справочник:Номенклатура"
+
+
+def test_summary_lookup_form_element_types_can_scope_to_object(monkeypatch, tmp_path: Path):
+    root = _fixture_summary(tmp_path / "summary")
+    rag = root / "bp" / "configuration" / "rag"
+    _write_jsonl(
+        rag / "chunks" / "form-0002.jsonl",
+        [
+            {
+                "id": "bp:configuration:form:Справочник:Контрагенты:ФормаЭлемента",
+                "kind": "form",
+                "metadataType": "Справочник",
+                "metadataName": "Контрагенты",
+                "formName": "ФормаЭлемента",
+                "title": "Форма ФормаЭлемента — Справочник Контрагенты",
+                "text": "Форма ФормаЭлемента объекта Справочник Контрагенты. Элементы: ИНН -> ИНН.",
+                "sourcePath": "Catalogs/Контрагенты/Forms/ФормаЭлемента/Ext/Form.xml",
+            }
+        ],
+    )
+    (rag / "chunks-manifest.json").write_text(
+        json.dumps(
+            {
+                "totalChunks": 4,
+                "files": [
+                    {"file": "metadata-object-0001.jsonl", "kind": "metadata-object", "lineCount": 1},
+                    {"file": "form-0001.jsonl", "kind": "form", "lineCount": 1},
+                    {"file": "form-0002.jsonl", "kind": "form", "lineCount": 1},
+                    {"file": "bsl-module-0001.jsonl", "kind": "bsl-module", "lineCount": 1},
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MCP_1C_RAG_SUMMARY_BACKEND", "local-stream")
+    monkeypatch.setenv("MCP_1C_RAG_SUMMARY_LOCAL_ROOT", str(root))
+    backend = ConfigurationSummaryBackend()
+    snap = backend.create_snapshot(**backend.find_configuration("Accounting30", "3.0.204.22"))
+
+    result = backend.lookup_form_element_types(snapshot=snap["name"], object_full_name="Справочник.Номенклатура")
+
+    assert result["object_full_name"] == "Справочник.Номенклатура"
+    assert result["count"] >= 2
+    assert {item["object_full_name"] for item in result["items"]} == {"Справочник.Номенклатура"}
+    assert any(item["name"] == "Артикул" for item in result["items"])
+    assert all(item["name"] != "ИНН" for item in result["items"])
