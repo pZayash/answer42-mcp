@@ -417,9 +417,9 @@ class RagService:
                 row["data_composition_fields"] = [dict(r) for r in con.execute("SELECT schema_name,data_path,field,title,expression,dataset_name,field_type,source_path FROM data_composition_fields WHERE object_id=? ORDER BY id", (oid,))]
             return {"query": object, "snapshot": snapshot, "matches": rows}
 
-    def lookup_form_element_types(self, snapshot: str | int | None = None) -> dict[str, Any]:
+    def lookup_form_element_types(self, snapshot: str | int | None = None, object_full_name: str | None = None) -> dict[str, Any]:
         if self.summary_backend.is_summary_snapshot(snapshot):
-            return self.summary_backend.lookup_form_element_types(snapshot)
+            return self.summary_backend.lookup_form_element_types(snapshot, object_full_name=object_full_name)
         """Return a compact name/title/data-path index for UI-tree enrichment.
 
         The 1C test-client API exposes runtime UI element names and captions, but
@@ -435,14 +435,18 @@ class RagService:
         auto-generated forms using metadata alone.
         """
         with self.store.connect() as con:
-            source_filter = ""
+            filters = []
             params: list[Any] = []
             if snapshot is not None:
                 snap = _snapshot_row(con, snapshot)
                 if snap is None:
                     raise ValueError(f"snapshot not found: {snapshot}")
-                source_filter = "AND mo.source_id IN (SELECT source_id FROM snapshot_layers WHERE snapshot_id=?)"
+                filters.append("mo.source_id IN (SELECT source_id FROM snapshot_layers WHERE snapshot_id=?)")
                 params.append(snap["id"])
+            if object_full_name:
+                filters.append("mo.full_name=?")
+                params.append(str(object_full_name))
+            source_filter = " AND " + " AND ".join(filters) if filters else ""
             rows = [
                 dict(r)
                 for r in con.execute(
