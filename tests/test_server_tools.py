@@ -2878,7 +2878,22 @@ def test_universal_report_message_box_is_closed_before_forming(monkeypatch):
     assert warnings == ["Universal report informational MessageBox was closed before forming the report"]
 
 
-def test_metadata_universal_report_primary_path_skips_settings_ui(monkeypatch):
+def test_universal_report_metadata_source_title_detection_normalizes_title():
+    from mcp_1c.server import _universal_report_metadata_source_title_found
+
+    assert _universal_report_metadata_source_title_found({
+        "client_diagnostics": {
+            "active_window_title": "Универсальный отчет: Справочник \"Идентификаторы объектов метаданных\"",
+        },
+    })
+    assert not _universal_report_metadata_source_title_found({
+        "client_diagnostics": {
+            "active_window_title": "Универсальный отчет: Справочник \"Банки\"",
+        },
+    })
+
+
+def test_metadata_universal_report_refuses_unconfirmed_source(monkeypatch):
     from mcp_1c import server
 
     calls = []
@@ -2886,18 +2901,69 @@ def test_metadata_universal_report_primary_path_skips_settings_ui(monkeypatch):
     async def fake_bridge_call(session_id, method, params, *, timeout=None):
         assert session_id == "unit"
         calls.append((method, params, timeout))
-        if method == "field_info":
-            raise AssertionError("primary metadata path must not probe Universal report quick settings")
-        if method == "set_field_value":
-            raise AssertionError("primary metadata path must not mutate Universal report quick settings")
-        if method == "active_window":
-            raise AssertionError("primary metadata path must not probe active_window before forming the report")
         if method == "open_navigation_link":
-            return {"opened": True, "client_diagnostics": {"has_dialog": False, "modal_form_name": "ОбщаяФорма.ФормаОтчета"}}
-        return {"ok": True}
+            return {
+                "opened": True,
+                "client_diagnostics": {
+                    "has_dialog": False,
+                    "active_window_title": "Универсальный отчет: Справочник \"Банки\"",
+                },
+            }
+        if method == "active_window":
+            return {"title": "Универсальный отчет: Справочник \"Банки\""}
+        if method == "field_info":
+            raise RuntimeError("quick setting is not available")
+        raise AssertionError(method)
 
     async def fail_configure(session_id, query=""):
-        raise AssertionError("primary metadata path must not open Universal report settings UI")
+        calls.append(("_configure_universal_report_metadata_settings", {"query": query}, None))
+        raise AssertionError("full settings must not be used after source selection failed")
+
+    async def fail_dangerous_bridge_call(*args, **kwargs):
+        raise AssertionError("unconfirmed Universal report output must not be formed or saved")
+
+    monkeypatch.setattr(server, "_bridge_call_recorded", fake_bridge_call)
+    monkeypatch.setattr(server, "_configure_universal_report_metadata_settings", fail_configure)
+    monkeypatch.setattr(server, "_dangerous_bridge_call_recorded", fail_dangerous_bridge_call)
+
+    rows, warnings = asyncio.run(server._metadata_rows_from_universal_report("unit", 10))
+
+    assert rows == []
+    assert any(call[0] == "active_window" for call in calls)
+    assert any("metadata source was not confirmed" in warning for warning in warnings)
+    assert not any(call[0] == "_configure_universal_report_metadata_settings" for call in calls)
+
+
+def test_metadata_universal_report_primary_path_configures_source_and_filters(monkeypatch):
+    from mcp_1c import server
+
+    calls = []
+
+    async def fake_bridge_call(session_id, method, params, *, timeout=None):
+        assert session_id == "unit"
+        calls.append((method, params, timeout))
+        if method == "open_navigation_link":
+            return {
+                "opened": True,
+                "client_diagnostics": {
+                    "has_dialog": False,
+                    "modal_form_name": "ОбщаяФорма.ФормаОтчета",
+                    "active_window_title": "Универсальный отчет: Справочник \"Идентификаторы объектов метаданных\"",
+                },
+            }
+        if method == "field_info":
+            raise AssertionError("source already confirmed; quick settings should not be probed")
+        if method == "set_field_value":
+            raise AssertionError("source already confirmed; quick settings should not be mutated")
+        if method == "active_window":
+            raise AssertionError("opened diagnostics already confirmed the source")
+        return {"ok": True}
+
+    async def fake_configure(session_id, query=""):
+        assert session_id == "unit"
+        assert query == ""
+        calls.append(("_configure_universal_report_metadata_settings", {"query": query}, None))
+        return ["settings applied"]
 
     async def fake_ready(session_id, name, *, timeout_seconds=75.0, interval_seconds=3.0):
         assert session_id == "unit"
@@ -2908,10 +2974,7 @@ def test_metadata_universal_report_primary_path_skips_settings_ui(monkeypatch):
         assert session_id == "unit"
         calls.append((method, params, timeout, danger))
         if method == "click_button":
-            assert params == {"name": "СформироватьОтчет"}
-            assert timeout == 180
-            assert danger == "metadata_objects_universal_report_form_may_block_thin_client"
-            return {"pressed": True}
+            raise AssertionError("ЗакрытьИСформировать already formed the report")
         assert method == "tabular_document_save"
         assert params["name"] == "ОтчетТабличныйДокумент"
         assert params["format"] == "mxl"
@@ -2933,12 +2996,12 @@ def test_metadata_universal_report_primary_path_skips_settings_ui(monkeypatch):
         raise AssertionError("primary metadata path must prefer MXL before XLSX fallback")
 
     async def fail_chunks(*args, **kwargs):
-        raise AssertionError("primary metadata path must save XLSX, not read UI chunks")
+        raise AssertionError("primary metadata path must save MXL/XLSX, not read UI chunks")
 
     monkeypatch.setattr(server, "_bridge_call_recorded", fake_bridge_call)
     monkeypatch.setattr(server, "_dangerous_bridge_call_recorded", fake_dangerous_bridge_call)
     monkeypatch.setattr(server, "_select_saved_tabular_document_file", fake_select_saved_file)
-    monkeypatch.setattr(server, "_configure_universal_report_metadata_settings", fail_configure)
+    monkeypatch.setattr(server, "_configure_universal_report_metadata_settings", fake_configure)
     monkeypatch.setattr(server, "_wait_tabular_document_ready", fake_ready)
     monkeypatch.setattr(server, "_metadata_catalog_rows_from_mxl", fake_rows_from_mxl)
     monkeypatch.setattr(server, "_metadata_catalog_rows_from_xlsx", fake_rows_from_xlsx)
@@ -2947,15 +3010,12 @@ def test_metadata_universal_report_primary_path_skips_settings_ui(monkeypatch):
     rows, warnings = asyncio.run(server._metadata_rows_from_universal_report("unit", 10))
 
     assert rows == [{"Полное имя": "Справочник.Номенклатура", "Синоним": "Номенклатура"}]
-    assert any("quick settings probing skipped" in warning for warning in warnings)
-    assert any("settings UI skipped" in warning for warning in warnings)
-    assert not any(method == "field_info" for method, *_rest in calls)
-    assert not any(method == "set_field_value" for method, *_rest in calls)
-    assert not any(method == "active_window" for method, *_rest in calls)
-    assert ("click_button", {"name": "СформироватьОтчет"}, 180, "metadata_objects_universal_report_form_may_block_thin_client") in calls
+    assert any("source confirmed" in warning for warning in warnings)
+    assert "settings applied" in warnings
     assert any(call[0] == "tabular_document_save" and call[1].get("format") == "mxl" for call in calls)
     assert any("MXL became parseable" in warning for warning in warnings)
-    assert not any(call[0] == "click_button" and call[1].get("name") == "ВсеНастройки" for call in calls)
+    assert ("_configure_universal_report_metadata_settings", {"query": ""}, None) in calls
+    assert not any(call[0] == "click_button" and call[1].get("name") == "СформироватьОтчет" for call in calls)
 
 
 def test_metadata_universal_report_falls_back_to_xlsx_when_mxl_has_no_rows(monkeypatch):
@@ -2966,9 +3026,15 @@ def test_metadata_universal_report_falls_back_to_xlsx_when_mxl_has_no_rows(monke
     async def fake_bridge_call(session_id, method, params, *, timeout=None):
         assert session_id == "unit"
         if method == "open_navigation_link":
-            return {"opened": True, "client_diagnostics": {"has_dialog": False}}
+            return {
+                "opened": True,
+                "client_diagnostics": {
+                    "has_dialog": False,
+                    "active_window_title": "Универсальный отчет: Справочник \"Идентификаторы объектов метаданных\"",
+                },
+            }
         if method in {"field_info", "set_field_value", "active_window"}:
-            raise AssertionError(f"primary metadata path must not call {method}")
+            raise AssertionError(f"source already confirmed; primary metadata path must not call {method}")
         return {"ok": True}
 
     async def fake_ready(session_id, name, *, timeout_seconds=75.0, interval_seconds=3.0):

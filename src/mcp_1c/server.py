@@ -8210,6 +8210,82 @@ async def _configure_universal_report_metadata_settings(session_id: str, query: 
     return warnings
 
 
+def _universal_report_metadata_source_title_found(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    diagnostics = value.get("client_diagnostics") if isinstance(value.get("client_diagnostics"), dict) else {}
+    candidates = [
+        value.get("title"),
+        value.get("window_title_after"),
+        value.get("window_title_before"),
+        diagnostics.get("active_window_title"),
+        diagnostics.get("modal_title"),
+    ]
+    for item in candidates:
+        normalized = _normalize_match_text(str(item or ""))
+        if "идентификаторыобъектовметаданных" in normalized:
+            return True
+    return False
+
+
+async def _ensure_universal_report_metadata_source(session_id: str, warnings: list[str], open_result: Any) -> bool:
+    if _universal_report_metadata_source_title_found(open_result):
+        warnings.append("Universal report metadata-identifiers source confirmed by opened form title")
+        return True
+    try:
+        active = await _bridge_call_recorded(session_id, "active_window", {}, timeout=8)
+        if _universal_report_metadata_source_title_found(active):
+            warnings.append("Universal report metadata-identifiers source confirmed by active window title")
+            return True
+    except Exception as exc:
+        warnings.append(f"Universal report active-window source validation failed: {exc}")
+    warnings.append(
+        "Universal report did not open on metadata-identifiers source; trying quick settings"
+    )
+    type_ok = await _set_universal_report_quick_setting_by_titles(
+        session_id,
+        ["Тип объекта", "Тип данных", "Раздел"],
+        "Справочники",
+        warnings,
+    )
+    source_ok = await _set_universal_report_quick_setting_by_titles(
+        session_id,
+        ["Объект", "Справочник", "Имя объекта"],
+        "Идентификаторы объектов метаданных",
+        warnings,
+    )
+    if not source_ok:
+        source_ok = await _set_universal_report_quick_setting_by_titles(
+            session_id,
+            ["Объект", "Справочник", "Имя объекта"],
+            "ИдентификаторыОбъектовМетаданных",
+            warnings,
+        )
+    if type_ok and not source_ok:
+        warnings.append(
+            "Universal report object-family quick setting was set, but metadata-identifiers object was not confirmed"
+        )
+    if source_ok:
+        warnings.append("Universal report quick settings were used to select metadata-identifiers source")
+    return source_ok
+
+
+def _metadata_report_rows_look_like_identifiers(rows: list[dict[str, str]]) -> bool:
+    if not rows:
+        return False
+    useful_full_names = 0
+    technical_columns = 0
+    for row in rows[:200]:
+        if _row_value(row, "Полное имя", "ПолноеИмя", "СписокПолноеИмя"):
+            technical_columns += 1
+        item = _metadata_object_from_row(row)
+        if _is_metadata_full_name_included(item.get("full_name", "")):
+            useful_full_names += 1
+            if useful_full_names >= 3:
+                return True
+    return technical_columns > 0 and useful_full_names > 0
+
+
 async def _metadata_rows_from_universal_report(
     session_id: str,
     max_rows: int,
@@ -8229,42 +8305,43 @@ async def _metadata_rows_from_universal_report(
     try:
         open_result = await _bridge_call_recorded(session_id, "open_navigation_link", {"navigation_link": navigation_link})
         await _close_message_box_from_command_diagnostics(session_id, open_result, warnings)
-        # Do not probe or mutate Universal report quick settings in the primary path.
-        # On some live web/thin-client sessions the report opens already on the
-        # required metadata-identifiers source, but title-based `field_info`
-        # probing of quick settings makes the bridge unresponsive before the
-        # report can be formed.  Prefer the stable navigation-link source and
-        # validate the produced XLSX contents after save.
-        warnings.append(
-            "Universal report quick settings probing skipped;"
-            " using the source opened by the navigation link and validating XLSX rows"
-        )
-        # Do not open the Universal report settings form in the primary path.
-        # Live thin-client/web sessions can visually open `ВсеНастройки` but
-        # leave the test bridge unresponsive for minutes; adding the first
-        # filter field can also end in `Потеряно соединение`.  The primary path
-        # must therefore form the report with the selected source and apply the
-        # mandatory filtering/normalization on the Python side.  Settings remain
-        # available as a separate best-effort diagnostic helper, not as a
-        # correctness-critical step of metadata cache building.
-        warnings.append("Universal report settings UI skipped; filtering is applied after reading rows")
-        # Avoid active_window probes before forming the report: on live web/thin
-        # sessions they can make the bridge unresponsive even when the report
-        # form is visually ready.  If navigation returned no safe MessageBox
-        # diagnostics, go straight to the form command.
-        form_result = await _dangerous_bridge_call_recorded(
+        source_configured = await _ensure_universal_report_metadata_source(
             session_id,
-            "click_button",
-            {"name": "СформироватьОтчет"},
-            timeout=180,
-            danger="metadata_objects_universal_report_form_may_block_thin_client",
+            warnings,
+            open_result,
         )
-        if isinstance(form_result, dict) and form_result.get("started_long_action"):
+        if not source_configured:
+            return [], [
+                *warnings,
+                (
+                    "Universal report metadata source was not confirmed or configured;"
+                    " refusing to read arbitrary current Universal report result"
+                ),
+            ]
+        try:
+            settings_warnings = await _configure_universal_report_metadata_settings(session_id, query)
+            warnings.extend(settings_warnings)
+            settings_applied = True
+        except Exception as exc:
+            settings_applied = False
             warnings.append(
-                "Universal report form action is still running or blocked the interface;"
-                f" form_result={_truncate_value(form_result)}"
+                "Universal report settings UI failed; falling back to report formation only"
+                f"; error={exc}"
             )
-            return [], warnings
+        if not settings_applied:
+            form_result = await _dangerous_bridge_call_recorded(
+                session_id,
+                "click_button",
+                {"name": "СформироватьОтчет"},
+                timeout=180,
+                danger="metadata_objects_universal_report_form_may_block_thin_client",
+            )
+            if isinstance(form_result, dict) and form_result.get("started_long_action"):
+                warnings.append(
+                    "Universal report form action is still running or blocked the interface;"
+                    f" form_result={_truncate_value(form_result)}"
+                )
+                return [], warnings
         ready, readiness_warnings, readiness = await _wait_tabular_document_ready(
             session_id,
             "ОтчетТабличныйДокумент",
@@ -8313,12 +8390,19 @@ async def _metadata_rows_from_universal_report(
         except Exception as exc:
             read_warnings.append(f"Universal report MXL save/read failed: {exc}")
         if rows:
-            warnings.extend(read_warnings)
-            warnings.append(
-                "Universal report MXL became parseable"
-                f"; rows={readiness.get('rows')}; columns={readiness.get('columns')}; path={last_saved_path}"
-            )
-            return rows[:max_rows], warnings
+            if not _metadata_report_rows_look_like_identifiers(rows):
+                read_warnings.append(
+                    "Universal report MXL parsed rows do not look like metadata identifiers;"
+                    " ignoring this report output"
+                )
+                rows = []
+            else:
+                warnings.extend(read_warnings)
+                warnings.append(
+                    "Universal report MXL became parseable"
+                    f"; rows={readiness.get('rows')}; columns={readiness.get('columns')}; path={last_saved_path}"
+                )
+                return rows[:max_rows], warnings
 
         report_path = Path("/tmp/answer42") / f"metadata_objects_{session_id}_{uuid.uuid4().hex}.xlsx"
         try:
@@ -8348,9 +8432,15 @@ async def _metadata_rows_from_universal_report(
                 rows = _metadata_catalog_rows_from_xlsx(Path(selected_path))
         except Exception as exc:
             read_warnings.append(f"Universal report XLSX save/read failed: {exc}")
+        if rows and not _metadata_report_rows_look_like_identifiers(rows):
+            read_warnings.append(
+                "Universal report XLSX parsed rows do not look like metadata identifiers;"
+                " ignoring this report output"
+            )
+            rows = []
         if not rows:
             warning = (
-                "Universal report returned no parseable metadata rows"
+                "Universal report returned no parseable metadata identifier rows"
                 f" after ready state; last_saved_path={last_saved_path};"
                 f" readiness={_truncate_value(readiness)};"
                 f" save_result={_truncate_value(save_diagnostics)}"
