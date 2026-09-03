@@ -8178,53 +8178,22 @@ async def _set_universal_report_quick_setting_by_titles(
     return False
 
 
-async def _configure_universal_report_metadata_settings(session_id: str, query: str = "") -> list[str]:
-    del query
-    warnings: list[str] = []
-    await _bridge_call_recorded(session_id, "click_button", {"name": "ВсеНастройки"}, timeout=30)
-    try:
-        await _bridge_call_recorded(session_id, "group_activate_page", {
-            "name": "СтраницыНастроек",
-            "page_name": "СтраницаВыбранныеПоляИСортировки",
-            "page_title": "Поля и сортировки",
-        }, timeout=15)
-    except Exception as exc:
-        warnings.append(f"Universal report selected-fields page activation failed: {exc}")
-    selected_fields = []
-    try:
-        rows_result = await _bridge_call_recorded(session_id, "table_rows", {"name": "ВыбранныеПоля", "limit": 80}, timeout=10)
-        rows = rows_result.get("rows", []) if isinstance(rows_result, dict) else []
-        for row in rows:
-            row_pairs = _table_row_pairs(row)
-            field = _row_value(row_pairs, "Поле")
-            use = _row_value(row_pairs, "Использование")
-            if field and field != "Поля":
-                selected_fields.append((field, use))
-    except Exception as exc:
-        warnings.append(f"Universal report selected fields inspection failed: {exc}")
-    required = {"Полное имя", "Синоним"}
-    selected_names = {field for field, _use in selected_fields}
-    enabled_names = {field for field, use in selected_fields if _is_truthy_1c(use)}
-    missing = sorted(required - selected_names)
-    disabled = sorted(required - enabled_names)
-    if missing:
+async def _form_universal_report_metadata_source(session_id: str) -> list[str]:
+    warnings = [
+        "Universal report settings UI was not opened; using confirmed source and parser-side metadata filtering"
+    ]
+    form_result = await _dangerous_bridge_call_recorded(
+        session_id,
+        "click_button",
+        {"name": "СформироватьОтчет"},
+        timeout=180,
+        danger="metadata_objects_universal_report_form_may_block_thin_client",
+    )
+    if isinstance(form_result, dict) and form_result.get("started_long_action"):
         warnings.append(
-            "Universal report selected fields were not detected in selected-fields table;"
-            f" automatic modal add skipped: {', '.join(missing)}"
+            "Universal report form action is still running or blocked the interface;"
+            f" form_result={_truncate_value(form_result)}"
         )
-    if disabled:
-        warnings.append(
-            "Universal report selected fields are not enabled in UI settings;"
-            f" leaving report settings unchanged and relying on parse/post-filtering: {', '.join(disabled)}"
-        )
-    # Do not add report-level filters here.  On live BSP Universal Report forms
-    # the filter-add button can open the formula editor instead of the field
-    # chooser, leaving the tool in an unrelated modal form.  Correctness is
-    # enforced by the confirmed report source plus parser-side validation and
-    # metadata-row filtering; this keeps the user-visible report on the right
-    # catalog without risking another noisy/stuck UI mutation.
-    warnings.append("Universal report row filters were not mutated; using confirmed source and parser-side metadata filtering")
-    await _bridge_call_recorded(session_id, "click_button", {"name": "ЗакрытьИСформировать"}, timeout=35)
     return warnings
 
 
@@ -8364,30 +8333,10 @@ async def _metadata_rows_from_universal_report(
                     " refusing to read arbitrary current Universal report result"
                 ),
             ]
-        try:
-            settings_warnings = await _configure_universal_report_metadata_settings(session_id, query)
-            warnings.extend(settings_warnings)
-            settings_applied = True
-        except Exception as exc:
-            settings_applied = False
-            warnings.append(
-                "Universal report settings UI failed; falling back to report formation only"
-                f"; error={exc}"
-            )
-        if not settings_applied:
-            form_result = await _dangerous_bridge_call_recorded(
-                session_id,
-                "click_button",
-                {"name": "СформироватьОтчет"},
-                timeout=180,
-                danger="metadata_objects_universal_report_form_may_block_thin_client",
-            )
-            if isinstance(form_result, dict) and form_result.get("started_long_action"):
-                warnings.append(
-                    "Universal report form action is still running or blocked the interface;"
-                    f" form_result={_truncate_value(form_result)}"
-                )
-                return [], warnings
+        form_warnings = await _form_universal_report_metadata_source(session_id)
+        warnings.extend(form_warnings)
+        if any("form action is still running or blocked" in warning for warning in form_warnings):
+            return [], warnings
         ready, readiness_warnings, readiness = await _wait_tabular_document_ready(
             session_id,
             "ОтчетТабличныйДокумент",

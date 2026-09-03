@@ -21,13 +21,13 @@ from mcp_1c.server import (
     _configuration_from_sorted_first_row,
     _configure_session_scope,
     _configure_summary_rag_from_config_alias,
-    _configure_universal_report_metadata_settings,
     _convert_1c_guid_navigation_link,
     _decode_log_bytes,
     _effective_dump_connection,
     _ensure_restored_session,
     _extract_error_lines,
     _find_main_configuration_in_row_pairs,
+    _form_universal_report_metadata_source,
     _format_navigation_suggestions,
     _is_ignored_runtime_extension_name,
     _is_placeholder_password,
@@ -2767,42 +2767,33 @@ def test_metadata_objects_from_catalog_searches_cached_universal_report_snapshot
     assert second["source_method"] == "universal_report"
 
 
-def test_configure_universal_report_metadata_settings_filters_and_disables_extra_fields(monkeypatch):
+def test_form_universal_report_metadata_source_does_not_open_settings(monkeypatch):
+    from mcp_1c import server
+
     calls = []
 
-    async def fake_bridge_call(session_id, method, params, *, timeout=None):
+    async def fake_dangerous_bridge_call(session_id, method, params, *, timeout, danger):
         assert session_id == "unit"
-        calls.append((method, params, timeout))
-        if method == "table_rows" and params["name"] == "ВыбранныеПоля":
-            return {"rows": [
-                {"pairs": [{"key": "Поле", "value": "Авто"}, {"key": "Использование", "value": "Да"}]},
-                {"pairs": [{"key": "Поле", "value": "Синоним"}, {"key": "Использование", "value": "Да"}]},
-                {"pairs": [{"key": "Поле", "value": "Полное имя"}, {"key": "Использование", "value": "Да"}]},
-                {"pairs": [{"key": "Поле", "value": "Порядок коллекции"}, {"key": "Использование", "value": "Да"}]},
-            ]}
-        if method == "table_rows" and params["name"] == "Отборы":
-            return {"rows": []}
-        return {"ok": True}
+        calls.append((method, params, timeout, danger))
+        return {"pressed": True}
 
-    monkeypatch.setattr("mcp_1c.server._bridge_call_recorded", fake_bridge_call)
+    async def fail_bridge_call(*args, **kwargs):
+        raise AssertionError("metadata source forming must not open or inspect settings UI")
 
-    warnings = asyncio.run(_configure_universal_report_metadata_settings("unit", "Справочник.Номенклатура"))
+    monkeypatch.setattr(server, "_dangerous_bridge_call_recorded", fake_dangerous_bridge_call)
+    monkeypatch.setattr(server, "_bridge_call_recorded", fail_bridge_call)
+
+    warnings = asyncio.run(_form_universal_report_metadata_source("unit"))
 
     assert warnings == [
-        "Universal report row filters were not mutated; using confirmed source and parser-side metadata filtering"
+        "Universal report settings UI was not opened; using confirmed source and parser-side metadata filtering"
     ]
-    assert ("click_button", {"name": "ВсеНастройки"}, 30) in calls
-    assert not any(call[0] == "table_set_field" and call[1].get("table") == "ВыбранныеПоля" for call in calls)
-    assert not any(call == ("click_button", {"name": "ВыбранныеПоляВыбранныеПоля_СнятьФлажки"}, 20) for call in calls)
-    assert not any(call[0] == "table_set_field" and call[1].get("table") == "Отборы" for call in calls)
-    assert not any(call[0] == "table_goto_row" and call[1].get("name") == "Отборы" for call in calls)
-    assert not any(call == ("table_set_field", {
-        "table": "Отборы",
-        "field": "Значение",
-        "value": "Справочник.Номенклатура",
-        "search_by_title": True,
-    }, 15) for call in calls)
-    assert ("click_button", {"name": "ЗакрытьИСформировать"}, 35) in calls
+    assert calls == [(
+        "click_button",
+        {"name": "СформироватьОтчет"},
+        180,
+        "metadata_objects_universal_report_form_may_block_thin_client",
+    )]
 
 
 def test_table_goto_row_passes_occurrence_to_bridge(monkeypatch):
@@ -2893,15 +2884,15 @@ def test_metadata_universal_report_refuses_unconfirmed_source(monkeypatch):
             raise RuntimeError("quick setting is not available")
         raise AssertionError(method)
 
-    async def fail_configure(session_id, query=""):
-        calls.append(("_configure_universal_report_metadata_settings", {"query": query}, None))
-        raise AssertionError("full settings must not be used after source selection failed")
+    async def fail_form_source(session_id):
+        calls.append(("_form_universal_report_metadata_source", {}, None))
+        raise AssertionError("report must not be formed after source selection failed")
 
     async def fail_dangerous_bridge_call(*args, **kwargs):
         raise AssertionError("unconfirmed Universal report output must not be formed or saved")
 
     monkeypatch.setattr(server, "_bridge_call_recorded", fake_bridge_call)
-    monkeypatch.setattr(server, "_configure_universal_report_metadata_settings", fail_configure)
+    monkeypatch.setattr(server, "_form_universal_report_metadata_source", fail_form_source)
     monkeypatch.setattr(server, "_dangerous_bridge_call_recorded", fail_dangerous_bridge_call)
 
     rows, warnings = asyncio.run(server._metadata_rows_from_universal_report("unit", 10))
@@ -2909,7 +2900,7 @@ def test_metadata_universal_report_refuses_unconfirmed_source(monkeypatch):
     assert rows == []
     assert any(call[0] == "active_window" for call in calls)
     assert any("metadata source was not confirmed" in warning for warning in warnings)
-    assert not any(call[0] == "_configure_universal_report_metadata_settings" for call in calls)
+    assert not any(call[0] == "_form_universal_report_metadata_source" for call in calls)
 
 
 def test_metadata_universal_report_primary_path_configures_source_and_filters(monkeypatch):
@@ -2937,11 +2928,10 @@ def test_metadata_universal_report_primary_path_configures_source_and_filters(mo
             raise AssertionError("opened diagnostics already confirmed the source")
         return {"ok": True}
 
-    async def fake_configure(session_id, query=""):
+    async def fake_form_source(session_id):
         assert session_id == "unit"
-        assert query == ""
-        calls.append(("_configure_universal_report_metadata_settings", {"query": query}, None))
-        return ["settings applied"]
+        calls.append(("_form_universal_report_metadata_source", {}, None))
+        return ["report formed"]
 
     async def fake_ready(session_id, name, *, timeout_seconds=75.0, interval_seconds=3.0):
         assert session_id == "unit"
@@ -2951,8 +2941,6 @@ def test_metadata_universal_report_primary_path_configures_source_and_filters(mo
     async def fake_dangerous_bridge_call(session_id, method, params, *, timeout, danger):
         assert session_id == "unit"
         calls.append((method, params, timeout, danger))
-        if method == "click_button":
-            raise AssertionError("ЗакрытьИСформировать already formed the report")
         assert method == "tabular_document_save"
         assert params["name"] == "ОтчетТабличныйДокумент"
         assert params["format"] == "mxl"
@@ -2979,7 +2967,7 @@ def test_metadata_universal_report_primary_path_configures_source_and_filters(mo
     monkeypatch.setattr(server, "_bridge_call_recorded", fake_bridge_call)
     monkeypatch.setattr(server, "_dangerous_bridge_call_recorded", fake_dangerous_bridge_call)
     monkeypatch.setattr(server, "_select_saved_tabular_document_file", fake_select_saved_file)
-    monkeypatch.setattr(server, "_configure_universal_report_metadata_settings", fake_configure)
+    monkeypatch.setattr(server, "_form_universal_report_metadata_source", fake_form_source)
     monkeypatch.setattr(server, "_wait_tabular_document_ready", fake_ready)
     monkeypatch.setattr(server, "_metadata_catalog_rows_from_mxl", fake_rows_from_mxl)
     monkeypatch.setattr(server, "_metadata_catalog_rows_from_xlsx", fake_rows_from_xlsx)
@@ -2989,10 +2977,10 @@ def test_metadata_universal_report_primary_path_configures_source_and_filters(mo
 
     assert rows == [{"Полное имя": "Справочник.Номенклатура", "Синоним": "Номенклатура"}]
     assert any("source confirmed" in warning for warning in warnings)
-    assert "settings applied" in warnings
+    assert "report formed" in warnings
     assert any(call[0] == "tabular_document_save" and call[1].get("format") == "mxl" for call in calls)
     assert any("MXL became parseable" in warning for warning in warnings)
-    assert ("_configure_universal_report_metadata_settings", {"query": ""}, None) in calls
+    assert ("_form_universal_report_metadata_source", {}, None) in calls
     assert not any(call[0] == "click_button" and call[1].get("name") == "СформироватьОтчет" for call in calls)
 
 
