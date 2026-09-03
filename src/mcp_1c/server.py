@@ -8246,24 +8246,7 @@ def _universal_report_metadata_source_title_found(value: Any) -> bool:
     return False
 
 
-def _active_window_looks_like_startup_noise(value: Any) -> bool:
-    if not isinstance(value, dict):
-        return False
-    title = str(value.get("title") or "")
-    form_name = str(value.get("form_name") or "")
-    diagnostics = value.get("client_diagnostics") if isinstance(value.get("client_diagnostics"), dict) else {}
-    diagnostic_title = str(diagnostics.get("active_window_title") or diagnostics.get("modal_title") or "")
-    diagnostic_form = str(diagnostics.get("active_form_name") or diagnostics.get("modal_form_name") or "")
-    return (
-        title.startswith("Новое в версии")
-        or diagnostic_title.startswith("Новое в версии")
-        or "Справочник.Новости.Форма.ФормаНовости" in form_name
-        or "Справочник.Новости.Форма.ФормаНовости" in diagnostic_form
-    )
-
-
 async def _active_universal_report_window(session_id: str, warnings: list[str], *, timeout: int = 30) -> dict[str, Any]:
-    navigation_link = "e1cib/app/Отчет.УниверсальныйОтчет"
     deadline = time.monotonic() + max(timeout, 1)
     last: dict[str, Any] = {}
     while time.monotonic() < deadline:
@@ -8275,21 +8258,6 @@ async def _active_universal_report_window(session_id: str, warnings: list[str], 
                 form_name = str(active.get("form_name") or "")
                 if "Универсальный отчет" in title or form_name == "ОбщаяФорма.ФормаОтчета":
                     return active
-                if _active_window_looks_like_startup_noise(active):
-                    await _bridge_call_recorded(session_id, "close_form", {}, timeout=15)
-                    warnings.append("Startup/news form was closed before Universal report source selection")
-                    try:
-                        await _bridge_call_recorded(
-                            session_id,
-                            "open_navigation_link",
-                            {"navigation_link": navigation_link},
-                            timeout=20,
-                        )
-                        warnings.append("Universal report navigation was retried after closing startup/news form")
-                    except Exception as exc:
-                        warnings.append(f"Universal report navigation retry after startup/news form failed: {exc}")
-                    await asyncio.sleep(1)
-                    continue
         except Exception as exc:
             warnings.append(f"Universal report active-window wait probe failed: {exc}")
         await asyncio.sleep(1)
