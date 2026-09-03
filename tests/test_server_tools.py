@@ -27,6 +27,7 @@ from mcp_1c.server import (
     _ensure_restored_session,
     _extract_error_lines,
     _find_main_configuration_in_row_pairs,
+    _float_env,
     _form_universal_report_metadata_source,
     _format_navigation_suggestions,
     _is_ignored_runtime_extension_name,
@@ -702,6 +703,23 @@ def test_command_diagnostic_timings_are_opt_in(monkeypatch):
         ("unit", "command_interface_search", {"query": "Номенклатура", "section": "", "max_results": 20, "window_title": ""}, None),
         ("unit", "command_interface_search", {"query": "Номенклатура", "section": "", "max_results": 20, "window_title": ""}, None),
     ]
+
+
+def test_start_session_timeout_env_defaults_and_overrides(monkeypatch):
+    monkeypatch.delenv("ONEC_MCP_START_SESSION_TIMEOUT", raising=False)
+    monkeypatch.delenv("ONEC_MCP_START_SESSION_BRIDGE_CONNECT_TIMEOUT", raising=False)
+    monkeypatch.delenv("ONEC_MCP_BRIDGE_CONNECT_TIMEOUT", raising=False)
+    assert _float_env("ONEC_MCP_START_SESSION_TIMEOUT", 99.0) == 99.0
+    assert _float_env(("ONEC_MCP_START_SESSION_BRIDGE_CONNECT_TIMEOUT", "ONEC_MCP_BRIDGE_CONNECT_TIMEOUT"), 99.0) == 99.0
+
+    monkeypatch.setenv("ONEC_MCP_START_SESSION_TIMEOUT", "88.5")
+    assert _float_env("ONEC_MCP_START_SESSION_TIMEOUT", 99.0) == 88.5
+
+    monkeypatch.setenv("ONEC_MCP_BRIDGE_CONNECT_TIMEOUT", "77")
+    assert _float_env(("ONEC_MCP_START_SESSION_BRIDGE_CONNECT_TIMEOUT", "ONEC_MCP_BRIDGE_CONNECT_TIMEOUT"), 99.0) == 77.0
+
+    monkeypatch.setenv("ONEC_MCP_START_SESSION_BRIDGE_CONNECT_TIMEOUT", "66")
+    assert _float_env(("ONEC_MCP_START_SESSION_BRIDGE_CONNECT_TIMEOUT", "ONEC_MCP_BRIDGE_CONNECT_TIMEOUT"), 99.0) == 66.0
 
 
 def test_start_session_test_client_result_is_compact_and_timings_opt_in():

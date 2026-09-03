@@ -80,6 +80,36 @@ FORM_HINTS_LOCK = os_support.runtime_path("ONEC_MCP_FORM_HINTS_LOCK", "form-hint
 UI_TREE_RESOURCE_AUTO_THRESHOLD_TOKENS = int(os.getenv("ONEC_MCP_UI_TREE_RESOURCE_AUTO_THRESHOLD_TOKENS", "50000"))
 UI_TREE_RESOURCE_AUTO_THRESHOLD_BYTES = int(os.getenv("ONEC_MCP_UI_TREE_RESOURCE_AUTO_THRESHOLD_BYTES", "0"))  # deprecated fallback; 0 disables
 NOTIFY_TOOLS_CHANGED_ON_STARTUP = os.getenv("ONEC_MCP_NOTIFY_TOOLS_CHANGED_ON_STARTUP", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _float_env(names: str | tuple[str, ...], default: float) -> float:
+    env_names = (names,) if isinstance(names, str) else names
+    for name in env_names:
+        raw = os.getenv(name)
+        if raw is None or raw.strip() == "":
+            continue
+        try:
+            return float(raw)
+        except ValueError:
+            logging.warning("Ignoring invalid float value for %s=%r; trying fallback/default", name, raw)
+    return default
+
+
+START_SESSION_TIMEOUT = _float_env("ONEC_MCP_START_SESSION_TIMEOUT", 99.0)
+START_SESSION_BRIDGE_CONNECT_TIMEOUT = _float_env(
+    (
+        "ONEC_MCP_START_SESSION_BRIDGE_CONNECT_TIMEOUT",
+        "ONEC_MCP_BRIDGE_CONNECT_TIMEOUT",
+    ),
+    START_SESSION_TIMEOUT,
+)
+START_SESSION_TEST_CLIENT_READY_TIMEOUT = _float_env(
+    (
+        "ONEC_MCP_START_SESSION_TEST_CLIENT_READY_TIMEOUT",
+        "ONEC_MCP_TEST_CLIENT_READY_TIMEOUT",
+    ),
+    START_SESSION_TIMEOUT,
+)
 TOOLS_CHANGED_STARTUP_DELAYS = tuple(
     float(part)
     for part in re.split(r"[,;\s]+", os.getenv("ONEC_MCP_TOOLS_CHANGED_STARTUP_DELAYS", "1,3,10,30").strip())
@@ -1435,7 +1465,7 @@ async def _reconnect_persisted_session(sess: SessionState) -> bool:
             )
         rt.manager_process = manager_proc
         sess.manager_pid = manager_proc.pid
-        await _wait_for_bridge_connected(sess, timeout=60.0)
+        await _wait_for_bridge_connected(sess, timeout=START_SESSION_BRIDGE_CONNECT_TIMEOUT)
         params = {
             "base_url": sess.base_url,
             "username": sess.username,
@@ -4633,7 +4663,7 @@ async def start_session(
             )
         runtime_state.manager_process = manager_proc
         sess.manager_pid = manager_proc.pid
-        await _wait_for_bridge_connected(sess, timeout=60.0)
+        await _wait_for_bridge_connected(sess, timeout=START_SESSION_BRIDGE_CONNECT_TIMEOUT)
         mark_stage("start_manager_and_wait_bridge")
     except Exception as exc:
         diagnostic_error = _manager_failure_diagnostics(sess, exc)
@@ -5412,7 +5442,7 @@ async def _connect_test_client_impl(
         timings[f"{name}_seconds"] = round(now - stage_monotonic, 3)
         stage_monotonic = now
 
-    await _wait_for_bridge_connected(sess, timeout=60.0)
+    await _wait_for_bridge_connected(sess, timeout=START_SESSION_BRIDGE_CONNECT_TIMEOUT)
     manager_info = await _verify_manager_protocol(sess)
     mark_stage("verify_manager_protocol")
     r_base = _platform.normalize_infobase_url(base_url or sess.base_url)
@@ -5553,8 +5583,7 @@ async def _connect_test_client_impl(
     _touch_session(sess)
     monitor_task: asyncio.Task[int | None] | None = None
     try:
-        wait_timeout = float(os.getenv("ONEC_MCP_TEST_CLIENT_READY_TIMEOUT", "55"))
-        await _wait_for_test_client_ready(sess, host, r_port, timeout=wait_timeout)
+        await _wait_for_test_client_ready(sess, host, r_port, timeout=START_SESSION_TEST_CLIENT_READY_TIMEOUT)
         mark_stage("wait_test_client_port")
         if sess.test_client_process is not None:
             monitor_task = asyncio.create_task(_wait_for_test_client_process_exit(sess.test_client_process))
