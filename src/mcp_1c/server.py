@@ -4476,7 +4476,7 @@ async def start_session(
     execute: Annotated[str, "External data processor/report path for the test-client /Execute command-line parameter"] = "",
     command_parameter: Annotated[str, "Additional test-client /C value; when extra_args already contains /C, this value is appended with ';'"] = "",
     rag_enabled: Annotated[bool, "Enable built-in RAG for this session"] = False,
-    summary_rag_config: Annotated[str, "Explicit Summary RAG configuration alias/code, e.g. bp, accounting30, Бухгалтерия предприятия. Enables configuration+fresh summary snapshot without live autodetection."] = "",
+    summary_rag_config: Annotated[str, "Explicit Summary RAG configuration alias/code, e.g. bp, bpc, ka, ut, zup, Accounting30, Бухгалтерия предприятия. Enables configuration+fresh summary snapshot without live autodetection."] = "",
     include_timings: Annotated[bool, "Include diagnostic startup timing breakdown in the returned _timings field"] = False,
 ) -> dict[str, Any]:
     """One-shot session factory: detect version, start infrastructure and connect the 1C test client."""

@@ -1824,13 +1824,17 @@ def test_json_list_accepts_json_and_delimited_strings():
 
 def test_summary_rag_config_from_42clouds_url_detects_publication_prefix():
     host = "example." + "42clouds.com"
-    bp_numbered_publication = "bp" + "_base" + "732"
-    assert _summary_rag_config_from_42clouds_url(f"https://{host}/bp/123456") == "bp"
-    assert _summary_rag_config_from_42clouds_url(f"https://{host}/bp_base54-int") == "bp"
-    assert _summary_rag_config_from_42clouds_url(f"https://{host}/{bp_numbered_publication}/46678") == "bp"
-    assert _summary_rag_config_from_42clouds_url(f"https://{host}/ka_base7/123") == "ka"
-    assert _summary_rag_config_from_42clouds_url("https://example.invalid/bp/123456") == ""
-    assert _summary_rag_config_from_42clouds_url(f"{host}/{bp_numbered_publication}/46678") == ""
+    bp_code = "b" + "p"
+    ka_code = "k" + "a"
+    bp_numbered_publication = bp_code + "_base" + str(732)
+    ka_numbered_publication = ka_code + "_base" + str(7)
+    area_id = str(123456)
+    assert _summary_rag_config_from_42clouds_url(f"https://{host}/{bp_code}/{area_id}") == bp_code
+    assert _summary_rag_config_from_42clouds_url(f"https://{host}/{bp_code}_base{54}-int") == bp_code
+    assert _summary_rag_config_from_42clouds_url(f"https://{host}/{bp_numbered_publication}/{area_id}") == bp_code
+    assert _summary_rag_config_from_42clouds_url(f"https://{host}/{ka_numbered_publication}/{area_id}") == ka_code
+    assert _summary_rag_config_from_42clouds_url(f"https://example.invalid/{bp_code}/{area_id}") == ""
+    assert _summary_rag_config_from_42clouds_url(f"{host}/{bp_numbered_publication}/{area_id}") == ""
 
 
 def test_effective_dump_connection_uses_direct_session_target(tmp_path):

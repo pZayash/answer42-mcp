@@ -198,8 +198,11 @@ machine-readable code and remediation message for the agent.
 `start_session()` defaults to `rag_enabled=false` so ordinary sessions do not pay
 for live configuration registry reads. To bind a summary snapshot explicitly,
 pass `summary_rag_config`, for example `summary_rag_config="bp"`. Supported
-aliases include `bp`, `accounting30` and `Бухгалтерия предприятия`; Answer42
-creates a `configuration+fresh` summary snapshot without live autodetection and
+aliases include summary repository codes (`bp`, `bpc`, `ka`, `ut`, `zup`, etc.),
+1C identifiers (`Accounting30`, `AccountingCorp30`, `ARAutomation20`, etc.) and
+common Russian names such as `Бухгалтерия предприятия`, `Комплексная автоматизация`,
+`Управление торговлей` and `Зарплата и управление персоналом`; Answer42 creates a
+`configuration+fresh` summary snapshot without live autodetection and
 returns `rag_notice`. Successful explicit binding reports
 `rag_notice.enabled=true`, `backend="configuration-summary"`, the selected
 snapshot, layers and `summary_backend` transport/project/ref. If the summary

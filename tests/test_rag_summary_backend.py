@@ -4,7 +4,11 @@ import json
 from pathlib import Path
 
 from mcp_1c.rag import RagService
-from mcp_1c.rag.summary_backend import ConfigurationSummaryBackend, metadata_object_row_from_chunk
+from mcp_1c.rag.summary_backend import (
+    ConfigurationSummaryBackend,
+    _config_candidates,
+    metadata_object_row_from_chunk,
+)
 
 
 def _write_jsonl(path: Path, rows: list[dict]) -> None:
@@ -82,6 +86,28 @@ def _fixture_summary(root: Path) -> Path:
     )
     return root
 
+
+
+
+def test_summary_backend_config_aliases_cover_summary_repository_codes():
+    expected_aliases = {
+        "AccountingNPO": "bnko",
+        "Accounting30": "bp",
+        "AccountingBase30": "bpb",
+        "AccountingCorp30": "bpc",
+        "AccountingKz30": "bpkz",
+        "ARAutomation20": "ka",
+        "Retail23": "rt",
+        "Retail30": "rtl",
+        "SmallBusiness30": "unf",
+        "SmallBusinessKz3": "unfkz",
+        "Trade110": "ut",
+        "HRM30": "zup",
+    }
+    for alias, code in expected_aliases.items():
+        assert _config_candidates(alias)[0] == code
+    assert _config_candidates("Бухгалтерия предприятия КОРП")[0] == "bpc"
+    assert _config_candidates("Управление нашей фирмой для Казахстана")[0] == "unfkz"
 
 def test_summary_backend_lookup_object(monkeypatch, tmp_path: Path):
     root = _fixture_summary(tmp_path / "summary")
