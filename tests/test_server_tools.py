@@ -2788,36 +2788,14 @@ def test_configure_universal_report_metadata_settings_filters_and_disables_extra
 
     warnings = asyncio.run(_configure_universal_report_metadata_settings("unit", "Справочник.Номенклатура"))
 
-    assert warnings == []
+    assert warnings == [
+        "Universal report row filters were not mutated; using confirmed source and parser-side metadata filtering"
+    ]
     assert ("click_button", {"name": "ВсеНастройки"}, 30) in calls
     assert not any(call[0] == "table_set_field" and call[1].get("table") == "ВыбранныеПоля" for call in calls)
     assert not any(call == ("click_button", {"name": "ВыбранныеПоляВыбранныеПоля_СнятьФлажки"}, 20) for call in calls)
-    assert any(call == ("table_set_field", {
-        "table": "Отборы",
-        "field": "Значение",
-        "value": "Нет",
-        "search_by_title": True,
-    }, 15) for call in calls)
-    assert any(call == ("table_set_field", {
-        "table": "Отборы",
-        "field": "Условие",
-        "value": "Не начинается с",
-        "search_by_title": True,
-    }, 15) for call in calls)
-    assert any(call == ("table_set_field", {
-        "table": "Отборы",
-        "field": "Значение",
-        "value": "Роль.",
-        "search_by_title": True,
-    }, 15) for call in calls)
-    assert any(call == ("table_set_field", {
-        "table": "Отборы",
-        "field": "Значение",
-        "value": "Подсистема.",
-        "search_by_title": True,
-    }, 15) for call in calls)
-    assert ("table_goto_row", {"name": "Отборы", "text": "Полное имя", "limit": 50, "occurrence": 1}, 10) in calls
-    assert ("table_goto_row", {"name": "Отборы", "text": "Полное имя", "limit": 50, "occurrence": 2}, 10) in calls
+    assert not any(call[0] == "table_set_field" and call[1].get("table") == "Отборы" for call in calls)
+    assert not any(call[0] == "table_goto_row" and call[1].get("name") == "Отборы" for call in calls)
     assert not any(call == ("table_set_field", {
         "table": "Отборы",
         "field": "Значение",
@@ -3106,8 +3084,8 @@ def test_metadata_universal_report_quick_settings_try_labels_in_order(monkeypatc
 
     assert result is True
     assert calls == [
-        ("field_info", {"field_name": "Тип объекта", "search_by_title": True}, 10),
-        ("set_field_value", {"field_name": "КомпоновщикНастроекПользовательскиеНастройкиЭлемент0Значение", "value": "Справочники"}, 15),
+        ("field_info", {"field_name": "Тип объекта", "search_by_title": True}, 30),
+        ("set_field_value", {"field_name": "КомпоновщикНастроекПользовательскиеНастройкиЭлемент0Значение", "value": "Справочники"}, 75),
     ]
     assert warnings == []
 
@@ -3144,8 +3122,54 @@ def test_metadata_universal_report_quick_settings_keep_warnings_local_until_all_
     assert result is True
     assert warnings == []
     assert calls == [
-        ("field_info", {"field_name": "Объект", "search_by_title": True}, 10),
-        ("field_info", {"field_name": "Имя объекта", "search_by_title": True}, 10),
+        ("field_info", {"field_name": "Объект", "search_by_title": True}, 30),
+        ("field_info", {"field_name": "Имя объекта", "search_by_title": True}, 30),
+    ]
+
+
+def test_metadata_universal_report_quick_settings_skip_object_family_field(monkeypatch):
+    from mcp_1c import server
+
+    calls = []
+
+    async def fake_bridge_call(session_id, method, params, *, timeout=None):
+        assert session_id == "unit"
+        calls.append((method, params, timeout))
+        if method == "field_info":
+            if params["field_name"] == "Объект":
+                return {
+                    "found": True,
+                    "name": "КомпоновщикНастроекПользовательскиеНастройкиЭлемент0Значение",
+                    "data_text": "Справочники",
+                }
+            if params["field_name"] == "Имя объекта":
+                return {
+                    "found": True,
+                    "name": "КомпоновщикНастроекПользовательскиеНастройкиЭлемент1Значение",
+                    "data_text": "Банки",
+                }
+        if method == "set_field_value":
+            assert params["field_name"] == "КомпоновщикНастроекПользовательскиеНастройкиЭлемент1Значение"
+            assert params["value"] == "Идентификаторы объектов метаданных"
+            return {"ok": True}
+        raise AssertionError(method)
+
+    monkeypatch.setattr(server, "_bridge_call_recorded", fake_bridge_call)
+    warnings = []
+
+    result = asyncio.run(server._set_universal_report_quick_setting_by_titles(
+        "unit",
+        ["Объект", "Имя объекта"],
+        "Идентификаторы объектов метаданных",
+        warnings,
+    ))
+
+    assert result is True
+    assert warnings == []
+    assert calls == [
+        ("field_info", {"field_name": "Объект", "search_by_title": True}, 30),
+        ("field_info", {"field_name": "Имя объекта", "search_by_title": True}, 30),
+        ("set_field_value", {"field_name": "КомпоновщикНастроекПользовательскиеНастройкиЭлемент1Значение", "value": "Идентификаторы объектов метаданных"}, 75),
     ]
 
 

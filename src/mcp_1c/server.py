@@ -8139,22 +8139,38 @@ async def _set_universal_report_quick_setting_by_titles(
     warnings: list[str],
 ) -> bool:
     local_warnings: list[str] = []
+    value_norm = _normalize_match_text(value)
     for title in titles:
         try:
             info = await _bridge_call_recorded(session_id, "field_info", {
                 "field_name": title,
                 "search_by_title": True,
-            }, timeout=10)
+            }, timeout=30)
             if not isinstance(info, dict) or not info.get("found"):
                 raise RuntimeError(f"Поле не найдено по заголовку: {title}")
             current = str(info.get("data_text") or "").strip()
-            if current == value or (value and value in current):
+            current_norm = _normalize_match_text(current)
+            if current == value or (value_norm and value_norm in current_norm):
                 return True
+            # On some BSP report forms title lookup for "Объект" can match the
+            # previous quick-setting row (for example the object-family field
+            # currently containing "Справочники").  Do not overwrite such a row
+            # with a catalog object name; try the next candidate title instead.
+            if value_norm and "идентификаторыобъектовметаданных" in value_norm and current_norm in {
+                "справочники",
+                "справочник",
+                "каталоги",
+            }:
+                local_warnings.append(
+                    f"Universal report quick setting {title!r} looked like object-family field"
+                    f" (current={current!r}); trying next title"
+                )
+                continue
             field_name = str(info.get("name") or title)
             await _bridge_call_recorded(session_id, "set_field_value", {
                 "field_name": field_name,
                 "value": value,
-            }, timeout=15)
+            }, timeout=75)
             return True
         except Exception as exc:
             local_warnings.append(f"Universal report quick setting {title!r} was not set by title: {exc}")
@@ -8201,11 +8217,13 @@ async def _configure_universal_report_metadata_settings(session_id: str, query: 
             "Universal report selected fields are not enabled in UI settings;"
             f" leaving report settings unchanged and relying on parse/post-filtering: {', '.join(disabled)}"
         )
-    filter_occurrences: dict[str, int] = {}
-    for spec in _metadata_universal_report_filter_specs():
-        field = spec.get("field", "")
-        filter_occurrences[field] = filter_occurrences.get(field, 0) + 1
-        await _add_universal_report_filter(session_id, spec, warnings, filter_occurrences[field])
+    # Do not add report-level filters here.  On live BSP Universal Report forms
+    # the filter-add button can open the formula editor instead of the field
+    # chooser, leaving the tool in an unrelated modal form.  Correctness is
+    # enforced by the confirmed report source plus parser-side validation and
+    # metadata-row filtering; this keeps the user-visible report on the right
+    # catalog without risking another noisy/stuck UI mutation.
+    warnings.append("Universal report row filters were not mutated; using confirmed source and parser-side metadata filtering")
     await _bridge_call_recorded(session_id, "click_button", {"name": "ЗакрытьИСформировать"}, timeout=35)
     return warnings
 
@@ -8228,12 +8246,62 @@ def _universal_report_metadata_source_title_found(value: Any) -> bool:
     return False
 
 
+def _active_window_looks_like_startup_noise(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    title = str(value.get("title") or "")
+    form_name = str(value.get("form_name") or "")
+    diagnostics = value.get("client_diagnostics") if isinstance(value.get("client_diagnostics"), dict) else {}
+    diagnostic_title = str(diagnostics.get("active_window_title") or diagnostics.get("modal_title") or "")
+    diagnostic_form = str(diagnostics.get("active_form_name") or diagnostics.get("modal_form_name") or "")
+    return (
+        title.startswith("Новое в версии")
+        or diagnostic_title.startswith("Новое в версии")
+        or "Справочник.Новости.Форма.ФормаНовости" in form_name
+        or "Справочник.Новости.Форма.ФормаНовости" in diagnostic_form
+    )
+
+
+async def _active_universal_report_window(session_id: str, warnings: list[str], *, timeout: int = 30) -> dict[str, Any]:
+    navigation_link = "e1cib/app/Отчет.УниверсальныйОтчет"
+    deadline = time.monotonic() + max(timeout, 1)
+    last: dict[str, Any] = {}
+    while time.monotonic() < deadline:
+        try:
+            active = await _bridge_call_recorded(session_id, "active_window", {}, timeout=8)
+            if isinstance(active, dict):
+                last = active
+                title = str(active.get("title") or "")
+                form_name = str(active.get("form_name") or "")
+                if "Универсальный отчет" in title or form_name == "ОбщаяФорма.ФормаОтчета":
+                    return active
+                if _active_window_looks_like_startup_noise(active):
+                    await _bridge_call_recorded(session_id, "close_form", {}, timeout=15)
+                    warnings.append("Startup/news form was closed before Universal report source selection")
+                    try:
+                        await _bridge_call_recorded(
+                            session_id,
+                            "open_navigation_link",
+                            {"navigation_link": navigation_link},
+                            timeout=20,
+                        )
+                        warnings.append("Universal report navigation was retried after closing startup/news form")
+                    except Exception as exc:
+                        warnings.append(f"Universal report navigation retry after startup/news form failed: {exc}")
+                    await asyncio.sleep(1)
+                    continue
+        except Exception as exc:
+            warnings.append(f"Universal report active-window wait probe failed: {exc}")
+        await asyncio.sleep(1)
+    return last
+
+
 async def _ensure_universal_report_metadata_source(session_id: str, warnings: list[str], open_result: Any) -> bool:
     if _universal_report_metadata_source_title_found(open_result):
         warnings.append("Universal report metadata-identifiers source confirmed by opened form title")
         return True
     try:
-        active = await _bridge_call_recorded(session_id, "active_window", {}, timeout=8)
+        active = await _active_universal_report_window(session_id, warnings)
         if _universal_report_metadata_source_title_found(active):
             warnings.append("Universal report metadata-identifiers source confirmed by active window title")
             return True
@@ -8267,7 +8335,17 @@ async def _ensure_universal_report_metadata_source(session_id: str, warnings: li
         )
     if source_ok:
         warnings.append("Universal report quick settings were used to select metadata-identifiers source")
-    return source_ok
+        try:
+            active = await _active_universal_report_window(session_id, warnings, timeout=20)
+            if _universal_report_metadata_source_title_found(active):
+                warnings.append("Universal report metadata-identifiers source confirmed after quick settings")
+                return True
+            warnings.append(
+                "Universal report quick settings completed but metadata-identifiers source was not confirmed"
+            )
+        except Exception as exc:
+            warnings.append(f"Universal report source confirmation after quick settings failed: {exc}")
+    return False
 
 
 def _metadata_report_rows_look_like_identifiers(rows: list[dict[str, str]]) -> bool:
