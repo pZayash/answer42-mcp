@@ -1,6 +1,6 @@
 [project]
 name = "answer42"
-version = "0.4.78"
+version = "0.4.79"
 description = "Answer42 — The Answer to Life, Universe, and 1C — UI Driver. MCP-powered 1C:Enterprise UI automation: click, fill, navigate, test, and introspect managed forms through the test-client API"
 readme = "README.md"
 requires-python = ">=3.11"
