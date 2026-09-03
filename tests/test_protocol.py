@@ -910,6 +910,8 @@ def test_command_interface_search_closes_help_panel_after_cleanup():
     help_window = _bsl_function_body(module, "ЭтоОкноПомощиКомандногоИнтерфейсаMCP")
     service_section = _bsl_function_body(module, "КомандныйИнтерфейсСлужебныйРазделMCP")
 
+    all_sections = _bsl_function_body(module, "КомандыВсехРазделовКомандногоИнтерфейса")
+
     assert "Процедура ЗакрытьКомандныйИнтерфейсПослеРаботыMCP" in module
     assert "Процедура ЗакрытьПанелиПомощиПослеКомандногоИнтерфейсаMCP" in module
     assert "ЗакрытьПанелиПомощиПослеКомандногоИнтерфейсаMCP(Окно)" in module
@@ -918,3 +920,5 @@ def test_command_interface_search_closes_help_panel_after_cleanup():
     assert "ТекущееОкно.Закрыть();" in module
     assert 'СтрНайти(ЗаголовокОкна, "помощ") > 0' in help_window
     assert 'Заголовок = "помощь" Или Заголовок = "help"' in service_section
+    assert "КнопкаРаздела.Нажать();" in all_sections
+    assert all_sections.count("КнопкаРаздела.Нажать();") >= 3
