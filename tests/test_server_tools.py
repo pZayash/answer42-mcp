@@ -2871,7 +2871,7 @@ def test_load_metadata_objects_builds_full_cache_from_universal_report(monkeypat
 
     async def fake_universal_report(session_id, limit, *, query="", target_matches=0):
         assert session_id == "unit"
-        assert limit == 10
+        assert limit == 0
         assert query == ""
         assert target_matches == 0
         return [
@@ -2945,7 +2945,7 @@ def test_metadata_objects_from_catalog_searches_cached_universal_report_snapshot
         session_id="unit",
     ))
 
-    assert calls == [("unit", 10, "", 0)]
+    assert calls == [("unit", 0, "", 0)]
     assert first["cache_hit"] is False
     assert first["found"] is True
     assert [item["full_name"] for item in first["objects"]] == ["Справочник.Номенклатура"]
@@ -3349,7 +3349,7 @@ def test_metadata_universal_report_quick_settings_skip_object_family_field(monke
     ]
 
 
-def test_load_metadata_objects_uses_requested_limit_for_saved_report(monkeypatch):
+def test_load_metadata_objects_reads_full_saved_report_independent_of_requested_limit(monkeypatch):
     from mcp_1c import server
 
     calls = []
@@ -3364,7 +3364,7 @@ def test_load_metadata_objects_uses_requested_limit_for_saved_report(monkeypatch
 
     result = asyncio.run(server._load_metadata_objects_from_catalog("unit", 10000, query="Номенклатура", max_results=20))
 
-    assert calls == [("unit", 10000, "", 0)]
+    assert calls == [("unit", 0, "", 0)]
     assert result["requested_limit"] == 10000
     assert result["effective_limit"] == 10000
     assert result["limit"] == 10000

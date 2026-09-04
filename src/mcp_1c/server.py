@@ -8491,7 +8491,7 @@ async def _metadata_rows_from_universal_report(
                     "Universal report MXL became parseable"
                     f"; rows={readiness.get('rows')}; columns={readiness.get('columns')}; path={last_saved_path}"
                 )
-                return rows[:max_rows], warnings
+                return rows if max_rows <= 0 else rows[:max_rows], warnings
 
         report_path = _runtime_output_file("metadata_objects", session_id, ".xlsx")
         try:
@@ -8541,7 +8541,7 @@ async def _metadata_rows_from_universal_report(
                 "Universal report XLSX became parseable"
                 f"; rows={readiness.get('rows')}; columns={readiness.get('columns')}; path={last_saved_path}"
             )
-        return rows[:max_rows], warnings
+        return rows if max_rows <= 0 else rows[:max_rows], warnings
     except Exception as exc:
         return [], [f"Universal report metadata read failed: {exc}"]
 
@@ -9006,7 +9006,7 @@ async def _load_metadata_objects_from_catalog(session_id: str, limit: int, query
     del query, max_results
     navigation_link = "e1cib/app/Отчет.УниверсальныйОтчет"
     requested_limit = max(1, int(limit or 1))
-    parsed_rows, warnings = await _metadata_rows_from_universal_report(session_id, requested_limit)
+    parsed_rows, warnings = await _metadata_rows_from_universal_report(session_id, 0)
     if not parsed_rows:
         warnings.append("Universal report returned no metadata rows for cache build")
     data = _metadata_catalog_data_from_rows(
@@ -9076,7 +9076,7 @@ async def _metadata_objects_from_catalog_impl(
 @mcp.tool()
 async def metadata_objects_from_catalog(
     query: Annotated[str, "Substring to search in presentation, full name, type, name or synonym"] = "",
-    limit: Annotated[int, "Maximum rows to parse from the saved Universal report when cache is refreshed"] = 10000,
+    limit: Annotated[int, "Deprecated compatibility parameter; cache refresh always reads the full saved Universal report. Use max_results to limit returned matches"] = 10000,
     max_results: Annotated[int, "Maximum matched objects to return"] = 200,
     refresh_cache: Annotated[bool, "Force rebuilding the Universal report snapshot instead of using the session cache"] = False,
     include_groups: Annotated[bool, "Include hierarchy group rows in results"] = False,
