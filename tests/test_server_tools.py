@@ -1078,7 +1078,7 @@ def test_metadata_catalog_rows_from_mxl(tmp_path):
     }]
 
 
-def test_metadata_catalog_rows_from_mxl_strips_missing_markers_and_excludes_service_types(tmp_path):
+def test_metadata_catalog_rows_from_mxl_excludes_delete_mark_markers(tmp_path):
     from mcp_1c.server import _metadata_catalog_data_from_rows, _metadata_catalog_rows_from_mxl
 
     mxl = tmp_path / "metadata_missing_markers.mxl"
@@ -1109,15 +1109,13 @@ def test_metadata_catalog_rows_from_mxl_strips_missing_markers_and_excludes_serv
     warnings: list[str] = []
     data = _metadata_catalog_data_from_rows(rows, warnings, navigation_link="x", source_method="mxl", limit=100)
 
-    assert rows[0]["Полное имя"] == "Константа.ВыполняетсяЗагрузкаДанныхРИБ"
-    assert rows[0]["Синоним"] == "? Выполняется загрузка данных РИБ"
-    assert data["type_counts"]["Константа"] == 1
-    assert not any(item["full_name"].startswith("?") for item in data["objects"])
-    assert not any(item["type"].startswith("?") for item in data["objects"])
-    assert not any(item["type"] == "Подсистема" for item in data["objects"])
+    assert rows[0]["Полное имя"] == "? Константа.ВыполняетсяЗагрузкаДанныхРИБ"
+    assert rows[0]["Идентификатор объекта метаданных"] == "? Константа.ВыполняетсяЗагрузкаДанныхРИБ"
+    assert data["type_counts"] == {"Справочник": 1}
+    assert data["objects"] == [_metadata_objects_catalog_self_entry()]
 
 
-def test_metadata_object_from_row_strips_missing_markers():
+def test_metadata_object_from_row_preserves_delete_mark_markers_for_filtering():
     item = _metadata_object_from_row({
         "Идентификатор объекта метаданных": "? Константа.TestFlag",
         "Полное имя": "? Константа.TestFlag",
@@ -1125,11 +1123,11 @@ def test_metadata_object_from_row_strips_missing_markers():
     })
 
     assert item == {
-        "presentation": "Константа.TestFlag",
-        "full_name": "Константа.TestFlag",
-        "type": "Константа",
+        "presentation": "? Константа.TestFlag",
+        "full_name": "? Константа.TestFlag",
+        "type": "? Константа",
         "name": "TestFlag",
-        "synonym": "Test flag",
+        "synonym": "? Test flag",
         "is_group": "Нет",
     }
 
