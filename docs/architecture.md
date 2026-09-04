@@ -233,7 +233,7 @@ large remote infobases.
 | `ONEC_MCP_WS_HOST` | WebSocket host | `127.0.0.1` |
 | `ONEC_MCP_WS_PORT` | WebSocket port | `8765` |
 | `ONEC_MCP_REQUEST_TIMEOUT` | Таймаут запроса, сек | `60` |
-| `ONEC_MCP_DATA_DIR` | Рабочая директория | `/tmp/answer42` |
+| `ONEC_MCP_DATA_DIR` | Рабочая директория | OS tempdir + `answer42` (`/tmp/answer42` on Linux, `%TEMP%\answer42` on Windows) |
 | `MCP_1C_RAG_DB` | Путь к RAG SQLite | `build/rag/onec-rag.sqlite` |
 | `ONEC_MCP_DISABLE_RAG` | Отключить встроенный RAG (`1/true/yes/on`) | пусто |
 | `ONEC_MCP_RAG_SOURCE_DIRS` | `:`/`;`-separated directories for startup RAG discovery/watch | пусто |

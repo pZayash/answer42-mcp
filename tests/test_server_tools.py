@@ -46,6 +46,7 @@ from mcp_1c.server import (
     _rag_diagnostic,
     _reap_global_orphan_sessions,
     _register_dev_tools,
+    _runtime_output_file,
     _state_file_for_scope,
     _summary_rag_config_from_42clouds_url,
     _table_row_pairs,
@@ -326,6 +327,42 @@ def test_global_registry_reaper_kills_expired_orphan(monkeypatch, tmp_path):
     assert killed == [111, 222, 333]
     assert data["sessions"] == {}
 
+
+
+
+def test_runtime_output_file_uses_configured_data_dir_and_creates_parent(monkeypatch, tmp_path):
+    from mcp_1c import server
+
+    monkeypatch.setattr(server.os_support, "default_data_dir", lambda: tmp_path / "answer42-data")
+
+    path = _runtime_output_file("metadata objects", "session:/bad\\id", "mxl")
+
+    assert path.parent == tmp_path / "answer42-data" / "exports"
+    assert path.parent.is_dir()
+    assert path.suffix == ".mxl"
+    assert path.name.startswith("metadata-objects_session-bad-id_")
+
+
+def test_server_code_does_not_hardcode_posix_answer42_tmp_path():
+    source = Path("src/mcp_1c/server.py").read_text(encoding="utf-8")
+
+    assert 'Path("/tmp/answer42")' not in source
+    assert "Path('/tmp/answer42')" not in source
+    assert '"/tmp/answer42"' not in source
+
+
+
+def test_rag_dump_does_not_probe_x11_display_on_windows(monkeypatch):
+    from mcp_1c.rag import dump
+
+    monkeypatch.setattr(dump.os_support, "IS_WINDOWS", True)
+    monkeypatch.setattr(
+        dump._platform,
+        "find_free_display",
+        lambda _start: (_ for _ in ()).throw(AssertionError("X11 display probing must not run on Windows")),
+    )
+
+    assert dump._find_free_display() == ""
 
 
 def test_pid_is_running_returns_false_for_unexpected_oserror(monkeypatch):

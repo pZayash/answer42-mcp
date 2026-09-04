@@ -31,6 +31,8 @@ def _run_designer(argv: list[str], *, timeout: float = 600, display: str = "") -
 
 
 def _find_free_display() -> str:
+    if os_support.IS_WINDOWS:
+        return ""
     return _platform.find_free_display(99)
 
 

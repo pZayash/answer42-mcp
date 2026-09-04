@@ -678,6 +678,16 @@ class SessionState:
 _SESSIONS: dict[str, SessionState] = {}
 
 
+def _runtime_output_file(prefix: str, session_id: str, suffix: str) -> Path:
+    """Return a writable cross-platform runtime output path for 1C file saves."""
+    safe_prefix = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(prefix or "answer42")).strip(".-") or "answer42"
+    safe_session = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(session_id or DEFAULT_SESSION)).strip(".-") or DEFAULT_SESSION
+    safe_suffix = suffix if suffix.startswith(".") else f".{suffix}"
+    output_dir = os_support.default_data_dir() / "exports"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    return output_dir / f"{safe_prefix}_{safe_session}_{uuid.uuid4().hex}{safe_suffix}"
+
+
 def _pid_is_running(pid: int) -> bool:
     if pid <= 0:
         return False
@@ -8428,7 +8438,7 @@ async def _metadata_rows_from_universal_report(
         read_warnings: list[str] = []
         last_saved_path = ""
         save_diagnostics: Any = {}
-        mxl_path = Path("/tmp/answer42") / f"metadata_objects_{session_id}_{uuid.uuid4().hex}.mxl"
+        mxl_path = _runtime_output_file("metadata_objects", session_id, ".mxl")
         try:
             selected_result = await _tabular_document_save_filter_by_filter(
                 session_id,
@@ -8471,7 +8481,7 @@ async def _metadata_rows_from_universal_report(
                 )
                 return rows[:max_rows], warnings
 
-        report_path = Path("/tmp/answer42") / f"metadata_objects_{session_id}_{uuid.uuid4().hex}.xlsx"
+        report_path = _runtime_output_file("metadata_objects", session_id, ".xlsx")
         try:
             selected_result = await _tabular_document_save_filter_by_filter(
                 session_id,
@@ -9156,7 +9166,7 @@ async def _save_output_tabular_document_to_mxl(
     if not doc_name:
         warnings.append("List output did not return a tabular document name for MXL save")
         return []
-    mxl_path = Path("/tmp/answer42") / f"{path_prefix}_{session_id}_{uuid.uuid4().hex}.mxl"
+    mxl_path = _runtime_output_file(path_prefix, session_id, ".mxl")
     try:
         selected_result = await _tabular_document_save_filter_by_filter(
             session_id,
