@@ -905,6 +905,24 @@ def test_ui_tree_current_page_is_shallow_and_command_panels_can_be_disabled():
     assert "Если ВключатьКомандныеПанели И (ТипОбъекта" in module
 
 
+
+
+def test_command_interface_search_restores_workspace_after_scan():
+    module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
+    search = _bsl_function_body(module, "ПоискКомандногоИнтерфейсаMCP")
+    state = _bsl_function_body(module, "СостояниеОкнаДоКомандногоИнтерфейсаMCP")
+    cleanup = _bsl_procedure_body(module, "ЗакрытьКомандныйИнтерфейсПослеРаботыMCP")
+    restore = _bsl_procedure_body(module, "ВосстановитьРабочуюОбластьПослеКомандногоИнтерфейсаMCP")
+
+    assert "ИсходноеСостояниеОкна = СостояниеОкнаДоКомандногоИнтерфейсаMCP(АктивноеОкно)" in search
+    assert "ЗакрытьКомандныйИнтерфейсПослеРаботыMCP(АктивноеОкно, КнопкаРаздела, ИсходноеСостояниеОкна)" in search
+    assert 'БезопасноеСвойство(Окно, "НавигационнаяСсылка", "")' in state
+    assert 'БезопасноеСвойство(Окно, "НачальнаяСтраница", Ложь)' in state
+    assert "ВосстановитьРабочуюОбластьПослеКомандногоИнтерфейсаMCP(Окно, ИсходноеСостояниеОкна)" in cleanup
+    assert 'КомандныйИнтерфейсНайтиРаздел(Интерфейс, "Главное")' in restore
+    assert "Окно.ПерейтиКНачальнойСтранице();" in restore
+    assert "Окно.ВыполнитьКоманду(ИсходнаяСсылка);" in restore
+
 def test_command_interface_search_closes_help_panel_after_cleanup():
     module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
     help_window = _bsl_function_body(module, "ЭтоОкноПомощиКомандногоИнтерфейсаMCP")
