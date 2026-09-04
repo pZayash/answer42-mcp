@@ -1077,6 +1077,62 @@ def test_metadata_catalog_rows_from_mxl(tmp_path):
         "Без данных": "Нет",
     }]
 
+
+def test_metadata_catalog_rows_from_mxl_strips_missing_markers_and_excludes_service_types(tmp_path):
+    from mcp_1c.server import _metadata_catalog_data_from_rows, _metadata_catalog_rows_from_mxl
+
+    mxl = tmp_path / "metadata_missing_markers.mxl"
+    mxl.write_text(
+        'MOXCEL\n'
+        '{16,3,{1,1,{"#","Идентификатор объекта метаданных"}},0},1,\n'
+        '{16,3,{1,1,{"#","Имя"}},0},2,\n'
+        '{16,3,{1,1,{"#","Синоним"}},0},3,\n'
+        '{16,3,{1,1,{"#","Полное имя"}},0},4,\n'
+        '{16,3,{1,1,{"#","Полный синоним"}},0},5,\n'
+        '{16,3,{1,1,{"#","Без данных"}},0},6,\n'
+        '{20,4,{"#",3031edd8-c3df-47b2-98ca-47f628d4ec18,{2}},{1,1,{"#","? Константа.ВыполняетсяЗагрузкаДанныхРИБ"}},0},1,\n'
+        '{20,4,{"#",3031edd8-c3df-47b2-98ca-47f628d4ec18,{2}},{1,1,{"#","ВыполняетсяЗагрузкаДанныхРИБ"}},0},2,\n'
+        '{20,4,{"#",3031edd8-c3df-47b2-98ca-47f628d4ec18,{2}},{1,1,{"#","? Выполняется загрузка данных РИБ"}},0},3,\n'
+        '{20,4,{"#",3031edd8-c3df-47b2-98ca-47f628d4ec18,{2}},{1,1,{"#","? Константа.ВыполняетсяЗагрузкаДанныхРИБ"}},0},4,\n'
+        '{20,4,{"#",3031edd8-c3df-47b2-98ca-47f628d4ec18,{2}},{1,1,{"#","? Константа. Выполняется загрузка данных РИБ"}},0},5,\n'
+        '{20,4,{"#",3031edd8-c3df-47b2-98ca-47f628d4ec18,{2}},{1,1,{"#","Нет"}},0},6,\n'
+        '{20,5,{"#",3031edd8-c3df-47b2-98ca-47f628d4ec18,{3}},{1,1,{"#","? Подсистема.ПростойИнтерфейсОрганизации"}},0},1,\n'
+        '{20,5,{"#",3031edd8-c3df-47b2-98ca-47f628d4ec18,{3}},{1,1,{"#","ПростойИнтерфейсОрганизации"}},0},2,\n'
+        '{20,5,{"#",3031edd8-c3df-47b2-98ca-47f628d4ec18,{3}},{1,1,{"#","? Организации"}},0},3,\n'
+        '{20,5,{"#",3031edd8-c3df-47b2-98ca-47f628d4ec18,{3}},{1,1,{"#","? Подсистема.ПростойИнтерфейсОрганизации"}},0},4,\n'
+        '{20,5,{"#",3031edd8-c3df-47b2-98ca-47f628d4ec18,{3}},{1,1,{"#","? Подсистема. Организации"}},0},5,\n'
+        '{20,5,{"#",3031edd8-c3df-47b2-98ca-47f628d4ec18,{3}},{1,1,{"#","Нет"}},0},6,\n',
+        encoding="utf-8",
+    )
+
+    rows = _metadata_catalog_rows_from_mxl(mxl)
+    warnings: list[str] = []
+    data = _metadata_catalog_data_from_rows(rows, warnings, navigation_link="x", source_method="mxl", limit=100)
+
+    assert rows[0]["Полное имя"] == "Константа.ВыполняетсяЗагрузкаДанныхРИБ"
+    assert rows[0]["Синоним"] == "? Выполняется загрузка данных РИБ"
+    assert data["type_counts"]["Константа"] == 1
+    assert not any(item["full_name"].startswith("?") for item in data["objects"])
+    assert not any(item["type"].startswith("?") for item in data["objects"])
+    assert not any(item["type"] == "Подсистема" for item in data["objects"])
+
+
+def test_metadata_object_from_row_strips_missing_markers():
+    item = _metadata_object_from_row({
+        "Идентификатор объекта метаданных": "? Константа.TestFlag",
+        "Полное имя": "? Константа.TestFlag",
+        "Синоним": "? Test flag",
+    })
+
+    assert item == {
+        "presentation": "Константа.TestFlag",
+        "full_name": "Константа.TestFlag",
+        "type": "Константа",
+        "name": "TestFlag",
+        "synonym": "Test flag",
+        "is_group": "Нет",
+    }
+
 def test_metadata_catalog_rows_from_tabular_cells_without_headers():
     rows = _metadata_catalog_rows_from_tabular_cells([
         ["? Константа.Test"],

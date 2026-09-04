@@ -7568,8 +7568,13 @@ def _is_not_deleted_catalog_row(row: dict[str, str]) -> bool:
     return not _is_truthy_1c(delete_mark)
 
 
+def _strip_metadata_missing_marker(value: str) -> str:
+    text = str(value or "").strip()
+    return text[1:].strip() if text.startswith("?") else text
+
+
 def _is_metadata_full_name_included(full_name: str) -> bool:
-    normalized = (full_name or "").strip().casefold()
+    normalized = _strip_metadata_missing_marker(full_name).casefold()
     if not normalized:
         return False
     return not normalized.startswith(("роль.", "подсистема."))
@@ -7752,9 +7757,11 @@ def _metadata_cache_key(session_id: str) -> str:
 
 
 def _metadata_object_from_row(row: dict[str, str]) -> dict[str, str]:
-    presentation = _row_value(row, "Ссылка", "Наименование", "Идентификатор объекта метаданных", "ИдентификаторОбъектаМетаданных")
-    full_name = _row_value(row, "Полное имя", "ПолноеИмя", "СписокПолноеИмя")
-    synonym = _row_value(row, "Синоним")
+    presentation = _strip_metadata_missing_marker(
+        _row_value(row, "Ссылка", "Наименование", "Идентификатор объекта метаданных", "ИдентификаторОбъектаМетаданных")
+    )
+    full_name = _strip_metadata_missing_marker(_row_value(row, "Полное имя", "ПолноеИмя", "СписокПолноеИмя"))
+    synonym = _strip_metadata_missing_marker(_row_value(row, "Синоним"))
     if not full_name:
         full_name = _metadata_full_name_from_presentation(presentation)
     metadata_type = _metadata_type_from_full_name(full_name) or _metadata_type_from_presentation(presentation)
@@ -8774,9 +8781,10 @@ def _metadata_catalog_rows_from_mxl(path: Path) -> list[dict[str, str]]:
 
     def normalize_mxl_full_name(value: str) -> str:
         candidate = value.strip()
-        if not full_name_re.match(candidate) or re.search(r"\.\s", candidate):
+        candidate_without_marker = _strip_metadata_missing_marker(candidate)
+        if not full_name_re.match(candidate) or re.search(r"\.\s", candidate_without_marker):
             return ""
-        return re.sub(r"\s+\([0-9a-fA-F-]{36}\)$", "", candidate).strip()
+        return re.sub(r"\s+\([0-9a-fA-F-]{36}\)$", "", candidate_without_marker).strip()
 
     rows: list[dict[str, str]] = []
     index = header_idx + 6
