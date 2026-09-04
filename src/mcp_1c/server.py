@@ -681,12 +681,55 @@ _SESSIONS: dict[str, SessionState] = {}
 def _pid_is_running(pid: int) -> bool:
     if pid <= 0:
         return False
+    if os_support.IS_WINDOWS:
+        # ``os.kill(pid, 0)`` is a POSIX liveness probe.  On Windows CPython
+        # delegates to TerminateProcess even for signal 0 and may raise
+        # unrelated OSError values such as WinError 11 instead of answering
+        # whether the process exists.  Use the native process handle API there.
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            open_process = kernel32.OpenProcess
+            open_process.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+            open_process.restype = wintypes.HANDLE
+            close_handle = kernel32.CloseHandle
+            close_handle.argtypes = [wintypes.HANDLE]
+            close_handle.restype = wintypes.BOOL
+            get_exit_code_process = kernel32.GetExitCodeProcess
+            get_exit_code_process.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+            get_exit_code_process.restype = wintypes.BOOL
+
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            ERROR_ACCESS_DENIED = 5
+            ERROR_INVALID_PARAMETER = 87
+            STILL_ACTIVE = 259
+            handle = open_process(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+            if not handle:
+                error = ctypes.get_last_error()
+                if error == ERROR_ACCESS_DENIED:
+                    return True
+                if error == ERROR_INVALID_PARAMETER:
+                    return False
+                return False
+            try:
+                exit_code = wintypes.DWORD()
+                if not get_exit_code_process(handle, ctypes.byref(exit_code)):
+                    return True
+                return int(exit_code.value) == STILL_ACTIVE
+            finally:
+                close_handle(handle)
+        except Exception:
+            return False
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
         return True
+    except OSError:
+        return False
     return True
 
 

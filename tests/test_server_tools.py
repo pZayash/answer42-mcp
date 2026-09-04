@@ -42,6 +42,7 @@ from mcp_1c.server import (
     _metadata_universal_report_filter_specs,
     _normalize_connection_mode,
     _parse_users_plain_text,
+    _pid_is_running,
     _rag_diagnostic,
     _reap_global_orphan_sessions,
     _register_dev_tools,
@@ -325,6 +326,80 @@ def test_global_registry_reaper_kills_expired_orphan(monkeypatch, tmp_path):
     assert killed == [111, 222, 333]
     assert data["sessions"] == {}
 
+
+
+def test_pid_is_running_returns_false_for_unexpected_oserror(monkeypatch):
+    from mcp_1c import server
+
+    monkeypatch.setattr(server.os_support, "IS_WINDOWS", False)
+
+    def fake_kill(pid, sig):
+        raise OSError(11, "Была сделана попытка загрузить программу, имеющую неверный формат")
+
+    monkeypatch.setattr(server.os, "kill", fake_kill)
+
+    assert _pid_is_running(12345) is False
+
+
+def test_pid_is_running_on_windows_uses_openprocess(monkeypatch):
+    from mcp_1c import server
+
+    calls = []
+
+    class FakeCtypes:
+        @staticmethod
+        def get_last_error():
+            return 0
+
+        @staticmethod
+        def byref(value):
+            return value
+
+        @staticmethod
+        def POINTER(_type):
+            return object
+
+        @staticmethod
+        def WinDLL(name, use_last_error=False):
+            calls.append(("WinDLL", name, use_last_error))
+
+            class FakeKernel32:
+                def __init__(self):
+                    self.OpenProcess = FakeFunction(lambda _access, _inherit, pid: 42 if pid == 12345 else 0)
+                    self.CloseHandle = FakeFunction(lambda _handle: True)
+                    self.GetExitCodeProcess = FakeFunction(self._get_exit_code_process)
+
+                @staticmethod
+                def _get_exit_code_process(_handle, exit_code):
+                    exit_code.value = 259
+                    return True
+
+            return FakeKernel32()
+
+    class FakeFunction:
+        def __init__(self, func):
+            object.__setattr__(self, "func", func)
+
+        def __call__(self, *args):
+            return self.func(*args)
+
+        def __setattr__(self, name, value):
+            object.__setattr__(self, name, value)
+
+    class FakeDWORD:
+        def __init__(self, value=0):
+            self.value = value
+
+    fake_ctypes = FakeCtypes()
+    fake_ctypes.wintypes = type("FakeWinTypes", (), {"DWORD": FakeDWORD, "BOOL": bool, "HANDLE": int})
+
+    monkeypatch.setattr(server.os_support, "IS_WINDOWS", True)
+    monkeypatch.setattr(server.os, "kill", lambda _pid, _sig: (_ for _ in ()).throw(AssertionError("os.kill must not be used on Windows")))
+    monkeypatch.setitem(sys.modules, "ctypes", fake_ctypes)
+    monkeypatch.setitem(sys.modules, "ctypes.wintypes", fake_ctypes.wintypes)
+
+    assert _pid_is_running(12345) is True
+    assert calls == [("WinDLL", "kernel32", True)]
 
 def test_new_mcp_tools_are_registered():
     _register_dev_tools(False)
