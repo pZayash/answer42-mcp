@@ -1258,6 +1258,7 @@ def test_configuration_name_version_reads_main_configuration_from_mxl(monkeypatc
         ("table_current_row", {"name": "Список", "title": ""}),
         ("dynamic_list_output", {"button": "", "wait_seconds": 3, "include_text": False}),
         ("_save_output_tabular_document_to_mxl", {"session_id": "unit", "doc_name": "ТабличныйДокумент", "path_prefix": "configuration_name_version_from_subsystems", "timeout": 120}),
+        ("active_window", {}),
     ]
 
 
@@ -1297,7 +1298,66 @@ def test_configuration_name_version_from_subsystems_prefers_sorted_first_row(mon
         ("dynamic_list_sort_by_column", {"name": "Список", "title": "", "column_title": "Это основная конфигурация"}),
         ("table_move_row", {"name": "Список", "title": "", "direction": "first", "steps": 1}),
         ("table_current_row", {"name": "Список", "title": ""}),
+        ("active_window", {}),
     ]
+
+
+def test_close_self_opened_form_closes_matching_active_window(monkeypatch):
+    from mcp_1c import server
+
+    calls = []
+
+    async def fake_bridge_call(session_id, method, params, *, timeout=None):
+        assert session_id == "unit"
+        calls.append((method, params, timeout))
+        if method == "active_window":
+            return {"title": "Версии подсистем", "form_name": "РегистрСведений.ВерсииПодсистем.ФормаСписка"}
+        if method == "close_form":
+            return {"closed": True}
+        raise AssertionError(method)
+
+    monkeypatch.setattr(server, "_bridge_call_recorded", fake_bridge_call)
+
+    warnings = []
+    closed = asyncio.run(server._close_self_opened_form(
+        "unit",
+        warnings,
+        title_markers=("Версии подсистем",),
+        form_names=("РегистрСведений.ВерсииПодсистем.ФормаСписка",),
+        description="subsystem versions list",
+    ))
+
+    assert closed is True
+    assert warnings == ["Self-opened subsystem versions list form was closed after tool completion"]
+    assert calls == [("active_window", {}, None), ("close_form", {}, None)]
+
+
+def test_close_self_opened_form_does_not_close_unrelated_window(monkeypatch):
+    from mcp_1c import server
+
+    calls = []
+
+    async def fake_bridge_call(session_id, method, params, *, timeout=None):
+        assert session_id == "unit"
+        calls.append((method, params, timeout))
+        if method == "active_window":
+            return {"title": "Поступление товаров", "form_name": "Документ.ПоступлениеТоваров.ФормаДокумента"}
+        raise AssertionError("unrelated active form must not be closed")
+
+    monkeypatch.setattr(server, "_bridge_call_recorded", fake_bridge_call)
+
+    warnings = []
+    closed = asyncio.run(server._close_self_opened_form(
+        "unit",
+        warnings,
+        title_markers=("Версии подсистем",),
+        form_names=("РегистрСведений.ВерсииПодсистем.ФормаСписка",),
+        description="subsystem versions list",
+    ))
+
+    assert closed is False
+    assert warnings == []
+    assert calls == [("active_window", {}, None)]
 
 
 def test_table_row_pairs_accepts_current_row_wrapper():

@@ -16,6 +16,7 @@ import sys
 import time
 import urllib.request
 import uuid
+from collections.abc import Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -8118,6 +8119,62 @@ async def _add_universal_report_filter(
     return True
 
 
+def _active_window_matches_self_opened_form(
+    active_window: Any,
+    *,
+    title_markers: Sequence[str] = (),
+    form_names: Sequence[str] = (),
+) -> bool:
+    if not isinstance(active_window, dict):
+        return False
+    normalized_form_names = {str(name or "").casefold() for name in form_names if str(name or "").strip()}
+    form_name = str(active_window.get("form_name") or "").casefold()
+    if form_name and form_name in normalized_form_names:
+        return True
+    diagnostics = active_window.get("client_diagnostics") if isinstance(active_window.get("client_diagnostics"), dict) else {}
+    titles = [
+        active_window.get("title"),
+        active_window.get("window_title"),
+        diagnostics.get("active_window_title"),
+        diagnostics.get("modal_title"),
+    ]
+    normalized_markers = [_normalize_match_text(marker) for marker in title_markers if str(marker or "").strip()]
+    return any(
+        marker and marker in _normalize_match_text(str(title or ""))
+        for marker in normalized_markers
+        for title in titles
+    )
+
+
+async def _close_self_opened_form(
+    session_id: str,
+    warnings: list[str],
+    *,
+    title_markers: Sequence[str] = (),
+    form_names: Sequence[str] = (),
+    description: str = "form",
+) -> bool:
+    """Close a form opened by a high-level helper without touching unrelated user UI."""
+    try:
+        active = await _bridge_call_recorded(session_id, "active_window", {})
+    except Exception as exc:
+        warnings.append(f"Self-opened {description} cleanup active-window probe failed: {exc}")
+        return False
+    if not _active_window_matches_self_opened_form(
+        active,
+        title_markers=title_markers,
+        form_names=form_names,
+    ):
+        return False
+    try:
+        await _bridge_call_recorded(session_id, "close_form", {})
+        warnings.append(f"Self-opened {description} form was closed after tool completion")
+        return True
+    except Exception as exc:
+        warnings.append(f"Self-opened {description} form cleanup failed: {exc}")
+        return False
+
+
 async def _close_message_box_from_command_diagnostics(
     session_id: str,
     command_result: Any,
@@ -8411,8 +8468,11 @@ async def _metadata_rows_from_universal_report(
     """
     warnings: list[str] = []
     navigation_link = "e1cib/app/Отчет.УниверсальныйОтчет"
+    cleanup_enabled = False
+    cleanup_allowed = True
     try:
         open_result = await _bridge_call_recorded(session_id, "open_navigation_link", {"navigation_link": navigation_link})
+        cleanup_enabled = True
         await _close_message_box_from_command_diagnostics(session_id, open_result, warnings)
         source_configured = await _ensure_universal_report_metadata_source(
             session_id,
@@ -8430,6 +8490,7 @@ async def _metadata_rows_from_universal_report(
         form_warnings = await _form_universal_report_metadata_source(session_id)
         warnings.extend(form_warnings)
         if any("form action is still running or blocked" in warning for warning in form_warnings):
+            cleanup_allowed = False
             return [], warnings
         ready, readiness_warnings, readiness = await _wait_tabular_document_ready(
             session_id,
@@ -8469,6 +8530,7 @@ async def _metadata_rows_from_universal_report(
                     "Universal report MXL save is still running or blocked the interface;"
                     f" save_result={_truncate_value(selected_result)}"
                 )
+                cleanup_allowed = False
                 return [], [*warnings, *read_warnings]
             save_diagnostics = selected_result
             selected = selected_result.get("selected") if isinstance(selected_result, dict) else None
@@ -8512,6 +8574,7 @@ async def _metadata_rows_from_universal_report(
                     "Universal report XLSX save is still running or blocked the interface;"
                     f" save_result={_truncate_value(selected_result)}"
                 )
+                cleanup_allowed = False
                 return [], [*warnings, *read_warnings]
             save_diagnostics = selected_result
             selected = selected_result.get("selected") if isinstance(selected_result, dict) else None
@@ -8544,6 +8607,17 @@ async def _metadata_rows_from_universal_report(
         return rows if max_rows <= 0 else rows[:max_rows], warnings
     except Exception as exc:
         return [], [f"Universal report metadata read failed: {exc}"]
+    finally:
+        current_task = asyncio.current_task()
+        is_cancelling = bool(current_task and current_task.cancelling())
+        if cleanup_enabled and cleanup_allowed and not is_cancelling:
+            await _close_self_opened_form(
+                session_id,
+                warnings,
+                title_markers=("Универсальный отчет", "Идентификаторы объектов метаданных"),
+                form_names=("ОбщаяФорма.ФормаОтчета",),
+                description="Universal report metadata source",
+            )
 
 
 async def _metadata_catalog_rows_from_output(session_id: str, max_rows: int) -> tuple[list[dict[str, str]], list[str]]:
@@ -8908,17 +8982,21 @@ async def _metadata_rows_from_target_catalog_list(
 ) -> tuple[list[dict[str, str]], list[str]]:
     warnings: list[str] = []
     navigation_link = "e1cib/list/Справочник.ИдентификаторыОбъектовМетаданных"
-    open_result = await _dangerous_bridge_call_recorded(
-        session_id,
-        "open_navigation_link",
-        {"navigation_link": navigation_link},
-        timeout=15,
-        danger="metadata_target_catalog_list_open_may_block_thin_client",
-    )
-    if isinstance(open_result, dict) and open_result.get("started_long_action"):
-        warnings.append("Target metadata catalog list open watchdog timeout")
-        return [], warnings
+    cleanup_enabled = False
+    cleanup_allowed = True
     try:
+        open_result = await _dangerous_bridge_call_recorded(
+            session_id,
+            "open_navigation_link",
+            {"navigation_link": navigation_link},
+            timeout=15,
+            danger="metadata_target_catalog_list_open_may_block_thin_client",
+        )
+        cleanup_enabled = True
+        if isinstance(open_result, dict) and open_result.get("started_long_action"):
+            cleanup_allowed = False
+            warnings.append("Target metadata catalog list open watchdog timeout")
+            return [], warnings
         result = await _bridge_call_recorded(
             session_id,
             "table_rows",
@@ -8927,6 +9005,17 @@ async def _metadata_rows_from_target_catalog_list(
         )
     except Exception as exc:
         return [], [f"Target metadata catalog list read failed: {exc}"]
+    finally:
+        current_task = asyncio.current_task()
+        is_cancelling = bool(current_task and current_task.cancelling())
+        if cleanup_enabled and cleanup_allowed and not is_cancelling:
+            await _close_self_opened_form(
+                session_id,
+                warnings,
+                title_markers=("Идентификаторы объектов метаданных",),
+                form_names=("Справочник.ИдентификаторыОбъектовМетаданных.ФормаСписка",),
+                description="metadata identifiers catalog list",
+            )
     raw_rows = result.get("rows", []) if isinstance(result, dict) else []
     parsed_rows: list[dict[str, str]] = []
     for row in raw_rows:
@@ -9224,64 +9313,78 @@ async def configuration_name_version_from_subsystems(
     `Это основная конфигурация`, are visible even when they are not displayed
     in the default form table.
     """
-    navigation_link = "e1cib/list/РегистрСведений.ВерсииПодсистем"
-    await _bridge_call_recorded(session_id, "open_navigation_link", {"navigation_link": navigation_link})
-
     warnings: list[str] = []
     main: dict[str, str] = {}
     cells: list[list[str]] = []
     source_method = "sorted_edge_row"
     current_row: dict[str, str] = {}
     sort_attempts: list[dict[str, Any]] = []
+    navigation_link = "e1cib/list/РегистрСведений.ВерсииПодсистем"
+    cleanup_enabled = False
 
-    sort_result = await _bridge_call_recorded(session_id, "dynamic_list_sort_by_column", {
-        "name": "Список",
-        "title": "",
-        "column_title": "Это основная конфигурация",
-    })
-    ordered = bool(sort_result.get("ordered")) if isinstance(sort_result, dict) else False
-    for direction, label in (("first", "first_after_sort"), ("last", "last_after_sort")):
-        move_result = await _bridge_call_recorded(session_id, "table_move_row", {
+    try:
+        await _bridge_call_recorded(session_id, "open_navigation_link", {"navigation_link": navigation_link})
+        cleanup_enabled = True
+
+        sort_result = await _bridge_call_recorded(session_id, "dynamic_list_sort_by_column", {
             "name": "Список",
             "title": "",
-            "direction": direction,
-            "steps": 1,
+            "column_title": "Это основная конфигурация",
         })
-        row_result = await _bridge_call_recorded(session_id, "table_current_row", {"name": "Список", "title": ""})
-        current_row = _table_row_pairs(row_result)
-        main = _configuration_from_sorted_first_row(current_row)
-        sort_attempts.append({
-            "attempt": len(sort_attempts) + 1,
-            "ordered": ordered,
-            "move_direction": direction,
-            "move_result": move_result if isinstance(move_result, dict) else {},
-            "read_method": label,
-            "row_is_main": bool(main),
-            "row_main_marker": _row_value(current_row, "Это основная конфигурация", "ЭтоОсновнаяКонфигурация"),
-        })
-        if main:
-            break
+        ordered = bool(sort_result.get("ordered")) if isinstance(sort_result, dict) else False
+        for direction, label in (("first", "first_after_sort"), ("last", "last_after_sort")):
+            move_result = await _bridge_call_recorded(session_id, "table_move_row", {
+                "name": "Список",
+                "title": "",
+                "direction": direction,
+                "steps": 1,
+            })
+            row_result = await _bridge_call_recorded(session_id, "table_current_row", {"name": "Список", "title": ""})
+            current_row = _table_row_pairs(row_result)
+            main = _configuration_from_sorted_first_row(current_row)
+            sort_attempts.append({
+                "attempt": len(sort_attempts) + 1,
+                "ordered": ordered,
+                "move_direction": direction,
+                "move_result": move_result if isinstance(move_result, dict) else {},
+                "read_method": label,
+                "row_is_main": bool(main),
+                "row_main_marker": _row_value(current_row, "Это основная конфигурация", "ЭтоОсновнаяКонфигурация"),
+            })
+            if main:
+                break
 
-    if not main:
-        warnings.append("Sorted edge list rows did not expose the main configuration; falling back to MXL list output")
-        source_method = "list_output_mxl"
-        output_result = await _bridge_call_recorded(session_id, "dynamic_list_output", {
-            "button": "",
-            "wait_seconds": 3,
-            "include_text": False,
-        })
-        tabular_docs = output_result.get("tabular_documents", {}) if isinstance(output_result, dict) else {}
-        items = tabular_docs.get("items", []) if isinstance(tabular_docs, dict) else []
-        if items:
-            first_item = items[0]
-            doc_name = first_item.get("name", "") if isinstance(first_item, dict) else ""
-            cells = await _save_output_tabular_document_to_mxl(
+        if not main:
+            warnings.append("Sorted edge list rows did not expose the main configuration; falling back to MXL list output")
+            source_method = "list_output_mxl"
+            output_result = await _bridge_call_recorded(session_id, "dynamic_list_output", {
+                "button": "",
+                "wait_seconds": 3,
+                "include_text": False,
+            })
+            tabular_docs = output_result.get("tabular_documents", {}) if isinstance(output_result, dict) else {}
+            items = tabular_docs.get("items", []) if isinstance(tabular_docs, dict) else []
+            if items:
+                first_item = items[0]
+                doc_name = first_item.get("name", "") if isinstance(first_item, dict) else ""
+                cells = await _save_output_tabular_document_to_mxl(
+                    session_id,
+                    doc_name,
+                    "configuration_name_version_from_subsystems",
+                    warnings,
+                )
+                main = _find_main_configuration_in_tabular_cells(cells)
+    finally:
+        current_task = asyncio.current_task()
+        is_cancelling = bool(current_task and current_task.cancelling())
+        if cleanup_enabled and not is_cancelling:
+            await _close_self_opened_form(
                 session_id,
-                doc_name,
-                "configuration_name_version_from_subsystems",
                 warnings,
+                title_markers=("Версии подсистем",),
+                form_names=("РегистрСведений.ВерсииПодсистем.ФормаСписка",),
+                description="subsystem versions list",
             )
-            main = _find_main_configuration_in_tabular_cells(cells)
 
     return {
         "found": bool(main),
@@ -9376,15 +9479,35 @@ async def installed_extensions_from_catalog(
     returned as extensions.
     """
     navigation_link = "e1cib/list/Справочник.ВерсииРасширений"
-    await _bridge_call_recorded(session_id, "open_navigation_link", {"navigation_link": navigation_link})
-    rows_result = await _bridge_call_recorded(session_id, "table_rows", {"name": "Список", "title": "", "limit": 500})
-    rows = rows_result.get("rows", []) if isinstance(rows_result, dict) else []
+    warnings: list[str] = []
+    cleanup_enabled = False
+    parsed_rows: list[dict[str, str]] = []
+    actual_rows: list[dict[str, str]] = []
+    selected_row: dict[str, str] = {}
+    extensions: list[dict[str, str]] = []
 
-    parsed_rows = [_table_row_pairs(row) for row in rows]
-    actual_rows = [row for row in parsed_rows if _is_not_deleted_catalog_row(row)]
-    selected_row = max(actual_rows, key=_extension_catalog_row_sort_key) if actual_rows else {}
-    description = _row_value(selected_row, "Описание метаданных", "ОписаниеМетаданных")
-    extensions = _parse_extension_metadata_description(description)
+    try:
+        await _bridge_call_recorded(session_id, "open_navigation_link", {"navigation_link": navigation_link})
+        cleanup_enabled = True
+        rows_result = await _bridge_call_recorded(session_id, "table_rows", {"name": "Список", "title": "", "limit": 500})
+        rows = rows_result.get("rows", []) if isinstance(rows_result, dict) else []
+
+        parsed_rows = [_table_row_pairs(row) for row in rows]
+        actual_rows = [row for row in parsed_rows if _is_not_deleted_catalog_row(row)]
+        selected_row = max(actual_rows, key=_extension_catalog_row_sort_key) if actual_rows else {}
+        description = _row_value(selected_row, "Описание метаданных", "ОписаниеМетаданных")
+        extensions = _parse_extension_metadata_description(description)
+    finally:
+        current_task = asyncio.current_task()
+        is_cancelling = bool(current_task and current_task.cancelling())
+        if cleanup_enabled and not is_cancelling:
+            await _close_self_opened_form(
+                session_id,
+                warnings,
+                title_markers=("Версии расширений",),
+                form_names=("Справочник.ВерсииРасширений.ФормаСписка",),
+                description="extension versions list",
+            )
 
     return {
         "found": bool(selected_row),
@@ -9397,6 +9520,7 @@ async def installed_extensions_from_catalog(
         "non_deleted_rows_count": len(actual_rows),
         "navigation_link": navigation_link,
         "source": "Справочник.ВерсииРасширений",
+        "warnings": warnings,
     }
 
 
