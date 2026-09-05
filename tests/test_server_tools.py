@@ -1360,6 +1360,145 @@ def test_close_self_opened_form_does_not_close_unrelated_window(monkeypatch):
     assert calls == [("active_window", {}, None)]
 
 
+def test_metadata_objects_from_catalog_reports_missing_universal_report(monkeypatch):
+    from mcp_1c import server
+
+    server._METADATA_OBJECTS_CACHE.pop("unit", None)
+    calls = []
+
+    async def fake_bridge_call(session_id, method, params, *, timeout=None):
+        assert session_id == "unit"
+        calls.append((method, params, timeout))
+        if method == "open_navigation_link":
+            raise RuntimeError(
+                "Не удалось перейти по навигационной ссылке e1cib/app/Отчет.УниверсальныйОтчет: "
+                "Не удалось перейти по навигационной ссылке"
+            )
+        if method == "active_window":
+            return {
+                "client_diagnostics": {
+                    "modal_form_name": "ErrorWindow",
+                    "modal_text": "Не удалось перейти по навигационной ссылке",
+                    "modal_buttons": [{"name": "OK", "title": "OK"}],
+                }
+            }
+        if method == "click_button":
+            return {"pressed": True}
+        raise AssertionError(method)
+
+    monkeypatch.setattr(server, "_bridge_call_recorded", fake_bridge_call)
+
+    result = asyncio.run(server._metadata_objects_from_catalog_impl(
+        query="Справочник.Номенклатура",
+        limit=10000,
+        max_results=5,
+        refresh_cache=True,
+        include_groups=False,
+        session_id="unit",
+    ))
+
+    assert result["found"] is False
+    assert result["source_available"] is False
+    assert result["reason"] == "metadata_source_unavailable"
+    assert "Universal report metadata object is not available" in result["message"]
+    assert result["objects"] == []
+    assert result["objects_count"] == 0
+    assert result["type_counts"] == {}
+    assert any("Отчет.УниверсальныйОтчет is unavailable" in warning for warning in result["warnings"])
+    assert any("ErrorWindow was closed" in warning for warning in result["warnings"])
+    assert calls == [
+        ("open_navigation_link", {"navigation_link": "e1cib/app/Отчет.УниверсальныйОтчет"}, None),
+        ("active_window", {}, 5),
+        ("click_button", {"name": "OK", "search_by_title": True, "watchdog_timeout": 30}, 35),
+    ]
+
+
+def test_configuration_name_version_reports_missing_subsystems_register(monkeypatch):
+    from mcp_1c import server
+
+    calls = []
+
+    async def fake_bridge_call(session_id, method, params, *, timeout=None):
+        assert session_id == "unit"
+        calls.append((method, params, timeout))
+        if method == "open_navigation_link":
+            raise RuntimeError(
+                "Не удалось перейти по навигационной ссылке e1cib/list/РегистрСведений.ВерсииПодсистем"
+            )
+        if method == "active_window":
+            return {
+                "client_diagnostics": {
+                    "modal_form_name": "ErrorWindow",
+                    "modal_text": "Не удалось перейти по навигационной ссылке",
+                    "modal_buttons": [{"name": "OK", "title": "OK"}],
+                }
+            }
+        if method == "click_button":
+            return {"pressed": True}
+        raise AssertionError(method)
+
+    monkeypatch.setattr(server, "_bridge_call_recorded", fake_bridge_call)
+
+    result = asyncio.run(configuration_name_version_from_subsystems(session_id="unit"))
+
+    assert result["found"] is False
+    assert result["source_available"] is False
+    assert result["reason"] == "metadata_source_unavailable"
+    assert result["configuration_name"] == ""
+    assert result["configuration_version"] == ""
+    assert "Subsystem versions register is not available" in result["message"]
+    assert any("РегистрСведений.ВерсииПодсистем is unavailable" in warning for warning in result["warnings"])
+    assert any("ErrorWindow was closed" in warning for warning in result["warnings"])
+    assert calls == [
+        ("open_navigation_link", {"navigation_link": "e1cib/list/РегистрСведений.ВерсииПодсистем"}, None),
+        ("active_window", {}, 5),
+        ("click_button", {"name": "OK", "search_by_title": True, "watchdog_timeout": 30}, 35),
+    ]
+
+
+def test_installed_extensions_reports_missing_versions_catalog(monkeypatch):
+    from mcp_1c import server
+
+    calls = []
+
+    async def fake_bridge_call(session_id, method, params, *, timeout=None):
+        assert session_id == "unit"
+        calls.append((method, params, timeout))
+        if method == "open_navigation_link":
+            raise RuntimeError(
+                "Не удалось перейти по навигационной ссылке e1cib/list/Справочник.ВерсииРасширений"
+            )
+        if method == "active_window":
+            return {
+                "client_diagnostics": {
+                    "modal_form_name": "ErrorWindow",
+                    "modal_text": "Не удалось перейти по навигационной ссылке",
+                    "modal_buttons": [{"name": "OK", "title": "OK"}],
+                }
+            }
+        if method == "click_button":
+            return {"pressed": True}
+        raise AssertionError(method)
+
+    monkeypatch.setattr(server, "_bridge_call_recorded", fake_bridge_call)
+
+    result = asyncio.run(server.installed_extensions_from_catalog(session_id="unit"))
+
+    assert result["found"] is False
+    assert result["source_available"] is False
+    assert result["reason"] == "metadata_source_unavailable"
+    assert result["extensions"] == []
+    assert result["extensions_count"] == 0
+    assert "Extension versions catalog is not available" in result["message"]
+    assert any("Справочник.ВерсииРасширений is unavailable" in warning for warning in result["warnings"])
+    assert any("ErrorWindow was closed" in warning for warning in result["warnings"])
+    assert calls == [
+        ("open_navigation_link", {"navigation_link": "e1cib/list/Справочник.ВерсииРасширений"}, None),
+        ("active_window", {}, 5),
+        ("click_button", {"name": "OK", "search_by_title": True, "watchdog_timeout": 30}, 35),
+    ]
+
+
 def test_table_row_pairs_accepts_current_row_wrapper():
     wrapped = {
         "found": True,

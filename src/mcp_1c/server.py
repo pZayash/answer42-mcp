@@ -8175,6 +8175,93 @@ async def _close_self_opened_form(
         return False
 
 
+def _bridge_error_summary(exc: Exception) -> str:
+    text = str(exc).strip() or type(exc).__name__
+    text = text.split("client_diagnostics=", 1)[0].strip()
+    for marker in ("\n{", "\n["):
+        text = text.split(marker, 1)[0].strip()
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    return lines[0] if lines else type(exc).__name__
+
+
+def _looks_like_navigation_link_unavailable(exc: Exception, navigation_link: str = "") -> bool:
+    text = str(exc).casefold()
+    if navigation_link and navigation_link.casefold() not in text:
+        return False
+    return "не удалось перейти по навигационной ссылке" in text
+
+
+async def _close_navigation_error_dialog_if_present(
+    session_id: str,
+    warnings: list[str],
+    *,
+    description: str = "navigation error",
+) -> bool:
+    """Close the simple 1C ErrorWindow left by a failed navigation-link open."""
+    try:
+        active = await _bridge_call_recorded(session_id, "active_window", {}, timeout=5)
+    except Exception as exc:
+        warnings.append(f"{description} cleanup active-window probe failed: {exc}")
+        return False
+    diagnostics = active.get("client_diagnostics") if isinstance(active, dict) else None
+    if not isinstance(diagnostics, dict):
+        return False
+    modal_form = str(diagnostics.get("modal_form_name") or diagnostics.get("active_form_name") or "")
+    modal_text = str(diagnostics.get("modal_text") or "")
+    buttons = diagnostics.get("modal_buttons") if isinstance(diagnostics.get("modal_buttons"), list) else []
+    has_ok = any(
+        isinstance(button, dict)
+        and (str(button.get("title") or "").strip().casefold() == "ok" or str(button.get("name") or "").strip().casefold() == "ok")
+        for button in buttons
+    )
+    if modal_form != "ErrorWindow" or "Не удалось перейти по навигационной ссылке" not in modal_text or not has_ok:
+        return False
+    try:
+        await _bridge_call_recorded(
+            session_id,
+            "click_button",
+            {"name": "OK", "search_by_title": True, "watchdog_timeout": 30},
+            timeout=35,
+        )
+        warnings.append(f"{description} ErrorWindow was closed after navigation failure")
+        return True
+    except Exception as exc:
+        warnings.append(f"{description} ErrorWindow cleanup failed: {exc}")
+        return False
+
+
+def _metadata_source_unavailable_warning(source: str, navigation_link: str, exc: Exception) -> str:
+    return (
+        f"{source} is unavailable in this 1C configuration; navigation link {navigation_link} "
+        f"could not be opened: {_bridge_error_summary(exc)}"
+    )
+
+
+def _source_unavailable_result(
+    *,
+    source: str,
+    navigation_link: str,
+    source_method: str,
+    warnings: list[str],
+    message: str,
+    reason: str = "metadata_source_unavailable",
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "found": False,
+        "reason": reason,
+        "message": message,
+        "source_available": False,
+        "source": source,
+        "navigation_link": navigation_link,
+        "source_method": source_method,
+        "warnings": warnings,
+    }
+    if extra:
+        result.update(extra)
+    return result
+
+
 async def _close_message_box_from_command_diagnostics(
     session_id: str,
     command_result: Any,
@@ -8471,7 +8558,22 @@ async def _metadata_rows_from_universal_report(
     cleanup_enabled = False
     cleanup_allowed = True
     try:
-        open_result = await _bridge_call_recorded(session_id, "open_navigation_link", {"navigation_link": navigation_link})
+        try:
+            open_result = await _bridge_call_recorded(session_id, "open_navigation_link", {"navigation_link": navigation_link})
+        except Exception as exc:
+            if _looks_like_navigation_link_unavailable(exc, navigation_link):
+                warnings.append(_metadata_source_unavailable_warning(
+                    "Отчет.УниверсальныйОтчет",
+                    navigation_link,
+                    exc,
+                ))
+                await _close_navigation_error_dialog_if_present(
+                    session_id,
+                    warnings,
+                    description="Universal report metadata source",
+                )
+                return [], warnings
+            raise
         cleanup_enabled = True
         await _close_message_box_from_command_diagnostics(session_id, open_result, warnings)
         source_configured = await _ensure_universal_report_metadata_source(
@@ -9035,6 +9137,9 @@ def _metadata_catalog_data_from_rows(
     source_method: str,
     limit: int,
     partial_for_query: bool = False,
+    source_available: bool = True,
+    reason: str = "",
+    message: str = "",
 ) -> dict[str, Any]:
     actual_rows = []
     for row in parsed_rows:
@@ -9045,7 +9150,7 @@ def _metadata_catalog_data_from_rows(
             actual_rows.append(row)
     objects = [_metadata_object_from_row(row) for row in actual_rows]
     self_entry = _metadata_objects_catalog_self_entry()
-    if not any(item.get("full_name") == self_entry["full_name"] for item in objects):
+    if source_available and not any(item.get("full_name") == self_entry["full_name"] for item in objects):
         # Some configurations do not store a row for the metadata-identifiers
         # catalog itself in that same catalog.  Expose the currently opened
         # metadata object explicitly so the lookup tool remains useful for
@@ -9073,6 +9178,9 @@ def _metadata_catalog_data_from_rows(
         "limit": limit,
         "warnings": warnings,
         "partial_for_query": partial_for_query,
+        "source_available": source_available,
+        "reason": reason,
+        "message": message,
     }
 
 
@@ -9096,14 +9204,27 @@ async def _load_metadata_objects_from_catalog(session_id: str, limit: int, query
     navigation_link = "e1cib/app/Отчет.УниверсальныйОтчет"
     requested_limit = max(1, int(limit or 1))
     parsed_rows, warnings = await _metadata_rows_from_universal_report(session_id, 0)
-    if not parsed_rows:
+    source_unavailable = any("is unavailable in this 1C configuration" in warning for warning in warnings)
+    if not parsed_rows and not source_unavailable:
         warnings.append("Universal report returned no metadata rows for cache build")
+    message = ""
+    reason = ""
+    if source_unavailable:
+        reason = "metadata_source_unavailable"
+        message = (
+            "Metadata objects catalog cannot be read because the Universal report metadata object "
+            "is not available in this 1C configuration. Use RAG metadata or add BSP metadata "
+            "identifier/register objects before using this live lookup."
+        )
     data = _metadata_catalog_data_from_rows(
         parsed_rows,
         warnings,
         navigation_link=navigation_link,
         source_method="universal_report",
         limit=requested_limit,
+        source_available=not source_unavailable,
+        reason=reason,
+        message=message,
     )
     data["requested_limit"] = requested_limit
     data["effective_limit"] = requested_limit
@@ -9154,6 +9275,9 @@ async def _metadata_objects_from_catalog_impl(
         "navigation_link": catalog_data["navigation_link"],
         "source": catalog_data["source"],
         "source_method": catalog_data.get("source_method", ""),
+        "source_available": bool(catalog_data.get("source_available", True)),
+        "reason": catalog_data.get("reason", ""),
+        "message": catalog_data.get("message", ""),
         "loaded_at": catalog_data["loaded_at"],
         "requested_limit": catalog_data.get("requested_limit", catalog_data.get("limit")),
         "effective_limit": catalog_data.get("effective_limit", catalog_data.get("limit")),
@@ -9323,7 +9447,39 @@ async def configuration_name_version_from_subsystems(
     cleanup_enabled = False
 
     try:
-        await _bridge_call_recorded(session_id, "open_navigation_link", {"navigation_link": navigation_link})
+        try:
+            await _bridge_call_recorded(session_id, "open_navigation_link", {"navigation_link": navigation_link})
+        except Exception as exc:
+            if _looks_like_navigation_link_unavailable(exc, navigation_link):
+                warnings.append(_metadata_source_unavailable_warning(
+                    "РегистрСведений.ВерсииПодсистем",
+                    navigation_link,
+                    exc,
+                ))
+                await _close_navigation_error_dialog_if_present(
+                    session_id,
+                    warnings,
+                    description="subsystem versions list",
+                )
+                return _source_unavailable_result(
+                    source="РегистрСведений.ВерсииПодсистем",
+                    navigation_link=navigation_link,
+                    source_method="sorted_edge_row",
+                    warnings=warnings,
+                    message=(
+                        "Subsystem versions register is not available in this 1C configuration; "
+                        "main configuration name/version cannot be detected from live UI metadata."
+                    ),
+                    extra={
+                        "configuration_name": "",
+                        "configuration_version": "",
+                        "main_configuration_row": {},
+                        "main_configuration_rows_count": 0,
+                        "rows_count": 0,
+                        "sort_attempts": [],
+                    },
+                )
+            raise
         cleanup_enabled = True
 
         sort_result = await _bridge_call_recorded(session_id, "dynamic_list_sort_by_column", {
@@ -9487,7 +9643,40 @@ async def installed_extensions_from_catalog(
     extensions: list[dict[str, str]] = []
 
     try:
-        await _bridge_call_recorded(session_id, "open_navigation_link", {"navigation_link": navigation_link})
+        try:
+            await _bridge_call_recorded(session_id, "open_navigation_link", {"navigation_link": navigation_link})
+        except Exception as exc:
+            if _looks_like_navigation_link_unavailable(exc, navigation_link):
+                warnings.append(_metadata_source_unavailable_warning(
+                    "Справочник.ВерсииРасширений",
+                    navigation_link,
+                    exc,
+                ))
+                await _close_navigation_error_dialog_if_present(
+                    session_id,
+                    warnings,
+                    description="extension versions list",
+                )
+                return _source_unavailable_result(
+                    source="Справочник.ВерсииРасширений",
+                    navigation_link=navigation_link,
+                    source_method="catalog_list",
+                    warnings=warnings,
+                    message=(
+                        "Extension versions catalog is not available in this 1C configuration; "
+                        "installed extensions cannot be detected from live UI metadata."
+                    ),
+                    extra={
+                        "extensions": [],
+                        "extensions_count": 0,
+                        "selected_row": {},
+                        "selected_row_code": "",
+                        "selected_row_last_use_date": "",
+                        "rows_count": 0,
+                        "non_deleted_rows_count": 0,
+                    },
+                )
+            raise
         cleanup_enabled = True
         rows_result = await _bridge_call_recorded(session_id, "table_rows", {"name": "Список", "title": "", "limit": 500})
         rows = rows_result.get("rows", []) if isinstance(rows_result, dict) else []
