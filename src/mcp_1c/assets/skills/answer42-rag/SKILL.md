@@ -5,112 +5,52 @@ description: "RAG-индекс 1С metadata через Answer42"
 
 # Answer42 RAG
 
-Используй этот скилл, когда нужно искать по исходникам 1С через RAG/index MCP `Answer42`: EDT-исходники, XML-выгрузка Конфигуратора, base + extensions, регистры, формы, СКД отчётов.
+Используй этот скилл, когда для UI-задачи или анализа 1С нужно понять метаданные: объекты, реквизиты, табличные части, регистры, формы, СКД-поля отчётов, навигационные ссылки и состав base+extensions.
 
-## Что индексируется
+## Когда RAG уместен
 
-- Объекты метаданных: справочники, документы, обработки, отчёты, перечисления, общие модули, регистры сведений/накопления/бухгалтерии/расчёта.
-- Реквизиты объектов.
-- Регистры: роли полей `dimension`, `resource`, `attribute`, `standard_attribute`.
-- Табличные части и колонки.
-- Формы и элементы форм, где доступны XML-исходники.
-- СКД отчётов: поля наборов данных, вычисляемые поля, итоговые поля (`dataPath`, `field`, `title`, `expression`).
-- Навигационные ссылки `e1cib/list/...` и `e1cib/app/...`.
+- Нужно найти правильное metadata name перед `open_navigation_link` или настройкой отчёта.
+- Нужно понять, какие поля/табличные части есть у объекта и как они называются технически.
+- UI показывает неожиданные поля/таблицы, и нужно сверить это с конфигурацией.
+- Нужно отличить поведение основной конфигурации от расширения.
 
-## Типовой workflow
+RAG — индекс исходников, не runtime базы. Для фактических данных, прав, пользовательских настроек и результата отчёта используй live UI tools.
 
-### Быстрый старт (live-сессия)
+## Быстрый старт
 
-`start_session()` по умолчанию запускается с `rag_enabled=false`, чтобы не
-удлинять старт live-чтением регистров конфигурации. Для быстрого включения
-summary RAG передай явный алиас конфигурации:
+`start_session()` обычно не должен удлинять запуск live-чтением регистров. Если известна конфигурация, включай summary RAG явно:
 
 ```text
 start_session(base_url="https://...", summary_rag_config="bp")
 ```
 
-Поддерживаются алиасы `bp`, `accounting30`, `Бухгалтерия предприятия`. Такой
-старт включает RAG для сессии и создаёт summary snapshot из слоёв
-`configuration+fresh` без live-автодетекта через `ВерсииПодсистем`/
-`ВерсииРасширений`. Результат возвращается в `rag_notice`: при успехе
-`rag_notice.enabled=true`, `rag_notice.backend="configuration-summary"`, а
-`rag_notice.summary_backend` показывает транспорт (`gitlab-stream`/`local-stream`),
-project и ref. Если конфигурация не найдена или RAG выключен —
-`rag_notice.enabled=false` с `reason` и `message`.
+`rag_notice` показывает, включился ли summary/backend snapshot. Если RAG не включился, не делай вывод “объект отсутствует” только по пустому поиску.
 
-Автоматический live-автодетект при `rag_enabled=true` отключён по умолчанию и
-включается только переменной окружения `ONEC_MCP_AUTO_SUMMARY_RAG_ON_START=1`.
+Если нужен live autodetect конфигурации/расширений или fallback-выгрузка, используй `rag_session_autoconfigure(...)`. Для web `/WS`-баз передавай прямое подключение (`dump_connection_value` или `file_infobase_path`), иначе Designer dump невозможен.
 
-Для ручной перенастройки или fallback-выгрузки используй:
+## Как искать
 
-```text
-rag_session_autoconfigure()
-```
+- `rag_lookup_object(object="Справочник.Номенклатура")` — когда известно или почти известно metadata name.
+- `rag_query(query="...")` — когда известен бизнес-смысл, синоним или фрагмент формы/отчёта.
+- `dynamic_list_metadata_available_fields(...)` — когда нужно понять доступные поля динамического списка по метаданным.
+- `metadata_objects_from_catalog(query=...)` — live fallback через базу, если RAG не настроен или есть сомнение в актуальности индекса.
 
-Автоматически читает живую конфигурацию и расширения из `ВерсииПодсистем`/`ВерсииРасширений`, матчит с зарегистрированными RAG-источниками, создаёт снапшот и строит индекс.
-
-### Если подходящего источника нет — fallback-выгрузка
-
-`rag_session_autoconfigure(dump_if_missing=true)` при отсутствии точного совпадения:
-- Для прямого подключения (`/S` или `/F`) — выгружает конфигурацию через Designer `DumpConfigToFiles`, а все установленные расширения одним Designer-вызовом `DumpConfigToFiles -AllExtensions` (по умолчанию `dump_all_extensions=true`).
-- Для веб-сессий (`/WS`) — нужно передать `dump_connection_value="server/ib"` или `file_infobase_path="/path/to/ib"`.
-- Если direct-подключение использует другие креды, чем web-публикация (например multitenant/separated-data база), передай `dump_username`/`dump_password`; иначе будут переиспользованы креды live-сессии.
-- Можно передать `cf_files`/`cfe_files` — они загружаются во временную файловую базу, выгружаются в XML, временная база удаляется.
-- Расширения с именами `EF_*` считаются служебными/fresh patch и не регистрируются в RAG snapshot.
-- Если нужно не выгружать все live-расширения (например, их слишком много), передай `dump_all_extensions=false`.
-
-```text
-# Прямое серверное подключение
-rag_session_autoconfigure(dump_if_missing=true, dump_connection_value="<DIRECT_SERVER_INFOBASE>", dump_username="<DUMP_USERNAME>", dump_password="<DUMP_PASSWORD>")
-
-# Из CF/CFE файлов
-rag_session_autoconfigure(dump_if_missing=true, cf_files="config.cf", cfe_files="ext1.cfe,ext2.cfe")
-```
-
-### Ручная регистрация источников
-
-```text
-rag_source_detect(path)
-rag_source_add(name="MS", path="/path/to/MS/src", kind="base", format="auto")
-rag_source_add(name="Platform42", path="/path/to/Platform42/src", kind="extension", format="auto")
-rag_sources_add_from_directory(path="/path/to/repos", prefix="", recursive=true, watch=true)
-rag_available_configurations(sync=true)
-rag_snapshot_create(name="MS+Platform42", base="MS", extensions=["Platform42"])
-rag_index_build(snapshot="MS+Platform42")
-rag_lookup_object(object="РегистрСведений.РезервныеКопииОбластейДанных", snapshot="MS+Platform42")
-rag_query(query="резервные копии длительность", snapshot="MS+Platform42", limit=10)
-```
-
-Если `rag_lookup_object`, `rag_query`, `ui_tree(include_rag_types=true)` или
-`dynamic_list_metadata_available_fields` возвращают `rag_diagnostic.diagnostics[]`, сначала
-обработай его: snapshot может быть не указан для сессии или индекс выбранного
-snapshot может быть пустым. Не делай вид, что RAG подтвердил отсутствие объекта,
-если диагностика говорит, что данных нет.
-
-## CLI-эквивалент
-
-```bash
-python3 scripts/rag_cli.py add-source MS /path/to/MS/src --kind base
-python3 scripts/rag_cli.py add-source Platform42 /path/to/Platform42/src --kind extension
-python3 scripts/rag_cli.py snapshot MS+Platform42 --base MS --extension Platform42
-python3 scripts/rag_cli.py build --snapshot MS+Platform42
-python3 scripts/rag_cli.py lookup РегистрСведений.РезервныеКопииОбластейДанных --snapshot MS+Platform42
-python3 scripts/rag_cli.py query "резервные копии" --snapshot MS+Platform42
-```
+Если result содержит `rag_diagnostic.diagnostics[]`, сначала разберись с диагностикой: snapshot может быть не выбран, индекс пустой или источник не найден.
 
 ## Как читать результаты
 
-- `matches[].source_name` показывает слой (`MS`, `Platform42`, и т.п.).
-- `attributes[].role`:
-  - `dimension` — измерение регистра;
-  - `resource` — ресурс регистра;
-  - `attribute` — реквизит;
-  - `standard_attribute` — стандартное поле платформы.
-- `data_composition_fields[]` содержит поля СКД отчётов; для вычисляемых/итоговых смотри `expression`.
-- Если объект не найден в extension-слое, обязательно проверь base-слой перед выводом «не найдено».
+- Всегда смотри слой (`source_name`/base/extension). Если объект не найден в расширении, проверь base-слой.
+- Для регистров учитывай роль поля: измерение, ресурс, реквизит, стандартный реквизит.
+- Для СКД смотри не только имя поля, но и `dataPath`, title и expression.
+- Навигационные ссылки из RAG можно использовать в `open_navigation_link`, но только если это настоящие `e1cib/...` ссылки.
 
-## Ограничения
+## Связь с form hints
 
-- RAG — это индекс исходников, не live runtime; для фактических данных базы используй UI/test-client или отдельный контролируемый запрос.
-- СКД индексируется минимум по полям и выражениям; тело запроса СКД может потребовать ручного чтения `Template.dcs`.
-- SQLite/FTS — слой поиска. Источником истины остаются файлы `.mdo`, `.xml`, `.dcs`.
+RAG/summary context может помочь Answer42 подобрать `startup_hints` и configuration/extension-scoped hints. Если после RAG-поиска выяснился устойчивый принцип работы формы, сохрани hint в правильном scope:
+
+- данные/настройки конкретной базы → `scope="base"`;
+- принцип конкретной конфигурации → `scope="configuration"`, без версии конфигурации;
+- поведение расширения → `scope="extension"`;
+- общий паттерн управляемого интерфейса 1С → `scope="global"`.
+
+Не сохраняй в RAG-skill длинные разовые находки; для повторяемого UI-опыта используй `form_hints_set`.

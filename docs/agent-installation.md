@@ -113,7 +113,7 @@ PyPI-пакет не должен сам записывать skills в проф
 answer42 install-skills
 ```
 
-По умолчанию устанавливаются `answer42` и `answer42-rag` в OpenClaw:
+По умолчанию устанавливаются `answer42`, `answer42-rag` и `answer42-universal-report` в OpenClaw:
 
 ```text
 ~/.openclaw/workspace/skills

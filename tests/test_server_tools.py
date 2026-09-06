@@ -785,7 +785,6 @@ def test_form_hints_configuration_and_extension_scopes(monkeypatch, tmp_path):
         form_title=form_title,
         scope="configuration",
         configuration_name="УправлениеНашейФирмой",
-        configuration_version="3.0.12.34",
         operation="create-customer-order",
         session_id="missing-session",
     ))
@@ -803,7 +802,6 @@ def test_form_hints_configuration_and_extension_scopes(monkeypatch, tmp_path):
         form_name=form_name,
         form_title=form_title,
         configuration_name="УправлениеНашейФирмой",
-        configuration_version="3.0.12.34",
         extension_name="ConnectionToSM",
         session_id="missing-session",
     ))
@@ -818,7 +816,6 @@ def test_form_hints_configuration_and_extension_scopes(monkeypatch, tmp_path):
 
     startup = server._discover_startup_hints(
         configuration_name="УправлениеНашейФирмой",
-        configuration_version="3.0.12.34",
         extension_names=["ConnectionToSM"],
     )
     assert startup["available"] is True

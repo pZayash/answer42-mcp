@@ -1277,14 +1277,12 @@ def _form_hint_key(
     form_title: str,
     operation: str,
     configuration_name: str = "",
-    configuration_version: str = "",
     extension_name: str = "",
     extension_version: str = "",
 ) -> str:
     parts = [
         _normalize_base_url(base_url).casefold(),
         _normalize_form_hint_part(configuration_name).casefold(),
-        _normalize_form_hint_part(configuration_version).casefold(),
         _normalize_form_hint_part(extension_name).casefold(),
         _normalize_form_hint_part(extension_version).casefold(),
         _normalize_form_hint_part(form_name).casefold(),
@@ -1395,7 +1393,6 @@ def _form_hints_entry_matches(
     *,
     base_url: str,
     configuration_name: str = "",
-    configuration_version: str = "",
     extension_names: list[str] | None = None,
     extension_name: str = "",
     extension_version: str = "",
@@ -1410,8 +1407,6 @@ def _form_hints_entry_matches(
     target_base = _normalize_base_url(base_url)
     entry_config = _normalize_form_hint_part(str(entry.get("configuration_name") or "")).casefold()
     target_config = _normalize_form_hint_part(configuration_name).casefold()
-    entry_config_version = _normalize_form_hint_part(str(entry.get("configuration_version") or "")).casefold()
-    target_config_version = _normalize_form_hint_part(configuration_version).casefold()
     entry_extension = _normalize_form_hint_part(str(entry.get("extension_name") or "")).casefold()
     target_extensions = {
         _normalize_form_hint_part(item).casefold()
@@ -1437,10 +1432,8 @@ def _form_hints_entry_matches(
     elif scope == "configuration":
         if not include_configuration or not (target_config and entry_config == target_config):
             return False, 0, ""
-        if entry_config_version and target_config_version and entry_config_version != target_config_version:
-            return False, 0, ""
         scope_matched = True
-        scope_score = 20 + (5 if entry_config_version and target_config_version else 0)
+        scope_score = 20
         scope_match = "+configuration"
     elif scope == "extension":
         if not include_extensions or not (entry_extension and entry_extension in target_extensions):
@@ -1498,7 +1491,6 @@ async def _resolve_form_hints_context(
     *,
     base_url: str,
     configuration_name: str = "",
-    configuration_version: str = "",
     extension_names: Any = None,
     form_name: str,
     form_title: str,
@@ -1508,11 +1500,9 @@ async def _resolve_form_hints_context(
         sess = await _ensure_restored_session(session_id)
     resolved_base_url = _normalize_base_url(base_url or (sess.base_url if sess else ""))
     resolved_configuration_name = _normalize_form_hint_part(configuration_name)
-    resolved_configuration_version = _normalize_form_hint_part(configuration_version)
     resolved_extension_names = _normalize_extension_names(extension_names)
     if sess is not None:
         resolved_configuration_name = resolved_configuration_name or sess.configuration_name
-        resolved_configuration_version = resolved_configuration_version or sess.configuration_version
         if not resolved_extension_names:
             resolved_extension_names = list(sess.extension_names)
     resolved_form_name = _normalize_form_hint_part(form_name)
@@ -1529,7 +1519,6 @@ async def _resolve_form_hints_context(
     return {
         "base_url": resolved_base_url,
         "configuration_name": resolved_configuration_name,
-        "configuration_version": resolved_configuration_version,
         "extension_names": resolved_extension_names,
         "form_name": resolved_form_name,
         "form_title": resolved_form_title,
@@ -1557,8 +1546,7 @@ def _summarize_form_hints_operations(entries: list[dict[str, Any]]) -> list[dict
             bucket["base_urls"].add(base_url)
         configuration_name = _normalize_form_hint_part(str(entry.get("configuration_name") or ""))
         if configuration_name:
-            configuration_version = _normalize_form_hint_part(str(entry.get("configuration_version") or ""))
-            bucket["configurations"].add(f"{configuration_name} {configuration_version}".strip())
+            bucket["configurations"].add(configuration_name)
         extension_name = _normalize_form_hint_part(str(entry.get("extension_name") or ""))
         if extension_name:
             extension_version = _normalize_form_hint_part(str(entry.get("extension_version") or ""))
@@ -1591,7 +1579,6 @@ def _discover_form_hints(
     *,
     base_url: str = "",
     configuration_name: str = "",
-    configuration_version: str = "",
     extension_names: Any = None,
     form_name: str = "",
     form_title: str = "",
@@ -1604,7 +1591,6 @@ def _discover_form_hints(
     context = {
         "base_url": _normalize_base_url(base_url),
         "configuration_name": _normalize_form_hint_part(configuration_name),
-        "configuration_version": _normalize_form_hint_part(configuration_version),
         "extension_names": _normalize_extension_names(extension_names),
         "form_name": _normalize_form_hint_part(form_name),
         "form_title": _normalize_form_hint_part(form_title),
@@ -1619,7 +1605,6 @@ def _discover_form_hints(
                 entry,
                 base_url=context["base_url"],
                 configuration_name=context["configuration_name"],
-                configuration_version=context["configuration_version"],
                 extension_names=context["extension_names"],
                 form_name=context["form_name"],
                 form_title=context["form_title"],
@@ -1653,7 +1638,6 @@ def _discover_form_hints(
 def _discover_startup_hints(
     *,
     configuration_name: str = "",
-    configuration_version: str = "",
     extension_names: Any = None,
     include_global: bool = True,
     include_configuration: bool = True,
@@ -1661,7 +1645,6 @@ def _discover_startup_hints(
 ) -> dict[str, Any]:
     """Return compact discovery summary for global/config/extension hints shown at startup."""
     target_config = _normalize_form_hint_part(configuration_name).casefold()
-    target_config_version = _normalize_form_hint_part(configuration_version).casefold()
     target_extensions = {
         item.casefold()
         for item in _normalize_extension_names(extension_names)
@@ -1681,10 +1664,7 @@ def _discover_startup_hints(
                 if not include_configuration:
                     continue
                 entry_config = _normalize_form_hint_part(str(entry.get("configuration_name") or "")).casefold()
-                entry_version = _normalize_form_hint_part(str(entry.get("configuration_version") or "")).casefold()
                 if not (target_config and entry_config == target_config):
-                    continue
-                if entry_version and target_config_version and entry_version != target_config_version:
                     continue
             elif scope == "extension":
                 if not include_extensions:
@@ -1704,18 +1684,16 @@ def _discover_startup_hints(
         "scopes": _form_hint_scopes(entries),
         "context": {
             "configuration_name": _normalize_form_hint_part(configuration_name),
-            "configuration_version": _normalize_form_hint_part(configuration_version),
             "extension_names": _normalize_extension_names(extension_names),
         },
         "call_to_read": "form_hints_get(include_global=true, operation=<operation>)",
     }
 
 
-def _discover_configuration_hints(configuration_name: str, configuration_version: str = "") -> dict[str, Any]:
+def _discover_configuration_hints(configuration_name: str) -> dict[str, Any]:
     """Return compact discovery summary for hints scoped to one configuration only."""
     return _discover_startup_hints(
         configuration_name=configuration_name,
-        configuration_version=configuration_version,
         extension_names=[],
         include_global=False,
         include_configuration=True,
@@ -1727,7 +1705,6 @@ def _discover_extension_hints(extension_names: Any) -> dict[str, Any]:
     """Return compact discovery summary for hints scoped to installed extensions only."""
     return _discover_startup_hints(
         configuration_name="",
-        configuration_version="",
         extension_names=extension_names,
         include_global=False,
         include_configuration=False,
@@ -1744,8 +1721,7 @@ def _session_or_none(session_id: str) -> SessionState | None:
 
 def _attach_configuration_hints_to_result(result: dict[str, Any]) -> dict[str, Any]:
     configuration_name = str(result.get("configuration_name") or "")
-    configuration_version = str(result.get("configuration_version") or "")
-    result["configuration_hints"] = _discover_configuration_hints(configuration_name, configuration_version)
+    result["configuration_hints"] = _discover_configuration_hints(configuration_name)
     return result
 
 
@@ -3670,7 +3646,6 @@ def _form_hints_context_from_ui_tree(tree: Any, *, base_url: str = "") -> dict[s
     context = {
         "base_url": _normalize_base_url(base_url),
         "configuration_name": "",
-        "configuration_version": "",
         "extension_names": [],
         "form_name": "",
         "form_title": "",
@@ -3705,19 +3680,16 @@ def _attach_form_hints_to_ui_tree(tree: Any, *, session_id: str) -> Any:
         return tree
     base_url = ""
     configuration_name = ""
-    configuration_version = ""
     extension_names: list[str] = []
     with suppress(Exception):
         sess = _session(session_id)
         base_url = sess.base_url
         configuration_name = sess.configuration_name
-        configuration_version = sess.configuration_version
         extension_names = _session_extension_names(sess)
     context = _form_hints_context_from_ui_tree(tree, base_url=base_url)
     tree["form_hints"] = _discover_form_hints(
         base_url=context["base_url"],
         configuration_name=configuration_name,
-        configuration_version=configuration_version,
         extension_names=extension_names,
         form_name=context["form_name"],
         form_title=context["form_title"],
@@ -5491,7 +5463,6 @@ async def start_session(
         "global_hints": _discover_global_hints(),
         "startup_hints": _discover_startup_hints(
             configuration_name=sess.configuration_name,
-            configuration_version=sess.configuration_version,
             extension_names=sess.extension_names,
         ),
         "idle_timeout_seconds": sess.idle_timeout_seconds,
@@ -6335,7 +6306,6 @@ async def form_hints_get(
     form_title: Annotated[str, "Visible form/window title. Used when form_name is unknown"] = "",
     base_url: Annotated[str, "Infobase URL scope. Empty means current session base URL"] = "",
     configuration_name: Annotated[str, "Configuration scope name/code. Empty means current session detected configuration when available"] = "",
-    configuration_version: Annotated[str, "Optional configuration version for configuration-scoped hints"] = "",
     extension_name: Annotated[str, "Extension scope name. Empty means any installed extension from current session for extension-scoped matching"] = "",
     extension_version: Annotated[str, "Optional extension version for extension-scoped hints"] = "",
     operation: Annotated[str, "Optional scenario/operation name, e.g. create-receipt or load-okei"] = "",
@@ -6358,7 +6328,6 @@ async def form_hints_get(
         session_id,
         base_url=base_url,
         configuration_name=configuration_name,
-        configuration_version=configuration_version,
         extension_names=[extension_name] if extension_name else None,
         form_name=form_name,
         form_title=form_title,
@@ -6377,7 +6346,6 @@ async def form_hints_get(
                 entry,
                 base_url=context["base_url"],
                 configuration_name=context["configuration_name"],
-                configuration_version=context["configuration_version"],
                 extension_names=context["extension_names"],
                 extension_name=context_extension_name,
                 extension_version=context_extension_version,
@@ -6398,7 +6366,6 @@ async def form_hints_get(
                 entry,
                 base_url=context["base_url"],
                 configuration_name=context["configuration_name"],
-                configuration_version=context["configuration_version"],
                 extension_names=context["extension_names"],
                 extension_name=context_extension_name,
                 extension_version=context_extension_version,
@@ -6427,7 +6394,6 @@ async def form_hints_get(
         "form_title": form_title,
         "base_url": base_url,
         "configuration_name": configuration_name,
-        "configuration_version": configuration_version,
         "extension_name": extension_name,
         "extension_version": extension_version,
         "operation": operation,
@@ -6446,7 +6412,6 @@ async def form_hints_set(
     base_url: Annotated[str, "Infobase URL scope. Empty means current session base URL; used when scope=base"] = "",
     scope: Annotated[str, "Hint scope: base (default), configuration, extension, or global"] = "base",
     configuration_name: Annotated[str, "Configuration name/code for scope=configuration; empty means current session detected configuration"] = "",
-    configuration_version: Annotated[str, "Optional configuration version for scope=configuration"] = "",
     extension_name: Annotated[str, "Extension name for scope=extension"] = "",
     extension_version: Annotated[str, "Optional extension version for scope=extension"] = "",
     operation: Annotated[str, "Optional scenario/operation name, e.g. create-receipt or load-okei"] = "",
@@ -6461,7 +6426,6 @@ async def form_hints_set(
         session_id,
         base_url="" if effective_scope != "base" else base_url,
         configuration_name=configuration_name,
-        configuration_version=configuration_version,
         extension_names=[extension_name] if extension_name else None,
         form_name=form_name,
         form_title=form_title,
@@ -6470,7 +6434,6 @@ async def form_hints_set(
         context["base_url"] = ""
     if effective_scope != "configuration":
         context["configuration_name"] = ""
-        context["configuration_version"] = ""
     if effective_scope == "extension":
         clean_extension_name = _normalize_form_hint_part(extension_name)
         if not clean_extension_name and context["extension_names"]:
@@ -6491,7 +6454,6 @@ async def form_hints_set(
         context["form_title"],
         clean_operation,
         context["configuration_name"],
-        context["configuration_version"],
         clean_extension_name,
         clean_extension_version,
     )
@@ -6500,7 +6462,6 @@ async def form_hints_set(
         "scope": effective_scope,
         "base_url": context["base_url"],
         "configuration_name": context["configuration_name"],
-        "configuration_version": context["configuration_version"],
         "extension_name": clean_extension_name,
         "extension_version": clean_extension_version,
         "form_name": context["form_name"],
@@ -6534,7 +6495,6 @@ async def form_hints_set(
         "base_url": base_url,
         "scope": scope,
         "configuration_name": configuration_name,
-        "configuration_version": configuration_version,
         "extension_name": extension_name,
         "extension_version": extension_version,
         "operation": operation,

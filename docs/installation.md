@@ -60,7 +60,7 @@ PyPI-пакет не может сам записывать skills в профи
 answer42 install-skills
 ```
 
-По умолчанию устанавливаются `answer42` и `answer42-rag` для OpenClaw в `~/.openclaw/workspace/skills`.
+По умолчанию устанавливаются `answer42`, `answer42-rag` и `answer42-universal-report` для OpenClaw в `~/.openclaw/workspace/skills`.
 
 Для других агентов или явного пути:
 
@@ -90,17 +90,16 @@ OpenClaw хранит MCP-серверы в `mcp.servers`. Добавьте `Ans
 
 ## Skills
 
-Репозиторий содержит skills для агентов:
+Репозиторий содержит bundled skills для агентов в единственном canonical месте:
 
-- `skills/answer42/SKILL.md`
-- `skills/answer42-rag/SKILL.md`
+- `src/mcp_1c/assets/skills/answer42/SKILL.md`
+- `src/mcp_1c/assets/skills/answer42-rag/SKILL.md`
+- `src/mcp_1c/assets/skills/answer42-universal-report/SKILL.md`
 
-Установка в workspace skills directory:
+Не копируйте эти каталоги вручную из checkout: используйте installer, чтобы установить bundled skills в workspace skills directory:
 
 ```bash
-mkdir -p ~/.openclaw/workspace/skills
-cp -a skills/answer42 ~/.openclaw/workspace/skills/
-cp -a skills/answer42-rag ~/.openclaw/workspace/skills/
+answer42 install-skills
 ```
 
 ## Smoke checks
