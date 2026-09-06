@@ -645,12 +645,13 @@ def test_form_hints_set_and_get_explicit_context(monkeypatch, tmp_path):
     assert saved["saved"] is True
     assert saved["created"] is True
     assert saved["hints_format"] == "json"
-    assert saved["context"] == {
+    assert saved["context"].items() >= {
         "base_url": "<TARGET_BP_INFOBASE_URL>",
         "form_name": "Документ.ПоступлениеТоваровУслуг.Форма.ФормаДокумента",
         "form_title": "Поступление товаров: Накладная, УПД",
+        "scope": "base",
         "operation": "create-receipt",
-    }
+    }.items()
 
     found = asyncio.run(server.form_hints_get(
         form_name="Документ.ПоступлениеТоваровУслуг.Форма.ФормаДокумента",
@@ -665,14 +666,13 @@ def test_form_hints_set_and_get_explicit_context(monkeypatch, tmp_path):
     assert found["hints"][0]["hints"] == hints
     assert found["hints"][0]["tags"] == ["bp", "receipt"]
     assert found["hints"][0]["match"] == "exact_form_name+operation+base"
-    assert found["operations"] == [
-        {
-            "operation": "create-receipt",
-            "count": 1,
-            "base_urls": ["<TARGET_BP_INFOBASE_URL>"],
-            "titles": ["Поступление товаров: Накладная, УПД"],
-        }
-    ]
+    assert found["operations"][0].items() >= {
+        "operation": "create-receipt",
+        "count": 1,
+        "scopes": ["base"],
+        "base_urls": ["<TARGET_BP_INFOBASE_URL>"],
+        "titles": ["Поступление товаров: Накладная, УПД"],
+    }.items()
 
     any_operation = asyncio.run(server.form_hints_get(
         form_name="Документ.ПоступлениеТоваровУслуг.Форма.ФормаДокумента",
@@ -716,13 +716,172 @@ def test_form_hints_global_scope_and_text_payload(monkeypatch, tmp_path):
     assert found["hints"][0]["hints"] == "Use table_set_field(row=...) for classifier checkboxes."
     assert found["hints"][0]["tags"] == ["okei", "checkbox"]
     assert found["hints"][0]["match"] == "exact_form_name+operation+global"
-    assert found["operations"] == [
-        {
-            "operation": "load-okei",
-            "count": 1,
-            "titles": ["Загрузка из классификатора единиц измерения"],
-        }
-    ]
+    assert found["operations"][0].items() >= {
+        "operation": "load-okei",
+        "count": 1,
+        "scopes": ["global"],
+        "titles": ["Загрузка из классификатора единиц измерения"],
+    }.items()
+
+
+def test_form_hints_discovery_separates_current_form_and_global(monkeypatch, tmp_path):
+    from mcp_1c import server
+
+    monkeypatch.setattr(server, "FORM_HINTS_FILE", tmp_path / "form-hints.json")
+    monkeypatch.setattr(server, "FORM_HINTS_LOCK", tmp_path / "form-hints.lock")
+
+    form_name = "Документ.ПоступлениеТоваровУслуг.Форма.ФормаДокумента"
+    form_title = "Поступление товаров: Накладная, УПД"
+    base_url = "https://example.invalid/bp/1/"
+
+    asyncio.run(server.form_hints_set(
+        "Base-specific receipt hint",
+        form_name=form_name,
+        form_title=form_title,
+        base_url=base_url,
+        operation="create-receipt",
+        session_id="missing-session",
+    ))
+    asyncio.run(server.form_hints_set(
+        "Global receipt hint",
+        form_name=form_name,
+        form_title=form_title,
+        base_url=base_url,
+        operation="global-receipt",
+        use_global=True,
+        session_id="missing-session",
+    ))
+
+    current_form = server._discover_form_hints(
+        base_url=base_url,
+        form_name=form_name,
+        form_title=form_title,
+        include_global=False,
+        form_only=True,
+    )
+    global_hints = server._discover_startup_hints()
+
+    assert current_form["available"] is True
+    assert current_form["count"] == 1
+    assert current_form["operation_names"] == ["create-receipt"]
+    assert current_form["call_to_read"] == "form_hints_get(operation=<operation>)"
+    assert global_hints["available"] is True
+    assert global_hints["count"] == 1
+    assert global_hints["operation_names"] == ["global-receipt"]
+
+
+def test_form_hints_configuration_and_extension_scopes(monkeypatch, tmp_path):
+    from mcp_1c import server
+
+    monkeypatch.setattr(server, "FORM_HINTS_FILE", tmp_path / "form-hints.json")
+    monkeypatch.setattr(server, "FORM_HINTS_LOCK", tmp_path / "form-hints.lock")
+
+    form_name = "Документ.ЗаказКлиента.Форма.ФормаДокумента"
+    form_title = "Заказ клиента"
+
+    config_saved = asyncio.run(server.form_hints_set(
+        "UNF customer order flow.",
+        form_name=form_name,
+        form_title=form_title,
+        scope="configuration",
+        configuration_name="УправлениеНашейФирмой",
+        configuration_version="3.0.12.34",
+        operation="create-customer-order",
+        session_id="missing-session",
+    ))
+    extension_saved = asyncio.run(server.form_hints_set(
+        "ConnectionToSM extension flow.",
+        form_name=form_name,
+        form_title=form_title,
+        scope="extension",
+        extension_name="ConnectionToSM",
+        operation="connection-settings",
+        session_id="missing-session",
+    ))
+
+    found = asyncio.run(server.form_hints_get(
+        form_name=form_name,
+        form_title=form_title,
+        configuration_name="УправлениеНашейФирмой",
+        configuration_version="3.0.12.34",
+        extension_name="ConnectionToSM",
+        session_id="missing-session",
+    ))
+
+    assert found["found"] is True
+    assert {item["key"] for item in found["hints"]} == {config_saved["key"], extension_saved["key"]}
+    assert {item["scope"] for item in found["hints"]} == {"configuration", "extension"}
+    assert {item["operation"] for item in found["hints"]} == {
+        "create-customer-order",
+        "connection-settings",
+    }
+
+    startup = server._discover_startup_hints(
+        configuration_name="УправлениеНашейФирмой",
+        configuration_version="3.0.12.34",
+        extension_names=["ConnectionToSM"],
+    )
+    assert startup["available"] is True
+    assert set(startup["operation_names"]) == {"create-customer-order", "connection-settings"}
+    assert set(startup["scopes"]) == {"configuration", "extension"}
+
+
+def test_ui_tree_attaches_current_form_hints_without_global(monkeypatch, tmp_path):
+    from mcp_1c import server
+    from mcp_1c.server import SessionState, ui_tree
+
+    monkeypatch.setattr(server, "FORM_HINTS_FILE", tmp_path / "form-hints.json")
+    monkeypatch.setattr(server, "FORM_HINTS_LOCK", tmp_path / "form-hints.lock")
+
+    sid = "unit_form_hints_ui"
+    form_name = "Документ.ПоступлениеТоваровУслуг.Форма.ФормаДокумента"
+    form_title = "Поступление товаров: Накладная, УПД"
+    base_url = "https://example.invalid/bp/1/"
+    sess = SessionState(sid, "", Path("."), 11001, 11002, 11003, tmp_path, base_url=base_url)
+    server._SESSIONS[sid] = sess
+
+    try:
+        asyncio.run(server.form_hints_set(
+            "Base-specific receipt hint",
+            form_name=form_name,
+            form_title=form_title,
+            base_url=base_url,
+            operation="create-receipt",
+            session_id="missing-session",
+        ))
+        asyncio.run(server.form_hints_set(
+            "Global receipt hint",
+            form_name=form_name,
+            form_title=form_title,
+            base_url=base_url,
+            operation="global-receipt",
+            use_global=True,
+            session_id="missing-session",
+        ))
+
+        async def fake_bridge_call(session_id, method, params):
+            return {
+                "type": "Window",
+                "title": form_title,
+                "client_diagnostics": {
+                    "active_form_name": form_name,
+                    "active_form_title": form_title,
+                },
+                "children": [],
+                "_tree_ms": 10,
+                "_nodes_serialized": 1,
+            }
+
+        monkeypatch.setattr(server, "_bridge_call_recorded", fake_bridge_call)
+
+        result = asyncio.run(ui_tree(session_id=sid))
+
+        assert result["form_hints"]["available"] is True
+        assert result["form_hints"]["count"] == 1
+        assert result["form_hints"]["operation_names"] == ["create-receipt"]
+        assert result["form_hints"]["context"]["form_name"] == form_name
+    finally:
+        server._SESSIONS.pop(sid, None)
 
 
 
@@ -1300,6 +1459,122 @@ def test_configuration_name_version_from_subsystems_prefers_sorted_first_row(mon
         ("table_current_row", {"name": "Список", "title": ""}),
         ("active_window", {}),
     ]
+
+
+def test_configuration_name_version_outputs_hints_and_uses_session_cache(monkeypatch, tmp_path):
+    from mcp_1c import server
+    from mcp_1c.server import SessionState
+
+    monkeypatch.setattr(server, "FORM_HINTS_FILE", tmp_path / "form-hints.json")
+    monkeypatch.setattr(server, "FORM_HINTS_LOCK", tmp_path / "form-hints.lock")
+    monkeypatch.setattr(server, "CONFIGURATION_CACHE_FILE", tmp_path / "configuration-cache.json")
+    monkeypatch.setattr(server, "CONFIGURATION_CACHE_LOCK", tmp_path / "configuration-cache.lock")
+    sid = "unit_configuration_hints_cache"
+    base_url = "https://example.invalid/bp/1/"
+    sess = SessionState(sid, "", Path("."), 11001, 11002, 11003, tmp_path, base_url=base_url)
+    server._SESSIONS[sid] = sess
+    calls = []
+
+    asyncio.run(server.form_hints_set(
+        "BP document hint",
+        form_title="Поступление товаров",
+        scope="configuration",
+        configuration_name="МенеджерСервиса",
+        operation="bp-document",
+        session_id="missing-session",
+    ))
+
+    async def fake_bridge_call(session_id, method, params):
+        assert session_id == sid
+        calls.append((method, params))
+        if method == "dynamic_list_sort_by_column":
+            return {"ordered": True}
+        if method == "table_move_row":
+            return {"moved": True, "direction": params.get("direction")}
+        if method == "table_current_row":
+            return {"pairs": [
+                {"key": "Имя подсистемы", "value": "МенеджерСервиса"},
+                {"key": "Версия", "value": "1.1.56.26"},
+                {"key": "Это основная конфигурация", "value": "Да"},
+            ]}
+        if method == "dynamic_list_output":
+            raise AssertionError("MXL fallback should not be used")
+        if method == "active_window":
+            return {"title": "Поступление товаров", "form_name": "Документ.ПоступлениеТоваров.ФормаДокумента"}
+        return {"ok": True}
+
+    monkeypatch.setattr("mcp_1c.server._bridge_call_recorded", fake_bridge_call)
+
+    try:
+        first = asyncio.run(configuration_name_version_from_subsystems(session_id=sid))
+        same_session_cached = asyncio.run(configuration_name_version_from_subsystems(session_id=sid))
+        server._SESSIONS.pop(sid, None)
+        restarted = SessionState(sid, "", Path("."), 11001, 11002, 11003, tmp_path, base_url=base_url)
+        server._SESSIONS[sid] = restarted
+        restarted_cached = asyncio.run(configuration_name_version_from_subsystems(session_id=sid))
+    finally:
+        server._SESSIONS.pop(sid, None)
+
+    assert first["cache_hit"] is False
+    assert first["configuration_hints"]["operation_names"] == ["bp-document"]
+    assert first["configuration_hints"]["scopes"] == ["configuration"]
+    assert same_session_cached["cache_hit"] is True
+    assert same_session_cached["configuration_hints"]["operation_names"] == ["bp-document"]
+    assert restarted_cached["cache_hit"] is True
+    assert restarted_cached["configuration_name"] == "МенеджерСервиса"
+    assert restarted_cached["configuration_hints"]["operation_names"] == ["bp-document"]
+    assert [method for method, _params in calls].count("open_navigation_link") == 1
+
+
+def test_installed_extensions_outputs_hints_and_uses_session_cache(monkeypatch, tmp_path):
+    from mcp_1c import server
+    from mcp_1c.server import SessionState
+
+    monkeypatch.setattr(server, "FORM_HINTS_FILE", tmp_path / "form-hints.json")
+    monkeypatch.setattr(server, "FORM_HINTS_LOCK", tmp_path / "form-hints.lock")
+    sid = "unit_extension_hints_cache"
+    sess = SessionState(sid, "", Path("."), 11001, 11002, 11003, tmp_path, base_url="https://example.invalid/bp/1/")
+    server._SESSIONS[sid] = sess
+    calls = []
+
+    asyncio.run(server.form_hints_set(
+        "ConnectionToSM hint",
+        form_title="Настройки подключения",
+        scope="extension",
+        extension_name="ConnectionToSM",
+        operation="connection-settings",
+        session_id="missing-session",
+    ))
+
+    async def fake_bridge_call(session_id, method, params):
+        assert session_id == sid
+        calls.append((method, params))
+        if method == "table_rows":
+            return {"rows": [{"pairs": [
+                {"key": "Пометка удаления", "value": "Нет"},
+                {"key": "Порядковый номер", "value": "10"},
+                {"key": "Дата последнего использования", "value": "01.09.2026 12:00:00"},
+                {"key": "Описание метаданных", "value": "#МенеджерСервиса\nConnectionToSM (1.2.3)\nEF_123"},
+            ]}]}
+        if method == "active_window":
+            return {"title": "Поступление товаров", "form_name": "Документ.ПоступлениеТоваров.ФормаДокумента"}
+        return {"ok": True}
+
+    monkeypatch.setattr("mcp_1c.server._bridge_call_recorded", fake_bridge_call)
+
+    try:
+        first = asyncio.run(server.installed_extensions_from_catalog(session_id=sid))
+        second = asyncio.run(server.installed_extensions_from_catalog(session_id=sid))
+    finally:
+        server._SESSIONS.pop(sid, None)
+
+    assert first["cache_hit"] is False
+    assert first["extensions"][0].items() >= {"name": "ConnectionToSM", "version": "1.2.3"}.items()
+    assert first["extension_hints"]["operation_names"] == ["connection-settings"]
+    assert first["extension_hints"]["scopes"] == ["extension"]
+    assert second["cache_hit"] is True
+    assert second["extension_hints"]["operation_names"] == ["connection-settings"]
+    assert [method for method, _params in calls].count("open_navigation_link") == 1
 
 
 def test_close_self_opened_form_closes_matching_active_window(monkeypatch):

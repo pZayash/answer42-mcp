@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import copy
 import hashlib
 import importlib.resources
 import json
@@ -75,6 +76,8 @@ GLOBAL_ORPHAN_TTL_SECONDS = int(os.getenv("ONEC_MCP_ORPHAN_TTL_SECONDS", "1800")
 AUTORELOAD_PID_FILE = os_support.runtime_path("ONEC_MCP_AUTORELOAD_PID_FILE", "answer42-autoreload.pid")
 AUTORELOAD_LOG_FILE = os_support.runtime_path("ONEC_MCP_AUTORELOAD_LOG_FILE", "answer42-autoreload.log")
 RAG_BINDINGS_FILE = os_support.runtime_path("ONEC_MCP_RAG_BINDINGS", "rag-bindings.json")
+CONFIGURATION_CACHE_FILE = os_support.runtime_path("ONEC_MCP_CONFIGURATION_CACHE", "configuration-cache.json")
+CONFIGURATION_CACHE_LOCK = os_support.runtime_path("ONEC_MCP_CONFIGURATION_CACHE_LOCK", "configuration-cache.lock")
 UI_TREE_SNAPSHOTS_DIR = os_support.runtime_path("ONEC_MCP_UI_TREE_SNAPSHOTS_DIR", "ui-tree-snapshots")
 FORM_HINTS_FILE = os_support.runtime_path("ONEC_MCP_FORM_HINTS_FILE", "form-hints.json")
 FORM_HINTS_LOCK = os_support.runtime_path("ONEC_MCP_FORM_HINTS_LOCK", "form-hints.lock")
@@ -562,6 +565,11 @@ class SessionState:
         self.rag_snapshot: str = ""
         self.rag_enabled: bool = True
         self.rag_notice: dict[str, Any] = {}
+        self.configuration_name: str = ""
+        self.configuration_version: str = ""
+        self.extension_names: list[str] = []
+        self.configuration_info_cache: dict[str, Any] = {}
+        self.installed_extensions_cache: dict[str, Any] = {}
         self.idle_timeout_seconds: int = 60 * 60
         self.last_activity_monotonic: float = time.monotonic()
         self.blocked_action: dict[str, Any] | None = None
@@ -586,6 +594,11 @@ class SessionState:
             "rag_snapshot": self.rag_snapshot,
             "rag_enabled": self.rag_enabled,
             "rag_notice": self.rag_notice,
+            "configuration_name": self.configuration_name,
+            "configuration_version": self.configuration_version,
+            "extension_names": self.extension_names,
+            "configuration_info_cache": self.configuration_info_cache,
+            "installed_extensions_cache": self.installed_extensions_cache,
             "idle_timeout_seconds": self.idle_timeout_seconds,
             "target_connection_mode": self.target_connection_mode,
             "target_connection_value": self.target_connection_value,
@@ -619,6 +632,14 @@ class SessionState:
         sess.rag_enabled = bool(data.get("rag_enabled", True))
         rag_notice = data.get("rag_notice")
         sess.rag_notice = rag_notice if isinstance(rag_notice, dict) else {}
+        sess.configuration_name = str(data.get("configuration_name") or "")
+        sess.configuration_version = str(data.get("configuration_version") or "")
+        extension_names = data.get("extension_names")
+        sess.extension_names = [str(item) for item in extension_names] if isinstance(extension_names, list) else []
+        configuration_info_cache = data.get("configuration_info_cache")
+        sess.configuration_info_cache = configuration_info_cache if isinstance(configuration_info_cache, dict) else {}
+        installed_extensions_cache = data.get("installed_extensions_cache")
+        sess.installed_extensions_cache = installed_extensions_cache if isinstance(installed_extensions_cache, dict) else {}
         sess.idle_timeout_seconds = int(data.get("idle_timeout_seconds") or 60 * 60)
         blocked_action = data.get("blocked_action")
         sess.blocked_action = blocked_action if isinstance(blocked_action, dict) else None
@@ -1168,6 +1189,58 @@ def _snapshot_for_base_url(base_url: str) -> str:
     return _load_rag_bindings().get(_normalize_base_url(base_url), "")
 
 
+def _load_configuration_cache_unlocked() -> dict[str, Any]:
+    if not CONFIGURATION_CACHE_FILE.exists():
+        return {"version": 1, "bases": {}}
+    try:
+        raw = json.loads(CONFIGURATION_CACHE_FILE.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logging.warning("Could not read configuration cache %s: %s", CONFIGURATION_CACHE_FILE, exc)
+        return {"version": 1, "bases": {}}
+    if not isinstance(raw, dict):
+        return {"version": 1, "bases": {}}
+    bases = raw.get("bases")
+    if not isinstance(bases, dict):
+        raw["bases"] = {}
+    raw.setdefault("version", 1)
+    return raw
+
+
+def _save_configuration_cache_unlocked(data: dict[str, Any]) -> None:
+    CONFIGURATION_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    CONFIGURATION_CACHE_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _configuration_cache_key(base_url: str) -> str:
+    return _normalize_base_url(base_url)
+
+
+def _load_cached_configuration_for_base_url(base_url: str) -> dict[str, Any] | None:
+    key = _configuration_cache_key(base_url)
+    if not key:
+        return None
+    with os_support.file_lock(CONFIGURATION_CACHE_LOCK):
+        data = _load_configuration_cache_unlocked()
+        entry = data.get("bases", {}).get(key)
+    return copy.deepcopy(entry) if isinstance(entry, dict) else None
+
+
+def _save_cached_configuration_for_base_url(base_url: str, result: dict[str, Any]) -> None:
+    key = _configuration_cache_key(base_url)
+    if not key or not result.get("found"):
+        return
+    entry = copy.deepcopy(result)
+    entry["cache_hit"] = False
+    entry["cached_at"] = _utc_now_iso()
+    entry["base_url"] = key
+    with os_support.file_lock(CONFIGURATION_CACHE_LOCK):
+        data = _load_configuration_cache_unlocked()
+        bases = data.setdefault("bases", {})
+        if isinstance(bases, dict):
+            bases[key] = entry
+        _save_configuration_cache_unlocked(data)
+
+
 def _utc_now_iso() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
@@ -1198,9 +1271,22 @@ def _normalize_form_hint_part(value: str) -> str:
     return re.sub(r"\s+", " ", str(value or "").strip())
 
 
-def _form_hint_key(base_url: str, form_name: str, form_title: str, operation: str) -> str:
+def _form_hint_key(
+    base_url: str,
+    form_name: str,
+    form_title: str,
+    operation: str,
+    configuration_name: str = "",
+    configuration_version: str = "",
+    extension_name: str = "",
+    extension_version: str = "",
+) -> str:
     parts = [
         _normalize_base_url(base_url).casefold(),
+        _normalize_form_hint_part(configuration_name).casefold(),
+        _normalize_form_hint_part(configuration_version).casefold(),
+        _normalize_form_hint_part(extension_name).casefold(),
+        _normalize_form_hint_part(extension_version).casefold(),
         _normalize_form_hint_part(form_name).casefold(),
         _normalize_form_hint_part(form_title).casefold(),
         _normalize_form_hint_part(operation).casefold(),
@@ -1237,22 +1323,139 @@ def _parse_hint_tags(tags: str) -> list[str]:
     return result
 
 
+def _normalize_extension_names(extension_names: Any) -> list[str]:
+    if isinstance(extension_names, str):
+        raw = extension_names.strip()
+        if not raw:
+            return []
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            parsed = re.split(r"[,;\n]+", raw)
+    elif isinstance(extension_names, list | tuple | set):
+        parsed = list(extension_names)
+    else:
+        parsed = []
+    result: list[str] = []
+    for item in parsed:
+        text = _normalize_form_hint_part(str(item))
+        if text and text not in result:
+            result.append(text)
+    return result
+
+
+def _hint_scope_fields(scope: str) -> tuple[str, str, str]:
+    value = str(scope or "").strip().lower().replace("-", "_")
+    if value in {"", "base", "infobase", "url"}:
+        return "base", "base_url", "base URL"
+    if value in {"configuration", "config", "conf"}:
+        return "configuration", "configuration_name", "configuration"
+    if value in {"extension", "ext"}:
+        return "extension", "extension_name", "extension"
+    if value == "global":
+        return "global", "", "global"
+    raise ValueError("form hint scope must be one of: base, configuration, extension, global")
+
+
+def _session_extension_names(sess: SessionState | None) -> list[str]:
+    if sess is None:
+        return []
+    names = list(sess.extension_names)
+    notice = sess.rag_notice if isinstance(sess.rag_notice, dict) else {}
+    for key in ("runtime_extensions", "installed_extensions"):
+        for item in notice.get(key) or []:
+            if isinstance(item, dict):
+                name = _normalize_form_hint_part(str(item.get("name") or item.get("runtime_name") or ""))
+                if name and name not in names:
+                    names.append(name)
+    return names
+
+
+def _form_hint_scope(entry: dict[str, Any]) -> str:
+    if _normalize_base_url(str(entry.get("base_url") or "")):
+        return "base"
+    if _normalize_form_hint_part(str(entry.get("extension_name") or "")):
+        return "extension"
+    if _normalize_form_hint_part(str(entry.get("configuration_name") or "")):
+        return "configuration"
+    return "global"
+
+
+def _form_hint_scopes(entries: list[dict[str, Any]]) -> list[str]:
+    scopes: list[str] = []
+    for entry in entries:
+        scope = _form_hint_scope(entry)
+        if scope not in scopes:
+            scopes.append(scope)
+    return scopes
+
+
 def _form_hints_entry_matches(
     entry: dict[str, Any],
     *,
     base_url: str,
+    configuration_name: str = "",
+    configuration_version: str = "",
+    extension_names: list[str] | None = None,
+    extension_name: str = "",
+    extension_version: str = "",
     form_name: str,
     form_title: str,
     operation: str,
     include_global: bool,
+    include_configuration: bool = True,
+    include_extensions: bool = True,
 ) -> tuple[bool, int, str]:
     entry_base = _normalize_base_url(str(entry.get("base_url") or ""))
     target_base = _normalize_base_url(base_url)
-    base_exact = bool(target_base) and entry_base == target_base
-    base_global = include_global and not entry_base
-    if target_base and not (base_exact or base_global):
-        return False, 0, ""
-    if not target_base and entry_base:
+    entry_config = _normalize_form_hint_part(str(entry.get("configuration_name") or "")).casefold()
+    target_config = _normalize_form_hint_part(configuration_name).casefold()
+    entry_config_version = _normalize_form_hint_part(str(entry.get("configuration_version") or "")).casefold()
+    target_config_version = _normalize_form_hint_part(configuration_version).casefold()
+    entry_extension = _normalize_form_hint_part(str(entry.get("extension_name") or "")).casefold()
+    target_extensions = {
+        _normalize_form_hint_part(item).casefold()
+        for item in (extension_names or [])
+        if _normalize_form_hint_part(item)
+    }
+    target_extension = _normalize_form_hint_part(extension_name).casefold()
+    if target_extension:
+        target_extensions.add(target_extension)
+    entry_extension_version = _normalize_form_hint_part(str(entry.get("extension_version") or "")).casefold()
+    target_extension_version = _normalize_form_hint_part(extension_version).casefold()
+
+    scope = _form_hint_scope(entry)
+    scope_matched = False
+    scope_score = 0
+    scope_match = ""
+    if scope == "base":
+        if not (target_base and entry_base == target_base):
+            return False, 0, ""
+        scope_matched = True
+        scope_score = 30
+        scope_match = "+base"
+    elif scope == "configuration":
+        if not include_configuration or not (target_config and entry_config == target_config):
+            return False, 0, ""
+        if entry_config_version and target_config_version and entry_config_version != target_config_version:
+            return False, 0, ""
+        scope_matched = True
+        scope_score = 20 + (5 if entry_config_version and target_config_version else 0)
+        scope_match = "+configuration"
+    elif scope == "extension":
+        if not include_extensions or not (entry_extension and entry_extension in target_extensions):
+            return False, 0, ""
+        if entry_extension_version and target_extension_version and entry_extension_version != target_extension_version:
+            return False, 0, ""
+        scope_matched = True
+        scope_score = 25 + (5 if entry_extension_version and target_extension_version else 0)
+        scope_match = "+extension"
+    elif scope == "global":
+        if not include_global:
+            return False, 0, ""
+        scope_matched = True
+        scope_match = "+global"
+    if not scope_matched:
         return False, 0, ""
 
     entry_name = _normalize_form_hint_part(str(entry.get("form_name") or "")).casefold()
@@ -1285,11 +1488,8 @@ def _form_hints_entry_matches(
         match += "+default_operation"
     else:
         match += "+any_operation"
-    if base_exact:
-        score += 20
-        match += "+base"
-    elif base_global:
-        match += "+global"
+    score += scope_score
+    match += scope_match
     return True, score, match
 
 
@@ -1297,13 +1497,24 @@ async def _resolve_form_hints_context(
     session_id: str,
     *,
     base_url: str,
+    configuration_name: str = "",
+    configuration_version: str = "",
+    extension_names: Any = None,
     form_name: str,
     form_title: str,
-) -> dict[str, str]:
+) -> dict[str, Any]:
     sess: SessionState | None = None
     with suppress(Exception):
         sess = await _ensure_restored_session(session_id)
     resolved_base_url = _normalize_base_url(base_url or (sess.base_url if sess else ""))
+    resolved_configuration_name = _normalize_form_hint_part(configuration_name)
+    resolved_configuration_version = _normalize_form_hint_part(configuration_version)
+    resolved_extension_names = _normalize_extension_names(extension_names)
+    if sess is not None:
+        resolved_configuration_name = resolved_configuration_name or sess.configuration_name
+        resolved_configuration_version = resolved_configuration_version or sess.configuration_version
+        if not resolved_extension_names:
+            resolved_extension_names = list(sess.extension_names)
     resolved_form_name = _normalize_form_hint_part(form_name)
     resolved_form_title = _normalize_form_hint_part(form_title)
     active: Any = None
@@ -1317,6 +1528,9 @@ async def _resolve_form_hints_context(
         resolved_form_title = resolved_form_title or _normalize_form_hint_part(str(active.get("active_form_title") or active.get("title") or ""))
     return {
         "base_url": resolved_base_url,
+        "configuration_name": resolved_configuration_name,
+        "configuration_version": resolved_configuration_version,
+        "extension_names": resolved_extension_names,
         "form_name": resolved_form_name,
         "form_title": resolved_form_title,
     }
@@ -1327,11 +1541,28 @@ def _summarize_form_hints_operations(entries: list[dict[str, Any]]) -> list[dict
     for entry in entries:
         operation = _normalize_form_hint_part(str(entry.get("operation") or ""))
         key = operation or "(default)"
-        bucket = counts.setdefault(key, {"operation": operation, "count": 0, "base_urls": set(), "titles": set()})
+        bucket = counts.setdefault(key, {
+            "operation": operation,
+            "count": 0,
+            "base_urls": set(),
+            "configurations": set(),
+            "extensions": set(),
+            "scopes": set(),
+            "titles": set(),
+        })
         bucket["count"] += 1
+        bucket["scopes"].add(_form_hint_scope(entry))
         base_url = _normalize_base_url(str(entry.get("base_url") or ""))
         if base_url:
             bucket["base_urls"].add(base_url)
+        configuration_name = _normalize_form_hint_part(str(entry.get("configuration_name") or ""))
+        if configuration_name:
+            configuration_version = _normalize_form_hint_part(str(entry.get("configuration_version") or ""))
+            bucket["configurations"].add(f"{configuration_name} {configuration_version}".strip())
+        extension_name = _normalize_form_hint_part(str(entry.get("extension_name") or ""))
+        if extension_name:
+            extension_version = _normalize_form_hint_part(str(entry.get("extension_version") or ""))
+            bucket["extensions"].add(f"{extension_name} {extension_version}".strip())
         title = _normalize_form_hint_part(str(entry.get("form_title") or ""))
         if title:
             bucket["titles"].add(title)
@@ -1341,13 +1572,279 @@ def _summarize_form_hints_operations(entries: list[dict[str, Any]]) -> list[dict
             "operation": bucket["operation"],
             "count": bucket["count"],
         }
+        if bucket["scopes"]:
+            item["scopes"] = sorted(bucket["scopes"])
         if bucket["base_urls"]:
             item["base_urls"] = sorted(bucket["base_urls"])
+        if bucket["configurations"]:
+            item["configurations"] = sorted(bucket["configurations"])
+        if bucket["extensions"]:
+            item["extensions"] = sorted(bucket["extensions"])
         if bucket["titles"]:
             item["titles"] = sorted(bucket["titles"])
         result.append(item)
     result.sort(key=lambda item: (-int(item.get("count") or 0), str(item.get("operation") or "").casefold()))
     return result
+
+
+def _discover_form_hints(
+    *,
+    base_url: str = "",
+    configuration_name: str = "",
+    configuration_version: str = "",
+    extension_names: Any = None,
+    form_name: str = "",
+    form_title: str = "",
+    include_global: bool = True,
+    include_configuration: bool = True,
+    include_extensions: bool = True,
+    form_only: bool = False,
+) -> dict[str, Any]:
+    """Return a compact discovery summary for saved form hints without hint bodies."""
+    context = {
+        "base_url": _normalize_base_url(base_url),
+        "configuration_name": _normalize_form_hint_part(configuration_name),
+        "configuration_version": _normalize_form_hint_part(configuration_version),
+        "extension_names": _normalize_extension_names(extension_names),
+        "form_name": _normalize_form_hint_part(form_name),
+        "form_title": _normalize_form_hint_part(form_title),
+    }
+    entries: list[dict[str, Any]] = []
+    with os_support.file_lock(FORM_HINTS_LOCK):
+        data = _load_form_hints_unlocked()
+        for key, entry in data.get("entries", {}).items():
+            if not isinstance(entry, dict):
+                continue
+            matched, score, match = _form_hints_entry_matches(
+                entry,
+                base_url=context["base_url"],
+                configuration_name=context["configuration_name"],
+                configuration_version=context["configuration_version"],
+                extension_names=context["extension_names"],
+                form_name=context["form_name"],
+                form_title=context["form_title"],
+                operation="",
+                include_global=include_global,
+                include_configuration=include_configuration,
+                include_extensions=include_extensions,
+            )
+            if not matched:
+                continue
+            if form_only and not (context["form_name"] or context["form_title"]):
+                continue
+            item = dict(entry)
+            item["key"] = str(entry.get("key") or key)
+            item["score"] = score
+            item["match"] = match
+            entries.append(item)
+    entries.sort(key=lambda item: (int(item.get("score") or 0), str(item.get("updated_at") or "")), reverse=True)
+    operations = _summarize_form_hints_operations(entries)
+    return {
+        "available": bool(entries),
+        "count": len(entries),
+        "operations": operations,
+        "operation_names": [str(item.get("operation") or "") for item in operations],
+        "scopes": _form_hint_scopes(entries),
+        "context": context,
+        "call_to_read": "form_hints_get(operation=<operation>)",
+    }
+
+
+def _discover_startup_hints(
+    *,
+    configuration_name: str = "",
+    configuration_version: str = "",
+    extension_names: Any = None,
+    include_global: bool = True,
+    include_configuration: bool = True,
+    include_extensions: bool = True,
+) -> dict[str, Any]:
+    """Return compact discovery summary for global/config/extension hints shown at startup."""
+    target_config = _normalize_form_hint_part(configuration_name).casefold()
+    target_config_version = _normalize_form_hint_part(configuration_version).casefold()
+    target_extensions = {
+        item.casefold()
+        for item in _normalize_extension_names(extension_names)
+    }
+    entries: list[dict[str, Any]] = []
+    with os_support.file_lock(FORM_HINTS_LOCK):
+        data = _load_form_hints_unlocked()
+        for key, entry in data.get("entries", {}).items():
+            if not isinstance(entry, dict):
+                continue
+            scope = _form_hint_scope(entry)
+            if scope == "global" and not include_global:
+                continue
+            if scope == "base":
+                continue
+            if scope == "configuration":
+                if not include_configuration:
+                    continue
+                entry_config = _normalize_form_hint_part(str(entry.get("configuration_name") or "")).casefold()
+                entry_version = _normalize_form_hint_part(str(entry.get("configuration_version") or "")).casefold()
+                if not (target_config and entry_config == target_config):
+                    continue
+                if entry_version and target_config_version and entry_version != target_config_version:
+                    continue
+            elif scope == "extension":
+                if not include_extensions:
+                    continue
+                entry_extension = _normalize_form_hint_part(str(entry.get("extension_name") or "")).casefold()
+                if not (entry_extension and entry_extension in target_extensions):
+                    continue
+            item = dict(entry)
+            item["key"] = str(entry.get("key") or key)
+            entries.append(item)
+    operations = _summarize_form_hints_operations(entries)
+    return {
+        "available": bool(entries),
+        "count": len(entries),
+        "operations": operations,
+        "operation_names": [str(item.get("operation") or "") for item in operations],
+        "scopes": _form_hint_scopes(entries),
+        "context": {
+            "configuration_name": _normalize_form_hint_part(configuration_name),
+            "configuration_version": _normalize_form_hint_part(configuration_version),
+            "extension_names": _normalize_extension_names(extension_names),
+        },
+        "call_to_read": "form_hints_get(include_global=true, operation=<operation>)",
+    }
+
+
+def _discover_configuration_hints(configuration_name: str, configuration_version: str = "") -> dict[str, Any]:
+    """Return compact discovery summary for hints scoped to one configuration only."""
+    return _discover_startup_hints(
+        configuration_name=configuration_name,
+        configuration_version=configuration_version,
+        extension_names=[],
+        include_global=False,
+        include_configuration=True,
+        include_extensions=False,
+    )
+
+
+def _discover_extension_hints(extension_names: Any) -> dict[str, Any]:
+    """Return compact discovery summary for hints scoped to installed extensions only."""
+    return _discover_startup_hints(
+        configuration_name="",
+        configuration_version="",
+        extension_names=extension_names,
+        include_global=False,
+        include_configuration=False,
+        include_extensions=True,
+    )
+
+
+def _session_or_none(session_id: str) -> SessionState | None:
+    try:
+        return _session(session_id)
+    except Exception:
+        return None
+
+
+def _attach_configuration_hints_to_result(result: dict[str, Any]) -> dict[str, Any]:
+    configuration_name = str(result.get("configuration_name") or "")
+    configuration_version = str(result.get("configuration_version") or "")
+    result["configuration_hints"] = _discover_configuration_hints(configuration_name, configuration_version)
+    return result
+
+
+def _attach_extension_hints_to_result(result: dict[str, Any]) -> dict[str, Any]:
+    extensions = result.get("extensions") if isinstance(result.get("extensions"), list) else []
+    extension_names = [str(item.get("name") or "") for item in extensions if isinstance(item, dict)]
+    result["extension_hints"] = _discover_extension_hints(extension_names)
+    return result
+
+
+def _cache_configuration_result(session_id: str, result: dict[str, Any]) -> None:
+    sess = _session_or_none(session_id)
+    if sess is None or not result.get("found"):
+        return
+    sess.configuration_name = str(result.get("configuration_name") or sess.configuration_name or "")
+    sess.configuration_version = str(result.get("configuration_version") or sess.configuration_version or "")
+    sess.configuration_info_cache = copy.deepcopy(result)
+    if sess.base_url:
+        _save_cached_configuration_for_base_url(sess.base_url, result)
+    _persist_sessions()
+
+
+def _cached_configuration_result(session_id: str) -> dict[str, Any] | None:
+    sess = _session_or_none(session_id)
+    if sess is None:
+        return None
+    result = copy.deepcopy(sess.configuration_info_cache) if sess.configuration_info_cache else None
+    if result is None and sess.base_url:
+        result = _load_cached_configuration_for_base_url(sess.base_url)
+        if result is not None:
+            sess.configuration_name = str(result.get("configuration_name") or sess.configuration_name or "")
+            sess.configuration_version = str(result.get("configuration_version") or sess.configuration_version or "")
+            sess.configuration_info_cache = copy.deepcopy(result)
+            _persist_sessions()
+    if result is None:
+        return None
+    result["cache_hit"] = True
+    return _attach_configuration_hints_to_result(result)
+
+
+def _cache_extensions_result(session_id: str, result: dict[str, Any]) -> None:
+    sess = _session_or_none(session_id)
+    if sess is None or not result.get("found"):
+        return
+    extensions = result.get("extensions") if isinstance(result.get("extensions"), list) else []
+    sess.extension_names = [
+        str(item.get("name") or "")
+        for item in extensions
+        if isinstance(item, dict) and str(item.get("name") or "") and not _is_ignored_runtime_extension_name(str(item.get("name") or ""))
+    ]
+    sess.installed_extensions_cache = copy.deepcopy(result)
+    _persist_sessions()
+
+
+def _cached_extensions_result(session_id: str) -> dict[str, Any] | None:
+    sess = _session_or_none(session_id)
+    if sess is None or not sess.installed_extensions_cache:
+        return None
+    result = copy.deepcopy(sess.installed_extensions_cache)
+    result["cache_hit"] = True
+    return _attach_extension_hints_to_result(result)
+
+
+def _discover_global_hints() -> dict[str, Any]:
+    """Return compact discovery summary for global hints only."""
+    entries: list[dict[str, Any]] = []
+    with os_support.file_lock(FORM_HINTS_LOCK):
+        data = _load_form_hints_unlocked()
+        for key, entry in data.get("entries", {}).items():
+            if not isinstance(entry, dict) or _form_hint_scope(entry) != "global":
+                continue
+            item = dict(entry)
+            item["key"] = str(entry.get("key") or key)
+            entries.append(item)
+    operations = _summarize_form_hints_operations(entries)
+    return {
+        "available": bool(entries),
+        "count": len(entries),
+        "operations": operations,
+        "operation_names": [str(item.get("operation") or "") for item in operations],
+        "scopes": _form_hint_scopes(entries),
+        "call_to_read": "form_hints_get(include_global=true, operation=<operation>)",
+    }
+
+
+def _update_session_hint_context_from_rag_notice(sess: SessionState) -> None:
+    """Populate reusable hint context from already-known Summary RAG/session metadata."""
+    notice = sess.rag_notice if isinstance(sess.rag_notice, dict) else {}
+    sess.configuration_name = sess.configuration_name or str(
+        notice.get("config_code") or notice.get("detected_config") or notice.get("requested_config") or ""
+    )
+    sess.configuration_version = sess.configuration_version or str(notice.get("version") or "")
+    extension_names = _session_extension_names(sess)
+    if not extension_names:
+        for layer in notice.get("layers") or []:
+            layer_text = _normalize_form_hint_part(str(layer))
+            if layer_text and layer_text != "configuration" and layer_text not in extension_names:
+                extension_names.append(layer_text)
+    sess.extension_names = extension_names
 
 
 def _summary_rag_config_from_42clouds_url(base_url: str) -> str:
@@ -1850,6 +2347,9 @@ def _configure_summary_rag_from_config_alias(sess: SessionState, config_alias: s
         )
         sess.rag_enabled = True
         sess.rag_snapshot = str(summary_snapshot.get("name") or "")
+        sess.configuration_name = config_code
+        sess.configuration_version = str(summary_snapshot.get("version") or summary_candidate.get("version") or "")
+        sess.extension_names = [str(layer.get("layer") or "") for layer in extra_layers if str(layer.get("layer") or "")]
         if sess.base_url:
             _save_rag_binding(sess.base_url, sess.rag_snapshot)
         layers = [str(layer.get("layer") or "") for layer in summary_snapshot.get("summary_layers", [])]
@@ -1954,6 +2454,13 @@ async def _auto_configure_summary_rag_on_start(sess: SessionState) -> dict[str, 
             extra_layers=extra_layers,
         )
         sess.rag_snapshot = str(summary_snapshot.get("name") or "")
+        sess.configuration_name = config_name
+        sess.configuration_version = config_version
+        sess.extension_names = [
+            str(extension.get("name") or "")
+            for extension in installed_extensions
+            if str(extension.get("name") or "") and not _is_ignored_runtime_extension_name(str(extension.get("name") or ""))
+        ]
         _save_rag_binding(sess.base_url, sess.rag_snapshot)
         layers = [str(layer.get("layer") or "") for layer in summary_snapshot.get("summary_layers", [])]
         return _summary_rag_notice(
@@ -2264,7 +2771,7 @@ def _apply_ui_fields(value: Any, allowed: set[str] | None) -> Any:
         return value
     always = {
         "children", "objects", "filter", "tree_summary", "profile", "fields", "command_panels", "parent_name",
-        "found", "count", "reason", "format", "text", "yaml", "metrics", "flat", "rag_diagnostic",
+        "found", "count", "reason", "format", "text", "yaml", "metrics", "flat", "rag_diagnostic", "form_hints",
         "method", "supports", "warnings", "path", "index_path", "children_omitted_count",
     }
     result: dict[str, Any] = {}
@@ -3156,6 +3663,70 @@ def _metadata_name_from_ui_tree(tree: dict[str, Any]) -> str:
             if marker in form_name:
                 return form_name.split(marker, 1)[0]
     return ""
+
+
+def _form_hints_context_from_ui_tree(tree: Any, *, base_url: str = "") -> dict[str, Any]:
+    """Extract the active form context from a ui_tree payload for hint discovery."""
+    context = {
+        "base_url": _normalize_base_url(base_url),
+        "configuration_name": "",
+        "configuration_version": "",
+        "extension_names": [],
+        "form_name": "",
+        "form_title": "",
+    }
+    if not isinstance(tree, dict):
+        return context
+    diagnostics = tree.get("client_diagnostics")
+    if isinstance(diagnostics, dict):
+        context["form_name"] = _normalize_form_hint_part(str(
+            diagnostics.get("active_form_name") or diagnostics.get("modal_form_name") or ""
+        ))
+        context["form_title"] = _normalize_form_hint_part(str(
+            diagnostics.get("active_form_title") or diagnostics.get("modal_form_title") or ""
+        ))
+    context["form_name"] = context["form_name"] or _normalize_form_hint_part(str(tree.get("form_name") or ""))
+    context["form_title"] = context["form_title"] or _normalize_form_hint_part(str(tree.get("title") or ""))
+    if context["form_name"] and context["form_title"]:
+        return context
+    for node in _walk_ui_tree(tree):
+        if not context["form_name"]:
+            context["form_name"] = _normalize_form_hint_part(str(node.get("form_name") or ""))
+        if not context["form_title"] and str(node.get("type") or "").casefold() in {"window", "form", "тестируемаяформа", "тестируемая форма"}:
+            context["form_title"] = _normalize_form_hint_part(str(node.get("title") or ""))
+        if context["form_name"] and context["form_title"]:
+            break
+    return context
+
+
+def _attach_form_hints_to_ui_tree(tree: Any, *, session_id: str) -> Any:
+    """Attach compact current-form hint discovery to ui_tree results; global hints are intentionally excluded."""
+    if not isinstance(tree, dict):
+        return tree
+    base_url = ""
+    configuration_name = ""
+    configuration_version = ""
+    extension_names: list[str] = []
+    with suppress(Exception):
+        sess = _session(session_id)
+        base_url = sess.base_url
+        configuration_name = sess.configuration_name
+        configuration_version = sess.configuration_version
+        extension_names = _session_extension_names(sess)
+    context = _form_hints_context_from_ui_tree(tree, base_url=base_url)
+    tree["form_hints"] = _discover_form_hints(
+        base_url=context["base_url"],
+        configuration_name=configuration_name,
+        configuration_version=configuration_version,
+        extension_names=extension_names,
+        form_name=context["form_name"],
+        form_title=context["form_title"],
+        include_global=False,
+        include_configuration=True,
+        include_extensions=True,
+        form_only=True,
+    )
+    return tree
 
 
 def _ui_node_rag_lookup_keys(node: dict[str, Any]) -> list[str]:
@@ -4475,6 +5046,9 @@ def sessions_list() -> dict[str, Any]:
             )),
             "rag_snapshot": sess.rag_snapshot,
             "rag_enabled": _RAG_ENABLED and sess.rag_enabled,
+            "configuration_name": sess.configuration_name,
+            "configuration_version": sess.configuration_version,
+            "extension_names": sess.extension_names,
             "idle_timeout_seconds": sess.idle_timeout_seconds,
         })
     return {"count": len(items), "sessions": items}
@@ -4544,6 +5118,9 @@ def session_status(*,
         "server_rag_enabled": _RAG_ENABLED,
         "rag_notice": sess.rag_notice,
         "rag_diagnostic": _rag_diagnostic(session_id, sess.rag_snapshot),
+        "configuration_name": sess.configuration_name,
+        "configuration_version": sess.configuration_version,
+        "extension_names": sess.extension_names,
         "idle_timeout_seconds": sess.idle_timeout_seconds,
     }
 
@@ -4563,7 +5140,7 @@ async def start_session(
     summary_rag_config: Annotated[str, "Explicit Summary RAG configuration alias/code, e.g. bp, bpc, ka, ut, zup, Accounting30, Бухгалтерия предприятия. Enables configuration+fresh summary snapshot without live autodetection."] = "",
     include_timings: Annotated[bool, "Include diagnostic startup timing breakdown in the returned _timings field"] = False,
 ) -> dict[str, Any]:
-    """One-shot session factory: detect version, start infrastructure and connect the 1C test client."""
+    """One-shot session factory: detect version, start infrastructure, connect the 1C test client, and list startup form-hint operations when available."""
     start_monotonic = time.perf_counter()
     stage_monotonic = start_monotonic
     timings: dict[str, float] = {}
@@ -4638,6 +5215,18 @@ async def start_session(
             data_dir=data_dir, base_url=base_url, username=username, password=password
         )
         sess.rag_enabled = bool(rag_enabled)
+        # Best-effort reusable-hints context is intentionally cheap at startup.
+        # Prefer persistent per-base cache because it contains the live
+        # configuration name (for example БухгалтерияПредприятия), then fall
+        # back to the explicit/URL-derived Summary RAG alias (for example bp).
+        if base_url:
+            cached_configuration = _load_cached_configuration_for_base_url(base_url)
+            if cached_configuration is not None:
+                sess.configuration_name = str(cached_configuration.get("configuration_name") or sess.configuration_name or "")
+                sess.configuration_version = str(cached_configuration.get("configuration_version") or sess.configuration_version or "")
+                sess.configuration_info_cache = copy.deepcopy(cached_configuration)
+        if not sess.configuration_name:
+            sess.configuration_name = effective_summary_rag_config
         sess.idle_timeout_seconds = max(0, int(idle_timeout_minutes)) * 60
         _cleanup_stale_session_processes(sess, "before start_session")
         if base_url and _RAG_ENABLED and sess.rag_enabled and not effective_summary_rag_config:
@@ -4839,7 +5428,7 @@ async def start_session(
         _auto_maximize_test_client_result(connect_result, sess.client_display or sess.display)
         mark_stage("auto_maximize_test_client")
 
-    if effective_summary_rag_config:
+    if effective_summary_rag_config and _RAG_ENABLED and sess.rag_enabled:
         sess.rag_notice = _configure_summary_rag_from_config_alias(sess, effective_summary_rag_config)
         if inferred_summary_rag_config and isinstance(sess.rag_notice, dict):
             sess.rag_notice["auto"] = True
@@ -4877,6 +5466,7 @@ async def start_session(
             enabled=False,
             reason="rag_not_requested_or_no_web_base_url",
         )
+    _update_session_hint_context_from_rag_notice(sess)
     mark_stage("configure_rag")
 
     if sess.idle_timeout_seconds > 0:
@@ -4895,6 +5485,15 @@ async def start_session(
         "rag_enabled": _RAG_ENABLED and sess.rag_enabled,
         "server_rag_enabled": _RAG_ENABLED,
         "rag_notice": sess.rag_notice,
+        "configuration_name": sess.configuration_name,
+        "configuration_version": sess.configuration_version,
+        "extension_names": sess.extension_names,
+        "global_hints": _discover_global_hints(),
+        "startup_hints": _discover_startup_hints(
+            configuration_name=sess.configuration_name,
+            configuration_version=sess.configuration_version,
+            extension_names=sess.extension_names,
+        ),
         "idle_timeout_seconds": sess.idle_timeout_seconds,
         "test_client": _compact_start_test_client_result(connect_result, include_timings=include_timings), **pipeline_info,
     }
@@ -5734,20 +6333,38 @@ async def windows_list(*,
 async def form_hints_get(
     form_name: Annotated[str, "1C active form technical name. Empty means current active form when a session is available"] = "",
     form_title: Annotated[str, "Visible form/window title. Used when form_name is unknown"] = "",
-    base_url: Annotated[str, "Infobase URL scope. Empty means current session base URL; empty stored hints are global"] = "",
+    base_url: Annotated[str, "Infobase URL scope. Empty means current session base URL"] = "",
+    configuration_name: Annotated[str, "Configuration scope name/code. Empty means current session detected configuration when available"] = "",
+    configuration_version: Annotated[str, "Optional configuration version for configuration-scoped hints"] = "",
+    extension_name: Annotated[str, "Extension scope name. Empty means any installed extension from current session for extension-scoped matching"] = "",
+    extension_version: Annotated[str, "Optional extension version for extension-scoped hints"] = "",
     operation: Annotated[str, "Optional scenario/operation name, e.g. create-receipt or load-okei"] = "",
     include_global: Annotated[bool, "Also return hints saved without base_url for the same form"] = True,
+    include_configuration: Annotated[bool, "Also return hints saved for the detected/specified configuration"] = True,
+    include_extensions: Annotated[bool, "Also return hints saved for installed/specified extensions"] = True,
     limit: Annotated[int, "Maximum hints to return"] = 10,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> dict[str, Any]:
-    """Return saved operator hints for a 1C form/scenario to avoid repeated UI analysis."""
+    """Return saved operator hints for a 1C form/scenario to avoid repeated UI analysis.
+
+    Use this proactively when `start_session` reports `startup_hints` or
+    `global_hints`, when
+    `ui_tree` reports `form_hints`, after validation errors about required
+    fields, or when the current UI path appears wrong and a saved scenario may
+    describe the intended controls/buttons.
+    """
     context = await _resolve_form_hints_context(
         session_id,
         base_url=base_url,
+        configuration_name=configuration_name,
+        configuration_version=configuration_version,
+        extension_names=[extension_name] if extension_name else None,
         form_name=form_name,
         form_title=form_title,
     )
+    context_extension_name = _normalize_form_hint_part(extension_name)
+    context_extension_version = _normalize_form_hint_part(extension_version)
     target_operation = _normalize_form_hint_part(operation)
     matches: list[dict[str, Any]] = []
     operation_entries: list[dict[str, Any]] = []
@@ -5759,10 +6376,17 @@ async def form_hints_get(
             form_matched, score, match = _form_hints_entry_matches(
                 entry,
                 base_url=context["base_url"],
+                configuration_name=context["configuration_name"],
+                configuration_version=context["configuration_version"],
+                extension_names=context["extension_names"],
+                extension_name=context_extension_name,
+                extension_version=context_extension_version,
                 form_name=context["form_name"],
                 form_title=context["form_title"],
                 operation=target_operation,
                 include_global=include_global,
+                include_configuration=include_configuration,
+                include_extensions=include_extensions,
             )
             if form_matched:
                 item = dict(entry)
@@ -5773,10 +6397,17 @@ async def form_hints_get(
             operation_matched, _, _ = _form_hints_entry_matches(
                 entry,
                 base_url=context["base_url"],
+                configuration_name=context["configuration_name"],
+                configuration_version=context["configuration_version"],
+                extension_names=context["extension_names"],
+                extension_name=context_extension_name,
+                extension_version=context_extension_version,
                 form_name=context["form_name"],
                 form_title=context["form_title"],
                 operation="",
                 include_global=include_global,
+                include_configuration=include_configuration,
+                include_extensions=include_extensions,
             )
             if operation_matched:
                 operation_entries.append(dict(entry))
@@ -5786,7 +6417,7 @@ async def form_hints_get(
         "found": bool(limited),
         "count": len(limited),
         "total_matches": len(matches),
-        "context": {**context, "operation": target_operation},
+        "context": {**context, "extension_name": context_extension_name, "extension_version": context_extension_version, "operation": target_operation},
         "operations": _summarize_form_hints_operations(operation_entries),
         "hints": limited,
         "storage": str(FORM_HINTS_FILE),
@@ -5795,8 +6426,14 @@ async def form_hints_get(
         "form_name": form_name,
         "form_title": form_title,
         "base_url": base_url,
+        "configuration_name": configuration_name,
+        "configuration_version": configuration_version,
+        "extension_name": extension_name,
+        "extension_version": extension_version,
         "operation": operation,
         "include_global": include_global,
+        "include_configuration": include_configuration,
+        "include_extensions": include_extensions,
         "limit": limit,
     }, result)
 
@@ -5806,30 +6443,66 @@ async def form_hints_set(
     hints: Annotated[str, "Hints to save: plain text or JSON object/list with stable field names, buttons, row specs, gotchas"],
     form_name: Annotated[str, "1C active form technical name. Empty means current active form when a session is available"] = "",
     form_title: Annotated[str, "Visible form/window title. Used when form_name is unknown"] = "",
-    base_url: Annotated[str, "Infobase URL scope. Empty means current session base URL; set use_global=true for cross-base hints"] = "",
+    base_url: Annotated[str, "Infobase URL scope. Empty means current session base URL; used when scope=base"] = "",
+    scope: Annotated[str, "Hint scope: base (default), configuration, extension, or global"] = "base",
+    configuration_name: Annotated[str, "Configuration name/code for scope=configuration; empty means current session detected configuration"] = "",
+    configuration_version: Annotated[str, "Optional configuration version for scope=configuration"] = "",
+    extension_name: Annotated[str, "Extension name for scope=extension"] = "",
+    extension_version: Annotated[str, "Optional extension version for scope=extension"] = "",
     operation: Annotated[str, "Optional scenario/operation name, e.g. create-receipt or load-okei"] = "",
     tags: Annotated[str, "Optional comma-separated or JSON list tags"] = "",
-    use_global: Annotated[bool, "Store without base_url so the hint can be reused on the same form in other bases"] = False,
+    use_global: Annotated[bool, "Compatibility shortcut for scope=global"] = False,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> dict[str, Any]:
     """Save operator hints for a 1C form/scenario."""
+    effective_scope, scope_field, scope_label = _hint_scope_fields("global" if use_global else scope)
     context = await _resolve_form_hints_context(
         session_id,
-        base_url="" if use_global else base_url,
+        base_url="" if effective_scope != "base" else base_url,
+        configuration_name=configuration_name,
+        configuration_version=configuration_version,
+        extension_names=[extension_name] if extension_name else None,
         form_name=form_name,
         form_title=form_title,
     )
-    if use_global:
+    if effective_scope != "base":
         context["base_url"] = ""
+    if effective_scope != "configuration":
+        context["configuration_name"] = ""
+        context["configuration_version"] = ""
+    if effective_scope == "extension":
+        clean_extension_name = _normalize_form_hint_part(extension_name)
+        if not clean_extension_name and context["extension_names"]:
+            clean_extension_name = context["extension_names"][0]
+        clean_extension_version = _normalize_form_hint_part(extension_version)
+    else:
+        clean_extension_name = ""
+        clean_extension_version = ""
+    if scope_field and not (context.get(scope_field) or (scope_field == "extension_name" and clean_extension_name)):
+        raise ValueError(f"form_hints_set scope={effective_scope} needs {scope_label} context")
     if not context["form_name"] and not context["form_title"]:
         raise ValueError("form_hints_set needs form_name/form_title or an active 1C form in the session")
     parsed_hints, hints_format = _parse_form_hints_payload(hints)
     clean_operation = _normalize_form_hint_part(operation)
-    key = _form_hint_key(context["base_url"], context["form_name"], context["form_title"], clean_operation)
+    key = _form_hint_key(
+        context["base_url"],
+        context["form_name"],
+        context["form_title"],
+        clean_operation,
+        context["configuration_name"],
+        context["configuration_version"],
+        clean_extension_name,
+        clean_extension_version,
+    )
     entry = {
         "key": key,
+        "scope": effective_scope,
         "base_url": context["base_url"],
+        "configuration_name": context["configuration_name"],
+        "configuration_version": context["configuration_version"],
+        "extension_name": clean_extension_name,
+        "extension_version": clean_extension_version,
         "form_name": context["form_name"],
         "form_title": context["form_title"],
         "operation": clean_operation,
@@ -5851,7 +6524,7 @@ async def form_hints_set(
         "saved": True,
         "created": created,
         "key": key,
-        "context": {**context, "operation": clean_operation},
+        "context": {**context, "extension_name": clean_extension_name, "extension_version": clean_extension_version, "scope": effective_scope, "operation": clean_operation},
         "hints_format": hints_format,
         "storage": str(FORM_HINTS_FILE),
     }
@@ -5859,6 +6532,11 @@ async def form_hints_set(
         "form_name": form_name,
         "form_title": form_title,
         "base_url": base_url,
+        "scope": scope,
+        "configuration_name": configuration_name,
+        "configuration_version": configuration_version,
+        "extension_name": extension_name,
+        "extension_version": extension_version,
         "operation": operation,
         "tags": tags,
         "use_global": use_global,
@@ -6317,6 +6995,12 @@ async def ui_tree(
     `format=outline` and `format=yaml|yml` return readable text representations
     inside a structured tool result; JSON remains the default machine-readable form.
 
+    The result includes `form_hints` when saved hints exist for the current
+    active form and matching base/configuration/extension context. Global hints
+    are intentionally not included in `ui_tree`.
+    If `form_hints.available=true`, call `form_hints_get(operation=...)` before
+    improvising the scenario.
+
     `delivery=auto` is the default: small results stay inline, but large results
     above `ONEC_MCP_UI_TREE_RESOURCE_AUTO_THRESHOLD_TOKENS` (default 50k estimated tokens) are
     saved as MCP resources. Use `delivery=inline` to force inline output and
@@ -6408,6 +7092,10 @@ async def ui_tree(
             tree["rag_diagnostic"] = _rag_diagnostic(session_id, rag_snapshot)
         timed_stage("python_rag_enrich_ms", rag_start)
 
+    hints_start = time.monotonic()
+    tree = _attach_form_hints_to_ui_tree(tree, session_id=session_id)
+    timed_stage("python_form_hints_ms", hints_start)
+
     if parent_name and isinstance(tree, dict) and tree.get("found") is False and tree.get("reason") == "parent_not_found":
         tree["tree_summary"] = _summarize_ui_tree(tree, include_hidden=include_hidden)
         python_transform_ms = (time.monotonic() - transform_start) * 1000
@@ -6415,6 +7103,8 @@ async def ui_tree(
         ui_timings = _build_ui_tree_timings(tree, bridge_ms=bridge_ms, stages=stage_timings)
         if fmt == "outline":
             response = {"format": "outline", "text": "", "tree_summary": tree.get("tree_summary"), "profile": profile_key, "parent_name": parent_name, "found": False, "reason": "parent_not_found"}
+            if isinstance(tree, dict) and tree.get("form_hints"):
+                response["form_hints"] = tree["form_hints"]
             response = _apply_ui_fields(response, field_names)
             response = _attach_ui_tree_metrics(response, _ui_tree_metrics(tree, bridge_ms=bridge_ms, python_transform_ms=python_transform_ms, result=response))
             response = _attach_optional_timings(response, ui_timings, include_timings)
@@ -6430,6 +7120,8 @@ async def ui_tree(
             )
         if fmt == "yaml":
             response = {"format": "yaml", "yaml": _to_simple_yaml(tree), "tree_summary": tree.get("tree_summary"), "profile": profile_key, "parent_name": parent_name}
+            if isinstance(tree, dict) and tree.get("form_hints"):
+                response["form_hints"] = tree["form_hints"]
             response = _attach_ui_tree_metrics(response, _ui_tree_metrics(tree, bridge_ms=bridge_ms, python_transform_ms=python_transform_ms, result=response))
             response = _attach_optional_timings(response, ui_timings, include_timings)
             return _ui_tree_maybe_resource_response(
@@ -6515,6 +7207,8 @@ async def ui_tree(
                 compact_tree["tree_summary"] = summary
             if isinstance(tree, dict) and tree.get("rag_diagnostic"):
                 compact_tree["rag_diagnostic"] = tree["rag_diagnostic"]
+            if isinstance(tree, dict) and tree.get("form_hints"):
+                compact_tree["form_hints"] = tree["form_hints"]
             result = compact_tree
 
     timed_stage("python_result_build_ms", result_build_start)
@@ -6528,6 +7222,8 @@ async def ui_tree(
         format_start = time.monotonic()
         text = _outline_ui_nodes(result.get("objects", [])) if isinstance(result, dict) and "objects" in result else _outline_ui_tree(result)
         response = {"format": "outline", "text": text, "tree_summary": summary, "profile": profile_key, "fields": fields}
+        if isinstance(result, dict) and result.get("form_hints"):
+            response["form_hints"] = result["form_hints"]
         if parent_name:
             response["parent_name"] = parent_name
         metrics = _ui_tree_metrics(tree, bridge_ms=bridge_ms, python_transform_ms=python_transform_ms, format_ms=(time.monotonic() - format_start) * 1000, result=response)
@@ -6546,6 +7242,8 @@ async def ui_tree(
     if fmt == "yaml":
         format_start = time.monotonic()
         response = {"format": "yaml", "yaml": _to_simple_yaml(result), "tree_summary": summary, "profile": profile_key, "fields": fields}
+        if isinstance(result, dict) and result.get("form_hints"):
+            response["form_hints"] = result["form_hints"]
         if parent_name:
             response["parent_name"] = parent_name
         metrics = _ui_tree_metrics(tree, bridge_ms=bridge_ms, python_transform_ms=python_transform_ms, format_ms=(time.monotonic() - format_start) * 1000, result=response)
@@ -9427,6 +10125,7 @@ async def _save_output_tabular_document_to_mxl(
 
 @mcp.tool()
 async def configuration_name_version_from_subsystems(
+    refresh_cache: Annotated[bool, "Force rereading the live subsystem versions register instead of using the session cache"] = False,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> dict[str, Any]:
@@ -9437,6 +10136,11 @@ async def configuration_name_version_from_subsystems(
     `Это основная конфигурация`, are visible even when they are not displayed
     in the default form table.
     """
+    if not refresh_cache:
+        cached = _cached_configuration_result(session_id)
+        if cached is not None:
+            return cached
+
     warnings: list[str] = []
     main: dict[str, str] = {}
     cells: list[list[str]] = []
@@ -9461,7 +10165,7 @@ async def configuration_name_version_from_subsystems(
                     warnings,
                     description="subsystem versions list",
                 )
-                return _source_unavailable_result(
+                return _attach_configuration_hints_to_result(_source_unavailable_result(
                     source="РегистрСведений.ВерсииПодсистем",
                     navigation_link=navigation_link,
                     source_method="sorted_edge_row",
@@ -9478,7 +10182,7 @@ async def configuration_name_version_from_subsystems(
                         "rows_count": 0,
                         "sort_attempts": [],
                     },
-                )
+                ))
             raise
         cleanup_enabled = True
 
@@ -9542,7 +10246,7 @@ async def configuration_name_version_from_subsystems(
                 description="subsystem versions list",
             )
 
-    return {
+    result = {
         "found": bool(main),
         "configuration_name": main.get("configuration_name", ""),
         "configuration_version": main.get("configuration_version", ""),
@@ -9554,7 +10258,11 @@ async def configuration_name_version_from_subsystems(
         "source": "РегистрСведений.ВерсииПодсистем",
         "source_method": source_method,
         "sort_attempts": sort_attempts,
+        "cache_hit": False,
     }
+    result = _attach_configuration_hints_to_result(result)
+    _cache_configuration_result(session_id, result)
+    return result
 
 
 def _configuration_from_sorted_first_row(row: dict[str, str]) -> dict[str, str]:
@@ -9624,6 +10332,7 @@ def _find_main_configuration_in_tabular_cells(cells: list[list[str]]) -> dict[st
 
 @mcp.tool()
 async def installed_extensions_from_catalog(
+    refresh_cache: Annotated[bool, "Force rereading the live extension versions catalog instead of using the session cache"] = False,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> dict[str, Any]:
@@ -9634,6 +10343,11 @@ async def installed_extensions_from_catalog(
     starting with `EF_` and the main configuration line starting with `#` are not
     returned as extensions.
     """
+    if not refresh_cache:
+        cached = _cached_extensions_result(session_id)
+        if cached is not None:
+            return cached
+
     navigation_link = "e1cib/list/Справочник.ВерсииРасширений"
     warnings: list[str] = []
     cleanup_enabled = False
@@ -9657,7 +10371,7 @@ async def installed_extensions_from_catalog(
                     warnings,
                     description="extension versions list",
                 )
-                return _source_unavailable_result(
+                return _attach_extension_hints_to_result(_source_unavailable_result(
                     source="Справочник.ВерсииРасширений",
                     navigation_link=navigation_link,
                     source_method="catalog_list",
@@ -9675,7 +10389,7 @@ async def installed_extensions_from_catalog(
                         "rows_count": 0,
                         "non_deleted_rows_count": 0,
                     },
-                )
+                ))
             raise
         cleanup_enabled = True
         rows_result = await _bridge_call_recorded(session_id, "table_rows", {"name": "Список", "title": "", "limit": 500})
@@ -9698,7 +10412,7 @@ async def installed_extensions_from_catalog(
                 description="extension versions list",
             )
 
-    return {
+    result = {
         "found": bool(selected_row),
         "extensions": extensions,
         "extensions_count": len(extensions),
@@ -9710,7 +10424,11 @@ async def installed_extensions_from_catalog(
         "navigation_link": navigation_link,
         "source": "Справочник.ВерсииРасширений",
         "warnings": warnings,
+        "cache_hit": False,
     }
+    result = _attach_extension_hints_to_result(result)
+    _cache_extensions_result(session_id, result)
+    return result
 
 
 @mcp.tool()
