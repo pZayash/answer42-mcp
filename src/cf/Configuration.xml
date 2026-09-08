@@ -67,14 +67,6 @@
 			<DefaultDataHistoryVersionDataForm/>
 			<DefaultDataHistoryVersionDifferencesForm/>
 			<DefaultCollaborationSystemUsersChoiceForm/>
-			<AuxiliaryReportForm/>
-			<AuxiliaryReportVariantForm/>
-			<AuxiliaryReportSettingsForm/>
-			<AuxiliaryDynamicListSettingsForm/>
-			<AuxiliaryDataHistoryChangeHistoryForm/>
-			<AuxiliaryDataHistoryVersionDataForm/>
-			<AuxiliaryDataHistoryVersionDifferencesForm/>
-			<AuxiliaryCollaborationSystemUsersChoiceForm/>
 			<RequiredMobileApplicationPermissions/>
 			<UsedMobileApplicationFunctionalities>
 				<app:functionality>
@@ -233,13 +225,8 @@
 			<StandaloneConfigurationRestrictionRoles/>
 			<MobileApplicationURLs/>
 			<AllowedIncomingShareRequestTypes/>
-			<MainClientApplicationWindowInterfaceVariant>NavigationLeft</MainClientApplicationWindowInterfaceVariant>
-			<ClientApplicationTheme>Auto</ClientApplicationTheme>
 			<MainClientApplicationWindowMode>Normal</MainClientApplicationWindowMode>
-			<ClientApplicationWindowsOpenVariant>OpenDataInDialogs</ClientApplicationWindowsOpenVariant>
 			<DefaultInterface/>
-			<Caption/>
-			<ShortCaption/>
 			<DefaultStyle/>
 			<DefaultLanguage>Language.Русский</DefaultLanguage>
 			<BriefInformation/>
@@ -252,7 +239,6 @@
 			<ModalityUseMode>DontUse</ModalityUseMode>
 			<SynchronousPlatformExtensionAndAddInCallUseMode>DontUse</SynchronousPlatformExtensionAndAddInCallUseMode>
 			<InterfaceCompatibilityMode>Taxi</InterfaceCompatibilityMode>
-			<Version85InterfaceMigrationMode>DontUse</Version85InterfaceMigrationMode>
 			<DatabaseTablespacesUseMode>DontUse</DatabaseTablespacesUseMode>
 			<CompatibilityMode>Version8_5_1</CompatibilityMode>
 			<DefaultConstantsForm/>
