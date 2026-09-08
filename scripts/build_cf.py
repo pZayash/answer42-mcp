@@ -5,7 +5,8 @@ Usage:
   python scripts/build_cf.py [SRC_DIR] [OUT_CF]
 
 Build order:
-  1. Prefer ibcmd: ``ibcmd config import --out=<OUT_CF> <SRC_DIR>``.
+  1. Prefer ibcmd: create a temporary file infobase, then run
+     ``ibcmd infobase config import`` and ``ibcmd config save``.
   2. If ibcmd is not installed, fall back to Configurator/DESIGNER via 1cv8.
 
 Environment:
@@ -26,8 +27,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from mcp_1c import os_support  # noqa: E402
-from mcp_1c.platform import find_platform_dir, platform_version_from_dir, require_websocket_support  # noqa: E402
+from mcp_1c import os_support
+from mcp_1c.platform import find_platform_dir, platform_version_from_dir, require_websocket_support
 
 
 def _platform_dir() -> Path:
@@ -68,12 +69,28 @@ def _run(argv: list[str], *, env: dict[str, str], timeout: int = 300) -> None:
         raise SystemExit(f"Command failed rc={completed.returncode}: {' '.join(map(str, argv))}")
 
 
-def _build_with_ibcmd(ibcmd: Path, src_dir: Path, out_cf: Path, *, env: dict[str, str]) -> None:
-    """Build CF directly from XML sources via ibcmd config import."""
+def _build_with_ibcmd(
+    ibcmd: Path, src_dir: Path, out_cf: Path, db_path: Path, *, env: dict[str, str]
+) -> None:
+    """Build a portable CF through a temporary file infobase.
+
+    ``config import --out`` can preserve a platform requirement from an
+    earlier export. Importing XML into a fresh infobase and saving the actual
+    configuration makes the generated CF compatible with the target platform.
+    """
+    if db_path.exists():
+        shutil.rmtree(db_path, ignore_errors=True)
     _run([
-        str(ibcmd), "config", "import",
-        f"--out={out_cf}",
-        str(src_dir),
+        str(ibcmd), "infobase", "create",
+        f"--data={db_path}", f"--db-path={db_path / 'db-data'}", "--force",
+    ], env=env, timeout=180)
+    _run([
+        str(ibcmd), "infobase", "config", "import",
+        f"--data={db_path}", f"--db-path={db_path / 'db-data'}", str(src_dir),
+    ], env=env, timeout=600)
+    _run([
+        str(ibcmd), "config", "save",
+        f"--data={db_path}", f"--db-path={db_path / 'db-data'}", str(out_cf),
     ], env=env, timeout=600)
 
 
@@ -123,8 +140,8 @@ def main(argv: list[str]) -> int:
 
     ibcmd = _ibcmd_executable(platform_dir)
     if ibcmd is not None:
-        print(f"Building {out_cf} via ibcmd config import ({ibcmd})", flush=True)
-        _build_with_ibcmd(ibcmd, src_dir, out_cf, env=env)
+        print(f"Building {out_cf} via ibcmd infobase config import ({ibcmd})", flush=True)
+        _build_with_ibcmd(ibcmd, src_dir, out_cf, db_path, env=env)
     else:
         onec = _onec_designer_executable(platform_dir)
         print(f"ibcmd not found; building {out_cf} via DESIGNER ({onec})", flush=True)

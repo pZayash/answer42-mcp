@@ -263,7 +263,7 @@ stop_session(session_id="my-session", clean_data=False)
 
 ## Сборка конфигураций 1С
 
-Конфигурация менеджера тестирования собирается из XML-исходников `src/cf/` через `ibcmd config import` (приоритетный способ) или через Конфигуратор/DESIGNER (fallback, если `ibcmd` отсутствует):
+Конфигурация менеджера тестирования собирается из XML-исходников `src/cf/` через временную файловую ИБ: `ibcmd infobase config import` и затем `ibcmd config save` (приоритетный способ). Такой путь создаёт переносимый `.cf` с compatibility mode XML-исходников; Конфигуратор/DESIGNER используется как fallback, если `ibcmd` отсутствует:
 
 ```bash
 python scripts/build_cf.py src/cf build/MCPTestManager.cf

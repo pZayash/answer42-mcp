@@ -34,7 +34,7 @@ pip install -e '.[screenshot,dev,linux-window-control]'
 
 ## Сборка конфигураций 1С
 
-Сборка через `ibcmd config import` (приоритетный способ, не требует Конфигуратора):
+Сборка через временную файловую ИБ: `ibcmd infobase config import` и `ibcmd config save` (приоритетный способ, не требует Конфигуратора). Такой путь создаёт переносимый `.cf` с compatibility mode XML-исходников:
 
 ```bash
 python scripts/build_cf.py src/cf build/MCPTestManager.cf

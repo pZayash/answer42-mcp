@@ -2346,6 +2346,21 @@ def test_screenshot_window_geometry_falls_back_to_full_display(tmp_path, monkeyp
     assert "geometry was not detected" in result["fallback_reason"]
 
 
+@pytest.mark.parametrize("configuration_path", [
+    Path("src/cf/Configuration.xml"),
+    Path("src/client_cf/Configuration.xml"),
+])
+def test_cf_xml_declares_8_3_27_compatibility(configuration_path):
+    configuration_xml = configuration_path.read_text(encoding="utf-8")
+
+    assert "<CompatibilityMode>Version8_3_27</CompatibilityMode>" in configuration_xml
+    assert (
+        "<ConfigurationExtensionCompatibilityMode>Version8_3_27</ConfigurationExtensionCompatibilityMode>"
+        in configuration_xml
+    )
+    assert "Version8_5_1" not in configuration_xml
+
+
 def test_cf_build_marker_requires_exact_xml_source_content(tmp_path):
     source_dir = tmp_path / "cf"
     source_dir.mkdir()

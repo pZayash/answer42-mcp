@@ -39,7 +39,7 @@ lint:
 # developer's local platform.
 build_cf_8_3_27:
   image:
-    name: registry.gitlab.com/platform42/onec-docker/onec-ibsrv:8.3.27.2342
+    name: registry.gitlab.com/platform42/onec-docker/onec-ibsrv:8.3.27.2214
     entrypoint: [""]
   stage: package
   script:
@@ -50,10 +50,18 @@ build_cf_8_3_27:
       mkdir -p build/cf "$IB_DATA"
       "$IBCMD" --version
       "$IBCMD" infobase create --data="$IB_DATA" --db-path="$IB_DATA/db-data" --force
-      "$IBCMD" config import --data="$IB_DATA" --db-path="$IB_DATA/db-data" --out=build/cf/MCPTestManager.cf src/cf
+      "$IBCMD" infobase config import --data="$IB_DATA" --db-path="$IB_DATA/db-data" src/cf
+      "$IBCMD" config save --data="$IB_DATA" --db-path="$IB_DATA/db-data" build/cf/MCPTestManager.cf
       rm -rf "$IB_DATA"
       "$IBCMD" infobase create --data="$IB_DATA" --db-path="$IB_DATA/db-data" --force
-      "$IBCMD" config import --data="$IB_DATA" --db-path="$IB_DATA/db-data" --out=build/cf/MCPTestClient.cf src/client_cf
+      "$IBCMD" infobase config import --data="$IB_DATA" --db-path="$IB_DATA/db-data" src/client_cf
+      "$IBCMD" config save --data="$IB_DATA" --db-path="$IB_DATA/db-data" build/cf/MCPTestClient.cf
+      # The release artefacts must also load in the target 8.3.27 platform.
+      for CF in build/cf/MCPTestManager.cf build/cf/MCPTestClient.cf; do
+        rm -rf "$IB_DATA"
+        "$IBCMD" infobase create --data="$IB_DATA" --db-path="$IB_DATA/db-data" --force
+        "$IBCMD" config load --data="$IB_DATA" --db-path="$IB_DATA/db-data" "$CF"
+      done
       test -s build/cf/MCPTestManager.cf
       test -s build/cf/MCPTestClient.cf
   artifacts:
