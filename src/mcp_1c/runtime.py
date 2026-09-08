@@ -118,13 +118,29 @@ def find_free_port(start: int = DEFAULT_WS_PORT, end: int | None = None) -> int:
     raise RuntimeError(f"No free port found in range {start}..{end}")
 
 
-def start_xvfb(display: str, resolution: str = DEFAULT_DISPLAY_RES) -> subprocess.Popen:
-    """Start Xvfb for the given display and return the Popen handle."""
+def require_xvfb() -> str:
+    """Return the Xvfb executable or raise an actionable Linux prerequisite error.
+
+    Answer42 deliberately runs the test manager and test client on two isolated
+    X displays.  It must therefore have Xvfb even when the MCP process already
+    has access to a live desktop ``DISPLAY``.
+    """
     if os_support.IS_WINDOWS:
         raise RuntimeError("Xvfb is not available on Windows")
     xvfb_bin = shutil.which("Xvfb") or "/usr/bin/Xvfb"
-    if not Path(xvfb_bin).exists():
-        raise FileNotFoundError("Xvfb not found; install it to run headless sessions")
+    if not Path(xvfb_bin).is_file():
+        raise RuntimeError(
+            "Xvfb is required to start an Answer42 session on Linux, including on a host with an active X11 desktop. "
+            "Answer42 starts isolated displays for the test manager and test client. "
+            "Install the 'xvfb' package (Debian/Ubuntu: sudo apt install xvfb; Fedora/RHEL: sudo dnf install xorg-x11-server-Xvfb) "
+            "and retry start_session."
+        )
+    return xvfb_bin
+
+
+def start_xvfb(display: str, resolution: str = DEFAULT_DISPLAY_RES) -> subprocess.Popen:
+    """Start Xvfb for the given display and return the Popen handle."""
+    xvfb_bin = require_xvfb()
     proc = subprocess.Popen(
         [xvfb_bin, display, "-screen", "0", resolution, "-ac", "+extension", "GLX", "+render", "-noreset"],
         stdout=subprocess.DEVNULL,

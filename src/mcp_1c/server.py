@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import base64
 import copy
 import hashlib
 import importlib.resources
@@ -29,6 +28,7 @@ from mcp.server import MCPServer
 from mcp.server.lowlevel import NotificationOptions
 from mcp.server.mcpserver.resources import FileResource
 from mcp.server.subscriptions import ToolsListChanged
+from starlette.responses import FileResponse, PlainTextResponse
 
 from . import __version__, os_support, release_helper, runtime, skill_installer
 from . import platform as _platform
@@ -84,6 +84,11 @@ FORM_HINTS_LOCK = os_support.runtime_path("ONEC_MCP_FORM_HINTS_LOCK", "form-hint
 UI_TREE_RESOURCE_AUTO_THRESHOLD_TOKENS = int(os.getenv("ONEC_MCP_UI_TREE_RESOURCE_AUTO_THRESHOLD_TOKENS", "50000"))
 UI_TREE_RESOURCE_AUTO_THRESHOLD_BYTES = int(os.getenv("ONEC_MCP_UI_TREE_RESOURCE_AUTO_THRESHOLD_BYTES", "0"))  # deprecated fallback; 0 disables
 NOTIFY_TOOLS_CHANGED_ON_STARTUP = os.getenv("ONEC_MCP_NOTIFY_TOOLS_CHANGED_ON_STARTUP", "1").strip().lower() not in {"0", "false", "no", "off"}
+SCREENSHOT_URL_TTL_SECONDS = max(1, int(os.getenv("ONEC_MCP_SCREENSHOT_URL_TTL_SECONDS", "3600")))
+# Set only in StreamableHTTP mode.  stdio deliberately returns filesystem paths
+# and never serializes screenshot bytes into an MCP tool response.
+_SCREENSHOT_URL_BASE = ""
+_SCREENSHOT_URLS: dict[str, tuple[Path, float]] = {}
 
 
 def _float_env(names: str | tuple[str, ...], default: float) -> float:
@@ -5209,6 +5214,13 @@ async def start_session(
     sid = session_id or DEFAULT_SESSION
     if sid in _SESSIONS:
         raise ValueError(f"Session {sid!r} already exists.")
+
+    # A desktop DISPLAY is intentionally not reused: two isolated displays
+    # prevent an interactive user desktop from becoming part of automation or
+    # screenshots.  Check the prerequisite before allocating any session state
+    # so a missing package produces a clear error rather than FileNotFoundError.
+    if not os_support.IS_WINDOWS:
+        runtime.require_xvfb()
 
     data_dir = os_support.default_data_dir() / "sessions" / sid
     with _port_allocation_lock():
@@ -10972,6 +10984,42 @@ async def _dev_eval(
     return await _bridge_call_recorded(session_id, "dev_eval", {"code": code})
 
 
+def _prune_expired_screenshot_urls(now: float | None = None) -> None:
+    now = time.time() if now is None else now
+    for token, (_, expires_at) in list(_SCREENSHOT_URLS.items()):
+        if expires_at <= now:
+            _SCREENSHOT_URLS.pop(token, None)
+
+
+@mcp.custom_route("/_answer42/screenshots/{token}", methods=["GET"], include_in_schema=False)
+async def _download_screenshot(request: Any) -> Any:
+    """Serve a single-use opaque StreamableHTTP screenshot link."""
+    token = str(request.path_params.get("token") or "")
+    _prune_expired_screenshot_urls()
+    entry = _SCREENSHOT_URLS.pop(token, None)
+    if entry is None:
+        return PlainTextResponse("Screenshot link is expired or unavailable.", status_code=404)
+    image_path, expires_at = entry
+    if expires_at <= time.time() or not image_path.is_file():
+        return PlainTextResponse("Screenshot link is expired or unavailable.", status_code=404)
+    return FileResponse(image_path, media_type="image/png", filename=image_path.name)
+
+
+def _register_screenshot_url(path: Path) -> dict[str, Any] | None:
+    """Expose an opaque, time-limited screenshot URL in StreamableHTTP mode."""
+    if not _SCREENSHOT_URL_BASE:
+        return None
+    _prune_expired_screenshot_urls()
+    token = uuid.uuid4().hex + uuid.uuid4().hex
+    expires_at = time.time() + SCREENSHOT_URL_TTL_SECONDS
+    _SCREENSHOT_URLS[token] = (path.resolve(), expires_at)
+    return {
+        "url": f"{_SCREENSHOT_URL_BASE}/_answer42/screenshots/{token}",
+        "url_expires_at": datetime.fromtimestamp(expires_at, UTC).isoformat(),
+        "url_ttl_seconds": SCREENSHOT_URL_TTL_SECONDS,
+    }
+
+
 @mcp.tool()
 def screenshot(
     path: Annotated[str, "Output image path"] = "build/screenshots/screenshot.png",
@@ -10982,6 +11030,9 @@ def screenshot(
 ) -> dict[str, Any]:
     """Capture a screenshot from the MCP host. Defaults to the active visible 1C window.
 
+    The response always contains the saved path, never image base64. In
+    StreamableHTTP mode it additionally contains an opaque download URL that
+    expires after one hour by default (``ONEC_MCP_SCREENSHOT_URL_TTL_SECONDS``).
     Screenshots are for user evidence and UI diagnostics only. Do not use them
     to analyze report/table/tabular-document/list data; use structured tools
     such as tabular_document_text, tabular_documents, table_rows,
@@ -11040,7 +11091,8 @@ def screenshot(
         ) from exc
 
     data = output_path.read_bytes()
-    result = {"path": str(output_path), "bytes": len(data), "base64": base64.b64encode(data).decode("ascii")}
+    result: dict[str, Any] = {"path": str(output_path), "bytes": len(data)}
+    result.update(_register_screenshot_url(output_path) or {})
     if window:
         result["window_geometry"] = geometry
     if fallback:
@@ -11103,6 +11155,13 @@ async def _run_http(args: argparse.Namespace) -> None:
         stateless_http=args.http_stateless,
         host=args.http_host,
     )
+
+    # Image data is not placed into MCP tool results. The custom route is
+    # registered at module load because the MCP SDK builds the Starlette app
+    # from its custom-route list. The opaque token makes the URL unguessable;
+    # the short lifetime and single use bound access.
+    global _SCREENSHOT_URL_BASE
+    _SCREENSHOT_URL_BASE = (args.http_public_base_url or f"http://{args.http_host}:{args.http_port}").rstrip("/")
     config_uvicorn = uvicorn.Config(
         app,
         host=args.http_host,
@@ -11114,6 +11173,8 @@ async def _run_http(args: argparse.Namespace) -> None:
     try:
         await server.serve()
     finally:
+        _SCREENSHOT_URLS.clear()
+        _SCREENSHOT_URL_BASE = ""
         if tools_changed_task is not None:
             tools_changed_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -11328,6 +11389,11 @@ def main(argv: list[str] | None = None) -> None:
         type=int,
         default=int(os.getenv("ONEC_MCP_HTTP_PORT", "8080")),
         help="port to bind the StreamableHTTP server to",
+    )
+    parser.add_argument(
+        "--http-public-base-url",
+        default=os.getenv("ONEC_MCP_SCREENSHOT_URL_BASE", ""),
+        help="public base URL used in temporary StreamableHTTP screenshot links; useful behind a reverse proxy",
     )
     parser.add_argument(
         "--http-token",

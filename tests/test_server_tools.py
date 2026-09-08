@@ -24,6 +24,7 @@ from mcp_1c.server import (
     _configure_summary_rag_from_config_alias,
     _convert_1c_guid_navigation_link,
     _decode_log_bytes,
+    _download_screenshot,
     _effective_dump_connection,
     _ensure_restored_session,
     _extract_error_lines,
@@ -65,6 +66,7 @@ from mcp_1c.server import (
     credentials_list,
     mcp,
     screenshot,
+    start_session,
 )
 from mcp_1c.server import (
     main as mcp_main,
@@ -2242,6 +2244,38 @@ def test_default_xvfb_resolution_is_large_enough_for_1c_windows():
     assert runtime.DEFAULT_DISPLAY_RES == "1920x1200x24"
 
 
+def test_require_xvfb_explains_linux_desktop_prerequisite(monkeypatch):
+    monkeypatch.setattr(runtime.shutil, "which", lambda name: None)
+    monkeypatch.setattr(runtime.os_support, "IS_WINDOWS", False)
+    monkeypatch.setattr(runtime, "Path", lambda value: Path("/not-installed/Xvfb"))
+
+    with pytest.raises(RuntimeError) as exc_info:
+        runtime.require_xvfb()
+
+    message = str(exc_info.value)
+    assert "Xvfb is required" in message
+    assert "active X11 desktop" in message
+    assert "apt install xvfb" in message
+
+
+def test_start_session_checks_xvfb_before_allocating_session(monkeypatch):
+    from mcp_1c import server
+
+    monkeypatch.setattr(server._platform, "find_platform_dir", lambda version: Path("/fake/1c"))
+    monkeypatch.setattr(server._platform, "platform_version_from_dir", lambda directory: "8.3.27.2214")
+    monkeypatch.setattr(server._platform, "require_websocket_support", lambda version: None)
+    monkeypatch.setattr(server.runtime.os_support, "IS_WINDOWS", False)
+    monkeypatch.setattr(
+        server.runtime,
+        "require_xvfb",
+        lambda: (_ for _ in ()).throw(RuntimeError("Xvfb is required to start an Answer42 session on Linux")),
+    )
+
+    with pytest.raises(RuntimeError, match="Xvfb is required"):
+        asyncio.run(start_session(session_id="missing-xvfb", version="8.3.27.2214"))
+
+    assert "missing-xvfb" not in _SESSIONS
+
 
 def test_external_window_geometry_accepts_test_client_title_and_clamps_to_screen(monkeypatch):
     from mcp_1c import window_control
@@ -2341,9 +2375,44 @@ def test_screenshot_window_geometry_falls_back_to_full_display(tmp_path, monkeyp
         _SESSIONS.pop(sess.session_id, None)
 
     assert result["bytes"] == 3
+    assert "base64" not in result
+    assert "url" not in result
     assert result["window_geometry"] is None
     assert result["fallback"] == "full_display"
     assert "geometry was not detected" in result["fallback_reason"]
+
+
+def test_screenshot_http_url_is_single_use_and_not_a_path_traversal(tmp_path, monkeypatch):
+    from mcp_1c import server
+
+    image_path = tmp_path / "shot.png"
+    image_path.write_bytes(b"png")
+    server._SCREENSHOT_URLS.clear()
+    server._SCREENSHOT_URLS["one-time"] = (image_path, __import__("time").time() + 60)
+
+    class Request:
+        def __init__(self) -> None:
+            self.path_params = {"token": "one-time"}
+
+    first = asyncio.run(_download_screenshot(Request()))
+    assert first.status_code == 200
+    second = asyncio.run(_download_screenshot(Request()))
+    assert second.status_code == 404
+
+
+def test_screenshot_http_response_uses_expiring_url_not_base64(tmp_path, monkeypatch):
+    from mcp_1c import server
+
+    server._SCREENSHOT_URLS.clear()
+    monkeypatch.setattr(server, "_SCREENSHOT_URL_BASE", "http://127.0.0.1:8080")
+    monkeypatch.setattr(server, "SCREENSHOT_URL_TTL_SECONDS", 60)
+    registered = server._register_screenshot_url(tmp_path / "shot.png")
+
+    assert registered is not None
+    assert registered["url"].startswith("http://127.0.0.1:8080/_answer42/screenshots/")
+    assert registered["url_ttl_seconds"] == 60
+    assert "base64" not in registered
+    server._SCREENSHOT_URLS.clear()
 
 
 @pytest.mark.parametrize("configuration_path", [

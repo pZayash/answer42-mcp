@@ -128,6 +128,29 @@ answer42 install-skills --dry-run --agent all
 4. зарегистрируйте MCP-сервер в агентском клиенте;
 5. проверьте установку через `credentials_check`, затем smoke-сессию `start_session` → `active_window` → `stop_session`.
 
+## Linux display prerequisite
+
+На Linux `start_session` **всегда** запускает два изолированных Xvfb-дисплея: один для test manager и второй для test client. Это намеренно не использует существующий `DISPLAY`, даже если Answer42 запущен в живой X11-сессии: автоматизация и её скриншоты не должны захватывать пользовательский рабочий стол.
+
+Поэтому пакет `xvfb` обязателен и для desktop-, и для headless-установок:
+
+```bash
+# Debian / Ubuntu
+sudo apt install xvfb
+
+# Fedora / RHEL
+sudo dnf install xorg-x11-server-Xvfb
+```
+
+Если Xvfb отсутствует, `start_session` завершается до создания ресурсов с понятной подсказкой по установке.
+
+## Скриншоты: stdio и StreamableHTTP
+
+`screenshot` сохраняет PNG на MCP-хосте и больше не помещает его base64-представление в результат tool-call.
+
+- В **stdio** возвращаются только `path`, размер и диагностические поля. Агентский хост при необходимости прикладывает файл по пути.
+- В **StreamableHTTP** добавляется непрозрачная одноразовая ссылка `url` на PNG. Она действует один час по умолчанию (`ONEC_MCP_SCREENSHOT_URL_TTL_SECONDS`), исчезает после первого скачивания и существует не дольше процесса сервера. Для внешнего reverse proxy укажите публичный base URL через `ONEC_MCP_SCREENSHOT_URL_BASE`.
+
 ## Транспорты: stdio и StreamableHTTP
 
 По умолчанию Answer42 использует stdio MCP transport (запускается MCP-хостом как subprocess). Для удалённого deployment доступен **StreamableHTTP** режим с MCP auth:
