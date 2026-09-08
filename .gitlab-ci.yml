@@ -33,11 +33,45 @@ lint:
   script:
     - python -m ruff check src/mcp_1c tests
 
+# The XML sources are exported in an older 1C format only after they are made
+# compatible with 8.3.27. This job is the release gate: the .cf files shipped
+# in the wheel are always built by the pinned target platform, never by the
+# developer's local platform.
+build_cf_8_3_27:
+  image:
+    name: registry.gitlab.com/platform42/onec-docker/onec-ibsrv:8.3.27.2342
+    entrypoint: [""]
+  stage: package
+  script:
+    - |
+      set -eu
+      IBCMD=/opt/1cv8/x86_64/8.3.27.2342/ibcmd
+      IB_DATA="$CI_PROJECT_DIR/.ci/ib-data"
+      mkdir -p build/cf "$IB_DATA"
+      "$IBCMD" --version
+      "$IBCMD" infobase create --data="$IB_DATA" --db-path="$IB_DATA/db-data" --force
+      "$IBCMD" config import --data="$IB_DATA" --db-path="$IB_DATA/db-data" --out=build/cf/MCPTestManager.cf src/cf
+      rm -rf "$IB_DATA"
+      "$IBCMD" infobase create --data="$IB_DATA" --db-path="$IB_DATA/db-data" --force
+      "$IBCMD" config import --data="$IB_DATA" --db-path="$IB_DATA/db-data" --out=build/cf/MCPTestClient.cf src/client_cf
+      test -s build/cf/MCPTestManager.cf
+      test -s build/cf/MCPTestClient.cf
+  artifacts:
+    expire_in: 7 days
+    paths:
+      - build/cf/MCPTestManager.cf
+      - build/cf/MCPTestClient.cf
+
 package:
   extends: .python-job
   stage: package
-  needs: ["unit_tests"]
+  needs:
+    - job: unit_tests
+    - job: build_cf_8_3_27
+      artifacts: true
   script:
+    - install -m 644 build/cf/MCPTestManager.cf src/mcp_1c/assets/MCPTestManager.cf
+    - install -m 644 build/cf/MCPTestClient.cf src/mcp_1c/assets/MCPTestClient.cf
     - test -s src/mcp_1c/assets/MCPTestManager.cf
     - test -s src/mcp_1c/assets/MCPTestClient.cf
     - test -s src/mcp_1c/assets/skills/answer42/SKILL.md
