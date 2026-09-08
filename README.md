@@ -287,7 +287,7 @@ PowerShell:
 python scripts/build_cf.py src/client_cf build/MCPTestClient.cf
 ```
 
-`start_session` автоматически собирает `build/MCPTestManager.cf`, если файл отсутствует или XML-исходники `src/cf/` новее. Встроенный demo-клиент аналогично собирает `build/MCPTestClient.cf` из `src/client_cf/`. E2E-сценарий также пересобирает `build/MCPTestClient.cf`, чтобы тесты не использовали устаревший артефакт.
+В Git хранятся только XML-исходники; CF — генерируемые артефакты. `start_session` использует `build/MCPTestManager.cf` только при точном совпадении content fingerprint с `src/cf/`; иначе автоматически пересобирает его локальной выбранной платформой. Встроенный demo-клиент аналогично работает с `build/MCPTestClient.cf` и `src/client_cf/`. Релизный wheel получает оба CF из GitLab CI, где они собираются закреплённой платформой 1С 8.3.27.2342.
 
 E2E можно запускать целиком или по независимым сценариям:
 

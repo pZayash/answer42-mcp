@@ -48,7 +48,7 @@ python scripts/build_cf.py src/client_cf build/MCPTestClient.cf
 
 Скрипт сам добавляет `src` в `sys.path`, поэтому `PYTHONPATH=src` не нужен. Если `ibcmd` отсутствует, скрипт автоматически переключается на Конфигуратор/DESIGNER через `1cv8`. На PowerShell синтаксис `PYTHONPATH=src python ...` не работает; если когда-нибудь нужно задать переменную окружения вручную, используйте `$env:PYTHONPATH="src"; python ...`.
 
-`start_session` автоматически собирает `build/MCPTestManager.cf`, если файл отсутствует или XML-исходники `src/cf/` новее. Встроенная demo-база клиента автоматически собирает `build/MCPTestClient.cf` из `src/client_cf/`.
+В Git хранятся только XML-исходники; CF — генерируемые артефакты. В локальном checkout `start_session` использует `build/MCPTestManager.cf` только при точном совпадении content fingerprint с `src/cf/`; иначе пересобирает его выбранной локальной платформой. Для встроенной demo-базы действует то же правило для `build/MCPTestClient.cf` и `src/client_cf/`. Релизный wheel получает CF из GitLab CI, где они собираются закреплённой платформой 1С 8.3.27.2342.
 
 На Linux без серверных компонентов Answer42 может запускать менеджер и клиент напрямую через файловую базу (`/F`). На Windows это также поддерживается; запускайте MCP из интерактивной пользовательской сессии, потому что UI automation и screenshots требуют desktop session.
 

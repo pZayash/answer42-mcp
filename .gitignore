@@ -14,6 +14,15 @@ build/
 dist/
 *.egg-info/
 
+# Generated 1C configurations: XML sources are the only tracked source of truth.
+# CI builds 8.3.27-compatible CF files and injects them into the release wheel.
+src/mcp_1c/assets/MCPTestManager.cf
+src/mcp_1c/assets/MCPTestClient.cf
+src/mcp_1c/assets/MCPTestManager.cf.source-sha256
+src/mcp_1c/assets/MCPTestClient.cf.source-sha256
+build/*.cf
+build/*.cf.source-sha256
+
 # 1C temporary files
 *.pfl
 *.log

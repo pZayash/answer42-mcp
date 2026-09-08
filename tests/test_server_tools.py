@@ -18,6 +18,7 @@ from mcp_1c.server import (
     _append_available_users_to_auth_error,
     _auto_configure_summary_rag_on_start,
     _cf_marker_matches,
+    _cf_matches_sources,
     _configuration_from_sorted_first_row,
     _configure_session_scope,
     _configure_summary_rag_from_config_alias,
@@ -57,6 +58,7 @@ from mcp_1c.server import (
     _update_global_session_registry,
     _users_url_for_base_url,
     _wait_for_test_client_ready,
+    _write_cf_build_marker,
     _write_cf_marker,
     configuration_name_version_from_subsystems,
     credentials_check,
@@ -2342,6 +2344,21 @@ def test_screenshot_window_geometry_falls_back_to_full_display(tmp_path, monkeyp
     assert result["window_geometry"] is None
     assert result["fallback"] == "full_display"
     assert "geometry was not detected" in result["fallback_reason"]
+
+
+def test_cf_build_marker_requires_exact_xml_source_content(tmp_path):
+    source_dir = tmp_path / "cf"
+    source_dir.mkdir()
+    source_file = source_dir / "Configuration.xml"
+    source_file.write_text("one", encoding="utf-8")
+    cf_path = tmp_path / "MCPTestManager.cf"
+    cf_path.write_bytes(b"cf")
+
+    _write_cf_build_marker(cf_path, source_dir)
+    assert _cf_matches_sources(cf_path, source_dir)
+
+    source_file.write_text("two", encoding="utf-8")
+    assert not _cf_matches_sources(cf_path, source_dir)
 
 
 def test_cf_marker_detects_changed_manager_configuration(tmp_path):

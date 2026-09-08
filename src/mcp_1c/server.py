@@ -1039,16 +1039,48 @@ def _persist_sessions() -> None:
         _update_global_session_registry(sess)
 
 
-def _source_newer_than(target: Path, src_dir: Path) -> bool:
-    if not target.exists():
-        return True
-    if not src_dir.exists():
+def _cf_source_fingerprint(src_dir: Path) -> str:
+    """Return a stable digest for all files that define a generated CF.
+
+    Modification times are not reliable after a checkout, archive extraction or
+    CI artifact download. A content fingerprint makes a local ``build/*.cf``
+    usable only for the exact XML source revision from which it was made.
+    """
+    digest = hashlib.sha256()
+    for path in sorted(
+        (item for item in src_dir.rglob("*") if item.is_file()),
+        key=lambda item: ("./" + item.relative_to(src_dir).as_posix()).encode("utf-8"),
+    ):
+        file_digest = hashlib.sha256()
+        with path.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                file_digest.update(chunk)
+        # This is deliberately compatible with the CI command:
+        # (cd src/cf && find . -type f -print0 | sort -z | xargs -0 sha256sum) | sha256sum
+        digest.update(file_digest.hexdigest().encode("ascii"))
+        digest.update(b"  ./")
+        digest.update(path.relative_to(src_dir).as_posix().encode("utf-8"))
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def _cf_build_marker_path(target: Path) -> Path:
+    return target.with_suffix(target.suffix + ".source-sha256")
+
+
+def _cf_matches_sources(target: Path, src_dir: Path) -> bool:
+    marker = _cf_build_marker_path(target)
+    if not target.is_file() or not marker.is_file():
         return False
-    target_mtime = target.stat().st_mtime
-    for path in src_dir.rglob("*"):
-        if path.is_file() and path.stat().st_mtime > target_mtime:
-            return True
-    return False
+    try:
+        return marker.read_text(encoding="ascii").strip() == _cf_source_fingerprint(src_dir)
+    except OSError:
+        return False
+
+
+def _write_cf_build_marker(target: Path, src_dir: Path) -> None:
+    marker = _cf_build_marker_path(target)
+    marker.write_text(_cf_source_fingerprint(src_dir) + "\n", encoding="ascii")
 
 
 def _packaged_cf_name(src_dir: str) -> str:
@@ -1097,7 +1129,13 @@ def _copy_packaged_cf(target: Path, src_dir: str, *, force: bool = False) -> boo
 
 
 def _ensure_cf_built(out_cf: str, *, src_dir: str, platform_dir: Path) -> str:
-    """Build a .cf artifact when XML sources are available; otherwise copy packaged CF."""
+    """Return a CF matching the XML sources, or the package artifact.
+
+    In a source checkout the generated CF is never trusted merely because it
+    exists: it must carry a matching source-content marker, otherwise it is
+    rebuilt with the selected local platform. Installed wheels do not ship XML
+    sources and therefore use the CF embedded by the release pipeline.
+    """
     target = Path(out_cf)
     source = Path(src_dir)
     script = Path(__file__).resolve().parents[2] / "scripts" / "build_cf.py"
@@ -1110,7 +1148,7 @@ def _ensure_cf_built(out_cf: str, *, src_dir: str, platform_dir: Path) -> str:
         if not source.exists():
             raise FileNotFoundError(f"CF source directory not found and no packaged CF is available: {source}")
         raise FileNotFoundError(f"CF build script not found and no packaged CF is available: {script}")
-    if not _source_newer_than(target, source):
+    if _cf_matches_sources(target, source):
         return str(target)
     target.parent.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
@@ -1131,6 +1169,7 @@ def _ensure_cf_built(out_cf: str, *, src_dir: str, platform_dir: Path) -> str:
             f"Failed to build CF artifact {target} from {source} "
             f"(rc={completed.returncode}):\n{completed.stdout}"
         )
+    _write_cf_build_marker(target, source)
     return str(target)
 
 
