@@ -45,7 +45,7 @@ build_cf_8_3_27:
   script:
     - |
       set -eu
-      IBCMD=/opt/1cv8/x86_64/8.3.27.2342/ibcmd
+      IBCMD=/opt/1cv8/x86_64/8.3.27.2214/ibcmd
       IB_DATA="$CI_PROJECT_DIR/.ci/ib-data"
       mkdir -p build/cf "$IB_DATA"
       "$IBCMD" --version
