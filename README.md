@@ -130,9 +130,9 @@ answer42 install-skills --dry-run --agent all
 
 ## Linux display prerequisite
 
-На Linux `start_session` **всегда** запускает два изолированных Xvfb-дисплея: один для test manager и второй для test client. Это намеренно не использует существующий `DISPLAY`, даже если Answer42 запущен в живой X11-сессии: автоматизация и её скриншоты не должны захватывать пользовательский рабочий стол.
+На Linux `start_session` использует живую X11-сессию, если процесс Answer42 унаследовал непустой `DISPLAY`: test manager и test client запускаются на этом дисплее, поэтому их окна и скриншоты видны на desktop.
 
-Поэтому пакет `xvfb` обязателен и для desktop-, и для headless-установок:
+Если `DISPLAY` не задан (headless service, SSH без X11 forwarding и т. п.), Answer42 поднимает два собственных изолированных Xvfb-дисплея: один для test manager и второй для test client. В этом режиме пакет `xvfb` обязателен:
 
 ```bash
 # Debian / Ubuntu
@@ -142,7 +142,7 @@ sudo apt install xvfb
 sudo dnf install xorg-x11-server-Xvfb
 ```
 
-Если Xvfb отсутствует, `start_session` завершается до создания ресурсов с понятной подсказкой по установке.
+Если не задан ни доступный `DISPLAY`, ни Xvfb, `start_session` завершается до создания ресурсов с понятной подсказкой по установке. Чтобы desktop-сервис видел живой X11, его launcher/service должен передать корректный `DISPLAY` и права доступа к X server (обычно через `XAUTHORITY`).
 
 ## Скриншоты: stdio и StreamableHTTP
 

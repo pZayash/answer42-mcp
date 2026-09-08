@@ -5215,18 +5215,18 @@ async def start_session(
     if sid in _SESSIONS:
         raise ValueError(f"Session {sid!r} already exists.")
 
-    # A desktop DISPLAY is intentionally not reused: two isolated displays
-    # prevent an interactive user desktop from becoming part of automation or
-    # screenshots.  Check the prerequisite before allocating any session state
-    # so a missing package produces a clear error rather than FileNotFoundError.
-    if not os_support.IS_WINDOWS:
+    # A caller that inherited DISPLAY explicitly requests visible automation
+    # on that live X11 session. In a headless process, retain two private Xvfb
+    # displays and validate the prerequisite before allocating session state.
+    inherited_display = runtime.inherited_x11_display()
+    if not os_support.IS_WINDOWS and not inherited_display:
         runtime.require_xvfb()
 
     data_dir = os_support.default_data_dir() / "sessions" / sid
     with _port_allocation_lock():
         port_offset = _stable_session_port_offset(sid)
         display_offset = port_offset // _PORT_BAND_SIZE
-        display = "" if os_support.IS_WINDOWS else runtime.find_free_display(runtime.DEFAULT_DISPLAY_START + display_offset)
+        display, client_display, starts_xvfb = runtime.session_displays(display_offset)
         ws_port = _find_session_port(runtime.DEFAULT_WS_PORT, port_offset, sub_offset=0)
         ibsrv_port = _find_session_port(runtime.DEFAULT_IBSRV_HTTP_PORT, port_offset, sub_offset=0)
         ibsrv_direct_regport = _find_session_port(runtime.DEFAULT_IBSRV_DIRECT_PORT, port_offset, sub_offset=0)
@@ -5256,13 +5256,10 @@ async def start_session(
             bound_snapshot = _snapshot_for_base_url(base_url)
             if bound_snapshot:
                 sess.rag_snapshot = bound_snapshot
-        if display:
+        sess.client_display = client_display
+        if starts_xvfb:
             sess.xvfb_process = runtime.start_xvfb(display)
             sess.xvfb_pid = sess.xvfb_process.pid
-        # Separate display for the test client so screenshots capture only the client window
-        client_display = "" if os_support.IS_WINDOWS else runtime.find_free_display(runtime.DEFAULT_DISPLAY_START + display_offset + 1)
-        sess.client_display = client_display
-        if client_display:
             sess.client_xvfb_process = runtime.start_xvfb(client_display)
             sess.client_xvfb_pid = sess.client_xvfb_process.pid
         await sess.bridge.start()

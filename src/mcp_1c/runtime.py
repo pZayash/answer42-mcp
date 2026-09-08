@@ -118,24 +118,51 @@ def find_free_port(start: int = DEFAULT_WS_PORT, end: int | None = None) -> int:
     raise RuntimeError(f"No free port found in range {start}..{end}")
 
 
-def require_xvfb() -> str:
-    """Return the Xvfb executable or raise an actionable Linux prerequisite error.
+def inherited_x11_display() -> str:
+    """Return the caller's live X11 display, if one was intentionally inherited."""
+    if os_support.IS_WINDOWS:
+        return ""
+    return os.getenv("DISPLAY", "").strip()
 
-    Answer42 deliberately runs the test manager and test client on two isolated
-    X displays.  It must therefore have Xvfb even when the MCP process already
-    has access to a live desktop ``DISPLAY``.
+
+def require_xvfb() -> str:
+    """Return the Xvfb executable or raise an actionable headless prerequisite error.
+
+    Xvfb is needed only when Answer42 did not inherit a live X11 ``DISPLAY``.
     """
     if os_support.IS_WINDOWS:
         raise RuntimeError("Xvfb is not available on Windows")
     xvfb_bin = shutil.which("Xvfb") or "/usr/bin/Xvfb"
     if not Path(xvfb_bin).is_file():
         raise RuntimeError(
-            "Xvfb is required to start an Answer42 session on Linux, including on a host with an active X11 desktop. "
-            "Answer42 starts isolated displays for the test manager and test client. "
+            "Xvfb is required to start an Answer42 session on Linux when DISPLAY is not set. "
+            "Set DISPLAY to an accessible live X11 session, or install Xvfb for headless operation. "
             "Install the 'xvfb' package (Debian/Ubuntu: sudo apt install xvfb; Fedora/RHEL: sudo dnf install xorg-x11-server-Xvfb) "
             "and retry start_session."
         )
     return xvfb_bin
+
+
+def session_displays(display_offset: int) -> tuple[str, str, bool]:
+    """Choose inherited desktop display or two Answer42-owned Xvfb displays.
+
+    Returns ``(manager_display, client_display, starts_xvfb)``. A live X11
+    display is deliberately shared by manager and client: it is the caller's
+    explicit request to run visibly on that desktop. Otherwise the historical
+    isolated two-Xvfb setup is retained for headless operation.
+    """
+    desktop_display = inherited_x11_display()
+    if desktop_display:
+        return desktop_display, desktop_display, False
+    if os_support.IS_WINDOWS:
+        return "", "", False
+    require_xvfb()
+    manager_display = find_free_display(DEFAULT_DISPLAY_START + display_offset)
+    # The first X socket does not exist until start_xvfb() is called, so derive
+    # the second search position from the selected number instead of asking the
+    # same free-display scan twice.
+    client_display = find_free_display(int(manager_display.removeprefix(":")) + 1)
+    return manager_display, client_display, True
 
 
 def start_xvfb(display: str, resolution: str = DEFAULT_DISPLAY_RES) -> subprocess.Popen:

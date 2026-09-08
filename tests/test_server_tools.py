@@ -2244,7 +2244,7 @@ def test_default_xvfb_resolution_is_large_enough_for_1c_windows():
     assert runtime.DEFAULT_DISPLAY_RES == "1920x1200x24"
 
 
-def test_require_xvfb_explains_linux_desktop_prerequisite(monkeypatch):
+def test_require_xvfb_explains_headless_prerequisite(monkeypatch):
     monkeypatch.setattr(runtime.shutil, "which", lambda name: None)
     monkeypatch.setattr(runtime.os_support, "IS_WINDOWS", False)
     monkeypatch.setattr(runtime, "Path", lambda value: Path("/not-installed/Xvfb"))
@@ -2254,17 +2254,35 @@ def test_require_xvfb_explains_linux_desktop_prerequisite(monkeypatch):
 
     message = str(exc_info.value)
     assert "Xvfb is required" in message
-    assert "active X11 desktop" in message
+    assert "when DISPLAY is not set" in message
     assert "apt install xvfb" in message
 
 
-def test_start_session_checks_xvfb_before_allocating_session(monkeypatch):
+def test_session_displays_reuses_inherited_x11_display(monkeypatch):
+    monkeypatch.setattr(runtime.os_support, "IS_WINDOWS", False)
+    monkeypatch.setenv("DISPLAY", ":0")
+    monkeypatch.setattr(runtime, "require_xvfb", lambda: pytest.fail("Xvfb must not be required with DISPLAY"))
+
+    assert runtime.session_displays(20) == (":0", ":0", False)
+
+
+def test_session_displays_requires_xvfb_only_when_headless(monkeypatch):
+    monkeypatch.setattr(runtime.os_support, "IS_WINDOWS", False)
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.setattr(runtime, "require_xvfb", lambda: "Xvfb")
+    monkeypatch.setattr(runtime, "find_free_display", lambda start: f":{start}")
+
+    assert runtime.session_displays(20) == (":119", ":120", True)
+
+
+def test_start_session_checks_xvfb_before_allocating_session_when_headless(monkeypatch):
     from mcp_1c import server
 
     monkeypatch.setattr(server._platform, "find_platform_dir", lambda version: Path("/fake/1c"))
     monkeypatch.setattr(server._platform, "platform_version_from_dir", lambda directory: "8.3.27.2214")
     monkeypatch.setattr(server._platform, "require_websocket_support", lambda version: None)
     monkeypatch.setattr(server.runtime.os_support, "IS_WINDOWS", False)
+    monkeypatch.delenv("DISPLAY", raising=False)
     monkeypatch.setattr(
         server.runtime,
         "require_xvfb",
@@ -2275,6 +2293,27 @@ def test_start_session_checks_xvfb_before_allocating_session(monkeypatch):
         asyncio.run(start_session(session_id="missing-xvfb", version="8.3.27.2214"))
 
     assert "missing-xvfb" not in _SESSIONS
+
+
+def test_start_session_does_not_require_xvfb_with_inherited_display(monkeypatch):
+    from mcp_1c import server
+
+    monkeypatch.setattr(server._platform, "find_platform_dir", lambda version: Path("/fake/1c"))
+    monkeypatch.setattr(server._platform, "platform_version_from_dir", lambda directory: "8.3.27.2214")
+    monkeypatch.setattr(server._platform, "require_websocket_support", lambda version: None)
+    monkeypatch.setattr(server.runtime.os_support, "IS_WINDOWS", False)
+    monkeypatch.setenv("DISPLAY", ":0")
+    monkeypatch.setattr(server.runtime, "require_xvfb", lambda: pytest.fail("must not require Xvfb"))
+    monkeypatch.setattr(
+        server.runtime,
+        "session_displays",
+        lambda display_offset: (_ for _ in ()).throw(RuntimeError("reached display allocation without Xvfb prerequisite")),
+    )
+
+    with pytest.raises(RuntimeError, match="reached display allocation"):
+        asyncio.run(start_session(session_id="desktop-display", version="8.3.27.2214"))
+
+    assert "desktop-display" not in _SESSIONS
 
 
 def test_external_window_geometry_accepts_test_client_title_and_clamps_to_screen(monkeypatch):
