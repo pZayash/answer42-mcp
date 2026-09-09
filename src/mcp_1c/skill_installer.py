@@ -6,7 +6,7 @@ import argparse
 
 MESSAGE = (
     "Answer42 no longer ships or installs bundled skills. Nothing was installed; "
-    "use MCP tool descriptions and form_hints instead."
+    "use MCP tool descriptions and built-in MCP prompts instead."
 )
 
 

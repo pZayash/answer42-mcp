@@ -55,8 +55,7 @@ python scripts/build_cf.py src/client_cf build/MCPTestClient.cf
 ## Рекомендации для агентов
 
 Answer42 больше не поставляет bundled skills. Рабочие рекомендации находятся в
-descriptions MCP-инструментов, а устойчивые особенности конкретной базы/формы
-можно хранить через `form_hints_set`. Команды `answer42 install-skills` и
+descriptions MCP-инструментов и встроенных MCP prompts. Команды `answer42 install-skills` и
 `answer42 skills-install` сохранены как совместимые no-op и ничего не копируют.
 
 ## MCP-сервер в OpenClaw

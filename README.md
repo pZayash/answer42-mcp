@@ -90,8 +90,7 @@ When auto switches to resource, or when `delivery="resource"` is forced, the inl
 
 Answer42 больше не поставляет и не устанавливает bundled skills. Рекомендации
 по UI-автоматизации, RAG, Универсальному отчёту и экспорту табличных документов
-находятся в descriptions соответствующих MCP-инструментов, а повторяемые
-особенности конкретных баз и форм сохраняются через `form_hints_set`.
+находятся в descriptions соответствующих MCP-инструментов и встроенных MCP prompts.
 
 Команды `answer42 install-skills` и `answer42 skills-install` сохранены как
 совместимые no-op: они ничего не копируют и выводят сообщение о новой модели.
