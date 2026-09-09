@@ -4993,7 +4993,13 @@ def rag_lookup_object(
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> dict[str, Any]:
-    """Look up an indexed 1C metadata object, including navigation, fields and forms."""
+    """Look up an indexed 1C metadata object, including navigation, fields and forms.
+
+    RAG describes configuration source metadata, not live infobase data,
+    access rights, user settings, or a report result. Inspect `rag_diagnostic`
+    before concluding that an object is absent, then use live UI tools when
+    current runtime state matters.
+    """
     disabled = _rag_require_enabled(session_id, "rag_lookup_object", {"object": object, "snapshot": snapshot})
     if disabled is not None:
         return disabled
@@ -5012,7 +5018,12 @@ def rag_query(
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> dict[str, Any]:
-    """Search business terms and full-text RAG chunks in the local SQLite index."""
+    """Search business terms and full-text RAG chunks in the local SQLite index.
+
+    Use RAG to discover metadata names, fields, forms, and base/extension
+    layers; it is not evidence of current live data, permissions, or report
+    output. Inspect `rag_diagnostic` if search returns no useful result.
+    """
     disabled = _rag_require_enabled(session_id, "rag_query", {"query": query, "snapshot": snapshot, "limit": limit})
     if disabled is not None:
         return disabled
@@ -5158,7 +5169,15 @@ async def start_session(
     summary_rag_config: Annotated[str, "Explicit Summary RAG configuration alias/code, e.g. bp, bpc, ka, ut, zup, Accounting30, Бухгалтерия предприятия. Enables configuration+fresh summary snapshot without live autodetection."] = "",
     include_timings: Annotated[bool, "Include diagnostic startup timing breakdown in the returned _timings field"] = False,
 ) -> dict[str, Any]:
-    """One-shot session factory: detect version, start infrastructure, connect the 1C test client, and list startup form-hint operations when available."""
+    """One-shot session factory: detect version, start infrastructure, and connect the 1C test client.
+
+    `base_url` may be a web publication URL, `server/infobase`, or a file
+    infobase path. Prefer credentials saved with `credentials_save` over
+    passing secrets in tool calls. The result lists matching startup form-hint
+    operations when available; read them with `form_hints_get` before
+    improvising a known scenario. After a long UI operation, use
+    `client_busy_status` or `wait_client_idle` before sending more commands.
+    """
     start_monotonic = time.perf_counter()
     stage_monotonic = start_monotonic
     timings: dict[str, float] = {}
@@ -6544,7 +6563,13 @@ async def form_hints_set(
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> dict[str, Any]:
-    """Save operator hints for a 1C form/scenario."""
+    """Save operator hints for a 1C form/scenario.
+
+    Save only repeatable UI knowledge, not one-off report values. Use `base`
+    for infobase-specific data or user settings, `configuration` for a stable
+    configuration behavior, `extension` for extension behavior, and `global`
+    only for a standard managed-form/СКД pattern that is safe across bases.
+    """
     effective_scope, scope_field, scope_label = _hint_scope_fields("global" if use_global else scope)
     context = await _resolve_form_hints_context(
         session_id,
@@ -7743,6 +7768,9 @@ async def open_navigation_link(navigation_link: Annotated[str, "Explicit 1C navi
     This tool intentionally rejects arbitrary form command names such as
     `ФормаНайти` or `СледующаяСтрока`. Use first-class MCP tools for form
     actions, table navigation, search/settings, and dynamic-list operations.
+    The standard Universal report is opened with
+    `e1cib/app/Отчет.УниверсальныйОтчет`; inspect its live form before relying
+    on element names because they vary with configuration and report variant.
     """
     if not navigation_link.startswith("e1cib/"):
         suggestions = await _navigation_link_suggestions(session_id, navigation_link)
@@ -7973,7 +8001,13 @@ async def tabular_document_save(
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
-    """Save a tabular document field to a file in the selected format."""
+    """Save a tabular document field to a file in the selected format.
+
+    Prefer this export to reading a large report cell by cell. Confirm the
+    returned `saved` state and output path before reporting success. Saving can
+    block a thin client; when `interface_blocked=true`, wait with
+    `client_busy_status` or `wait_client_idle` before sending further UI calls.
+    """
     params = {
         "name": name,
         "title": title,
@@ -10085,6 +10119,8 @@ async def metadata_objects_from_catalog(
     catalog, reads a normalized snapshot with metadata names/synonyms, excludes
     deleted rows plus roles/subsystems, and stores the result in an in-memory
     per-session cache. Later calls search that cache unless `refresh_cache=true`.
+    This is a live UI fallback when RAG is unavailable or stale; if its watchdog
+    reports a blocked interface, wait for client recovery before further UI calls.
     """
     params = {
         "query": query,
@@ -10825,6 +10861,7 @@ async def dynamic_list_set_settings(
     Orders:  [{field, direction?}] — direction defaults to empty (uses dialog default).
 
     This is the preferred way to apply settings; it uses the same dialog the user sees.
+    Keep `clear_first=false` unless replacing all user settings was explicitly requested.
     """
     filter_list = json.loads(filters) if filters else []
     order_list = json.loads(orders) if orders else []
@@ -10847,6 +10884,8 @@ async def dynamic_list_current_settings(
 
     This reads the selected section's configured elements table, not the 'Доступные поля' table.
     Use dynamic_list_settings_available_fields when you need fields that can be added.
+    Read current settings before changing them; do not clear or replace existing
+    filters/orders unless the requested scenario explicitly requires it.
     """
     return await _bridge_call_recorded(session_id, "dynamic_list_current_settings", {
         "section": section,
