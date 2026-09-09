@@ -7768,9 +7768,6 @@ async def open_navigation_link(navigation_link: Annotated[str, "Explicit 1C navi
     This tool intentionally rejects arbitrary form command names such as
     `ФормаНайти` or `СледующаяСтрока`. Use first-class MCP tools for form
     actions, table navigation, search/settings, and dynamic-list operations.
-    The standard Universal report is opened with
-    `e1cib/app/Отчет.УниверсальныйОтчет`; inspect its live form before relying
-    on element names because they vary with configuration and report variant.
     """
     if not navigation_link.startswith("e1cib/"):
         suggestions = await _navigation_link_suggestions(session_id, navigation_link)
@@ -7784,6 +7781,58 @@ async def open_navigation_link(navigation_link: Annotated[str, "Explicit 1C navi
     except Exception as exc:
         suggestions = await _navigation_link_suggestions(session_id, navigation_link)
         raise RuntimeError(str(exc) + _format_navigation_suggestions(suggestions)) from exc
+
+
+@mcp.prompt(
+    name="universal_report_workflow",
+    title="Универсальный отчет 1С",
+    description="Встроенный workflow формирования, проверки и экспорта стандартного Универсального отчета через Answer42.",
+)
+def universal_report_workflow() -> str:
+    """Return reusable instructions for the standard 1C Universal report."""
+    return """# Универсальный отчет 1С через Answer42
+
+Используй этот встроенный workflow, когда нужно сформировать, проверить или экспортировать
+стандартный Универсальный отчет в живой базе 1С.
+
+## Принципы
+
+- Открой отчет через `open_navigation_link("e1cib/app/Отчет.УниверсальныйОтчет")`.
+- Не угадывай технические имена элементов: состав формы зависит от конфигурации,
+  варианта отчета и пользовательских настроек. Сначала прочитай живую форму через
+  `ui_tree(profile="navigation")` и/или `search_objects(title=...)`.
+- Если `ui_tree` вернул `form_hints.available=true`, сначала прочитай подходящую
+  подсказку через `form_hints_get(operation=...)`.
+- Скриншот служит evidence и диагностикой, но не источником табличных данных.
+  Проверяй результат через `tabular_document_text` либо сохраненный файл.
+
+## Workflow
+
+1. Выбери тип, раздел и объект отчета по видимым подписям. Для ссылочного или
+   списочного поля используй стандартный выбор 1С, а не внутреннее значение.
+2. Если нужны поля, отборы или сортировки, открой полные настройки (`ВсеНастройки`
+   / `Настройки...`) и сначала прочитай текущие таблицы настроек.
+3. Меняй только требуемые строки. Не удаляй или не очищай существующие отборы без
+   явного требования пользователя. Для сортировок учитывай порядок строк: первая
+   обычно имеет больший приоритет.
+4. Не изменяй скрытые или неактивные страницы вслепую: сначала активируй вкладку и
+   повторно проверь ее строки. Если нужного поля нет, проверь доступные поля через
+   настройки отчета, RAG или metadata lookup, а не угадывай имя.
+5. После изменений перечитай затронутые таблицы, затем сформируй отчет.
+6. Проверь `ОтчетТабличныйДокумент`: наличие, размеры, заголовки и признаки
+   примененных параметров, отборов или сортировок.
+7. Для данных предпочитай XLSX, для визуального evidence — PDF. После
+   `tabular_document_save` подтверди `saved=true`, путь и формат файла. Если
+   сохранение заблокировало клиент, дождись восстановления через
+   `client_busy_status` или `wait_client_idle`.
+
+## Повторяемое знание
+
+Сохраняй только устойчивое знание через `form_hints_set`: `base` для конкретной
+базы/варианта/настроек, `configuration` для поведения конфигурации, `extension`
+для расширения и `global` только для безопасного общего паттерна СКД. Не сохраняй
+одноразовые значения отчета.
+"""
 
 
 def _query_from_navigation_link(value: str) -> str:

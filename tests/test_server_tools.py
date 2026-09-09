@@ -968,13 +968,28 @@ def test_key_tool_descriptions_replace_removed_bundled_skill_guidance():
     tools = _tools_by_name()
 
     assert "form_hints_get" in tools["start_session"].description
-    assert "Universal report" in tools["open_navigation_link"].description
+    assert "Universal report" not in tools["open_navigation_link"].description
     assert "RAG describes configuration source metadata" in tools["rag_lookup_object"].description
     assert "live UI fallback" in tools["metadata_objects_from_catalog"].description
     assert "clear_first=false" in tools["dynamic_list_set_settings"].description
     assert "one-off report values" in tools["form_hints_set"].description
     assert "interface_blocked=true" in tools["tabular_document_save"].description
 
+
+def test_universal_report_workflow_is_an_embedded_prompt():
+    from mcp_1c import server
+
+    prompts = {prompt.name: prompt for prompt in asyncio.run(server.mcp.list_prompts())}
+
+    assert "universal_report_workflow" in prompts
+    assert "Универсальный отчет" in prompts["universal_report_workflow"].title
+    result = asyncio.run(server.mcp.get_prompt("universal_report_workflow"))
+    content = result.messages[0].content.text
+    assert "e1cib/app/Отчет.УниверсальныйОтчет" in content
+    assert "ui_tree(profile=\"navigation\")" in content
+    assert "ВсеНастройки" in content
+    assert "ОтчетТабличныйДокумент" in content
+    assert "form_hints_set" in content
 
 
 def test_command_diagnostic_timings_are_opt_in(monkeypatch):
