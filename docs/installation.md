@@ -52,27 +52,12 @@ python scripts/build_cf.py src/client_cf build/MCPTestClient.cf
 
 На Linux без серверных компонентов Answer42 может запускать менеджер и клиент напрямую через файловую базу (`/F`). На Windows это также поддерживается; запускайте MCP из интерактивной пользовательской сессии, потому что UI automation и screenshots требуют desktop session.
 
-## Установка skills
+## Рекомендации для агентов
 
-PyPI-пакет не может сам записывать skills в профили агентов. После установки пакета выполните:
-
-```bash
-answer42 install-skills
-```
-
-По умолчанию устанавливаются `answer42`, `answer42-rag` и `answer42-universal-report` для OpenClaw в `~/.openclaw/workspace/skills`.
-
-Для других агентов или явного пути:
-
-```bash
-answer42 install-skills --agent claude
-answer42 install-skills --agent codex
-answer42 install-skills --agent opencode
-answer42 install-skills --agent pi
-answer42 install-skills --agent hermes
-answer42 install-skills --target-dir /path/to/skills
-answer42 install-skills --list-agents
-```
+Answer42 больше не поставляет bundled skills. Рабочие рекомендации находятся в
+descriptions MCP-инструментов, а устойчивые особенности конкретной базы/формы
+можно хранить через `form_hints_set`. Команды `answer42 install-skills` и
+`answer42 skills-install` сохранены как совместимые no-op и ничего не копируют.
 
 ## MCP-сервер в OpenClaw
 
@@ -87,20 +72,6 @@ OpenClaw хранит MCP-серверы в `mcp.servers`. Добавьте `Ans
 `ONEC_MCP_CREDENTIALS_FILE` указывает на локальный JSON с логинами и паролями. В штатном режиме агент вызывает `start_session(base_url="...")` без `username`/`password`, а Answer42 сам подставляет креды внутри MCP-процесса. Для сохранения или обновления записи используйте tool `credentials_save(url="...", username="...", password="...")`, для удаления — `credentials_remove(url="...")`, для проверки наличия записи — `credentials_check(base_url="...")`; эти tools не возвращают ни логин, ни пароль, ни маску пароля. `credentials_list` рекомендуется скрывать через `toolFilter.exclude`, чтобы агент не видел список URL-шаблонов. Если в `start_session`/`connect_test_client` передан пароль вида `***`, Answer42 считает это плейсхолдером и выдаёт явную ошибку вместо попытки авторизации.
 
 После изменения MCP config перезапустите или перезагрузите OpenClaw gateway, если hot reload не подхватил конфигурацию.
-
-## Skills
-
-Репозиторий содержит bundled skills для агентов в единственном canonical месте:
-
-- `src/mcp_1c/assets/skills/answer42/SKILL.md`
-- `src/mcp_1c/assets/skills/answer42-rag/SKILL.md`
-- `src/mcp_1c/assets/skills/answer42-universal-report/SKILL.md`
-
-Не копируйте эти каталоги вручную из checkout: используйте installer, чтобы установить bundled skills в workspace skills directory:
-
-```bash
-answer42 install-skills
-```
 
 ## Smoke checks
 

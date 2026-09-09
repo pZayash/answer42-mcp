@@ -9,7 +9,7 @@ from pathlib import Path, PureWindowsPath
 
 import pytest
 
-from mcp_1c import __version__, runtime
+from mcp_1c import __version__, runtime, skill_installer
 from mcp_1c import platform as onec_platform
 from mcp_1c.server import (
     _SESSIONS,
@@ -148,6 +148,20 @@ def test_cli_version_prints_package_version(capsys):
 
     assert exc_info.value.code == 0
     assert capsys.readouterr().out.strip() == f"answer42 {__version__}"
+
+
+@pytest.mark.parametrize("command", ["install-skills", "skills-install"])
+def test_removed_skills_commands_are_successful_compatibility_noops(capsys, command):
+    with pytest.raises(SystemExit) as exc_info:
+        mcp_main([command, "--agent", "codex", "--target-dir", "/tmp/skills", "--skill", "answer42", "--dry-run"])
+
+    assert exc_info.value.code == 0
+    assert capsys.readouterr().out.strip() == skill_installer.MESSAGE
+
+
+def test_removed_skills_command_accepts_legacy_list_agents_option(capsys):
+    assert skill_installer.main(["--list-agents", "--no-overwrite"]) == 0
+    assert capsys.readouterr().out.strip() == skill_installer.MESSAGE
 
 
 def test_cli_disable_credential_store_flag_is_registered(capsys):
@@ -948,6 +962,18 @@ def test_selected_new_tool_schemas():
     assert "max_depth" not in tools["tabular_document_state_display"].input_schema["properties"]
     assert tools["search_objects"].input_schema["properties"]["limit"]["default"] == 50
     assert "max_depth" not in tools["search_objects"].input_schema["properties"]
+
+
+def test_key_tool_descriptions_replace_removed_bundled_skill_guidance():
+    tools = _tools_by_name()
+
+    assert "form_hints_get" in tools["start_session"].description
+    assert "Universal report" in tools["open_navigation_link"].description
+    assert "RAG describes configuration source metadata" in tools["rag_lookup_object"].description
+    assert "live UI fallback" in tools["metadata_objects_from_catalog"].description
+    assert "clear_first=false" in tools["dynamic_list_set_settings"].description
+    assert "one-off report values" in tools["form_hints_set"].description
+    assert "interface_blocked=true" in tools["tabular_document_save"].description
 
 
 

@@ -82,8 +82,6 @@ package:
     - install -m 644 build/cf/MCPTestClient.cf src/mcp_1c/assets/MCPTestClient.cf
     - test -s src/mcp_1c/assets/MCPTestManager.cf
     - test -s src/mcp_1c/assets/MCPTestClient.cf
-    - test -s src/mcp_1c/assets/skills/answer42/SKILL.md
-    - test -s src/mcp_1c/assets/skills/answer42-rag/SKILL.md
     - python -m pip install build twine
     - python -m build
     - python -m twine check dist/*

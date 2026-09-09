@@ -86,47 +86,26 @@ When auto switches to resource, or when `delivery="resource"` is forced, the inl
 `index_path` is the preferred stable address inside one snapshot. `path` is human-readable and useful for reports, but less reliable when several controls have the same captions.
 
 
-## Установка skills
+## Встроенные рекомендации для агентов
 
-PyPI-пакет не записывает agent skills в пользовательские каталоги автоматически. После установки Answer42 поставьте bundled skills отдельной командой:
+Answer42 больше не поставляет и не устанавливает bundled skills. Рекомендации
+по UI-автоматизации, RAG, Универсальному отчёту и экспорту табличных документов
+находятся в descriptions соответствующих MCP-инструментов, а повторяемые
+особенности конкретных баз и форм сохраняются через `form_hints_set`.
 
-```bash
-answer42 install-skills
-```
-
-По умолчанию команда устанавливает `answer42`, `answer42-rag` и `answer42-universal-report` в OpenClaw:
-
-```text
-~/.openclaw/workspace/skills
-```
-
-Другие агенты и варианты установки:
-
-```bash
-answer42 install-skills --agent claude
-answer42 install-skills --agent codex
-answer42 install-skills --agent opencode
-answer42 install-skills --agent pi
-answer42 install-skills --agent hermes
-answer42 install-skills --agent all
-answer42 install-skills --target-dir /path/to/skills
-answer42 install-skills --list-agents
-answer42 install-skills --dry-run --agent all
-```
-
-Для агентов без стабильного стандарта skill-директорий (`codex`, `opencode`, `pi`, `hermes`) presets best-effort. Если конкретная установка использует другой путь, укажите `--target-dir` явно.
+Команды `answer42 install-skills` и `answer42 skills-install` сохранены как
+совместимые no-op: они ничего не копируют и выводят сообщение о новой модели.
 
 ## Инструкция для AI-агентов
 
-Если вы AI-агент и пользователь просит установить Answer42 и skills, используйте отдельную инструкцию: [`docs/agent-installation.md`](docs/agent-installation.md).
+Если вы AI-агент и пользователь просит установить Answer42, используйте отдельную инструкцию: [`docs/agent-installation.md`](docs/agent-installation.md).
 
 Коротко:
 
 1. установите пакет через `pipx` или virtualenv;
-2. выполните `answer42 install-skills`;
-3. подготовьте `ONEC_MCP_CREDENTIALS_FILE` вне репозитория;
-4. зарегистрируйте MCP-сервер в агентском клиенте;
-5. проверьте установку через `credentials_check`, затем smoke-сессию `start_session` → `active_window` → `stop_session`.
+2. подготовьте `ONEC_MCP_CREDENTIALS_FILE` вне репозитория;
+3. зарегистрируйте MCP-сервер в агентском клиенте;
+4. проверьте установку через `credentials_check`, затем smoke-сессию `start_session` → `active_window` → `stop_session`.
 
 ## Linux display prerequisite
 

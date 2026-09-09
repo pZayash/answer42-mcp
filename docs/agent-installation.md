@@ -105,36 +105,15 @@ pip install "answer42[screenshot,windows-window-control]"
 answer42 --help
 ```
 
-## 3. Установите bundled skills
+## 3. Используйте descriptions инструментов и form hints
 
-PyPI-пакет не должен сам записывать skills в профили агентов. После установки пакета выполните:
+Answer42 больше не поставляет bundled skills. Инструкции по UI-автоматизации,
+RAG, Универсальному отчёту и табличным документам находятся в descriptions MCP
+инструментов. Для повторяемых особенностей конкретной базы/формы используйте
+`form_hints_get` и `form_hints_set`.
 
-```bash
-answer42 install-skills
-```
-
-По умолчанию устанавливаются `answer42`, `answer42-rag` и `answer42-universal-report` в OpenClaw:
-
-```text
-~/.openclaw/workspace/skills
-```
-
-Другие варианты:
-
-```bash
-answer42 install-skills --agent openclaw
-answer42 install-skills --agent claude
-answer42 install-skills --agent codex
-answer42 install-skills --agent opencode
-answer42 install-skills --agent pi
-answer42 install-skills --agent hermes
-answer42 install-skills --agent all
-answer42 install-skills --target-dir /path/to/skills
-answer42 install-skills --list-agents
-answer42 install-skills --dry-run --agent all
-```
-
-Для агентов без стабильного стандарта skill-директорий presets best-effort. Если конкретная установка использует другой путь, укажите `--target-dir` явно.
+Команды `answer42 install-skills` и `answer42 skills-install` сохранены как
+совместимые no-op: они завершаются успешно, но ничего не устанавливают.
 
 ## 4. Подготовьте credentials
 
@@ -220,7 +199,7 @@ credentials_check(base_url="<TARGET_INFOBASE_URL>")
 
 ```bash
 answer42 --help
-answer42 install-skills --dry-run
+# Bundled skills больше не нужны: рекомендации находятся в MCP tool descriptions.
 ```
 
 Через MCP tools:
