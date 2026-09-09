@@ -1,10 +1,10 @@
 [project]
 name = "answer42"
-version = "0.4.99"
+version = "0.4.100"
 description = "Answer42 — The Answer to Life, Universe, and 1C — UI Driver. MCP-powered 1C:Enterprise UI automation: click, fill, navigate, test, and introspect managed forms through the test-client API"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = ["mcp>=2.0.0,<3", "websockets>=12.0", "pydantic>=2.0"]
+dependencies = ["mcp>=2.0.0,<3", "websockets>=12.0", "pydantic>=2.0", "requests>=2.31", "cryptography>=42.0"]
 keywords = ["mcp", "1c", "1c-enterprise", "ui-automation", "test-client"]
 classifiers = [
     "Development Status :: 3 - Alpha",

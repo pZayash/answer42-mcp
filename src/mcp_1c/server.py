@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Annotated, Any
 from urllib.parse import parse_qs, unquote, urlsplit, urlunsplit
 
+import requests
 from mcp.server import MCPServer
 from mcp.server.lowlevel import NotificationOptions
 from mcp.server.mcpserver.resources import FileResource
@@ -40,6 +41,7 @@ from .protocol import MANAGER_PROTOCOL_VERSION
 from .rag import RagService
 from .rag.dump import dump_all_extensions_to_xml, dump_cf_to_xml, dump_infobase_to_xml
 from .recorder import RecordingSession
+from .webclient_probe import WebRuntimeAuthenticationError, WebRuntimeProbeError, probe_web_runtime
 from .window_control import active_1c_window_geometry as _active_external_1c_window_geometry
 from .window_control import maximize_test_client_window as _maximize_external_window
 
@@ -5197,6 +5199,13 @@ async def start_session(
         # a file infobase path (/F or ibsrv) or a server/infobase string (/S).
         connection_value = base_url
         base_url = ""
+    web_runtime_probe: dict[str, Any] = {"attempted": False, "status": "not_applicable"}
+    if base_url and initial_connection_mode == "ws":
+        web_runtime_probe = await _probe_web_runtime_before_start(base_url, username, password)
+        if web_runtime_probe.get("authentication_failed"):
+            # No local 1C runtime/process has been started yet. Do not hide a
+            # confirmed publication login rejection behind a later timeout.
+            raise ValueError(str(web_runtime_probe.get("message") or "1C web authentication failed"))
     inferred_summary_rag_config = "" if summary_rag_config else _summary_rag_config_from_42clouds_url(base_url)
     effective_summary_rag_config = summary_rag_config or inferred_summary_rag_config
     resolved_version = version or None
@@ -5238,11 +5247,43 @@ async def start_session(
             data_dir=data_dir, base_url=base_url, username=username, password=password
         )
         sess.rag_enabled = bool(rag_enabled)
+        probe_runtime = web_runtime_probe.get("runtime") if web_runtime_probe.get("status") == "ok" else None
+        if isinstance(probe_runtime, dict) and probe_runtime.get("found"):
+            sess.configuration_name = str(probe_runtime.get("configuration_name") or "")
+            sess.configuration_version = str(probe_runtime.get("configuration_version") or "")
+            probe_extensions = [
+                extension
+                for extension in probe_runtime.get("extensions", [])
+                if isinstance(extension, dict) and str(extension.get("name") or "")
+            ]
+            sess.extension_names = [
+                str(extension["name"])
+                for extension in probe_extensions
+                if not _is_ignored_runtime_extension_name(str(extension["name"]))
+            ]
+            sess.configuration_info_cache = {
+                "found": bool(sess.configuration_name),
+                "configuration_name": sess.configuration_name,
+                "configuration_version": sess.configuration_version,
+                "source": "web_start_info",
+                "source_method": "web_start_info",
+                "warnings": [],
+                "cache_hit": False,
+            }
+            sess.installed_extensions_cache = {
+                "found": True,
+                "extensions": copy.deepcopy(probe_extensions),
+                "extensions_count": len(probe_extensions),
+                "source": "web_start_info",
+                "warnings": [],
+                "cache_hit": False,
+            }
+            _save_cached_configuration_for_base_url(base_url, sess.configuration_info_cache)
         # Best-effort reusable-hints context is intentionally cheap at startup.
         # Prefer persistent per-base cache because it contains the live
         # configuration name (for example БухгалтерияПредприятия), then fall
         # back to the explicit/URL-derived Summary RAG alias (for example bp).
-        if base_url:
+        if base_url and not sess.configuration_info_cache:
             cached_configuration = _load_cached_configuration_for_base_url(base_url)
             if cached_configuration is not None:
                 sess.configuration_name = str(cached_configuration.get("configuration_name") or sess.configuration_name or "")
@@ -5508,6 +5549,7 @@ async def start_session(
         "configuration_name": sess.configuration_name,
         "configuration_version": sess.configuration_version,
         "extension_names": sess.extension_names,
+        "web_runtime_probe": web_runtime_probe,
         "global_hints": _discover_global_hints(),
         "startup_hints": _discover_startup_hints(
             configuration_name=sess.configuration_name,
@@ -5825,6 +5867,40 @@ def _is_placeholder_password(password: str) -> bool:
 def _is_web_base_url(base_url: str) -> bool:
     scheme = urlsplit(base_url).scheme.lower()
     return scheme in {"http", "https"}
+
+
+async def _probe_web_runtime_before_start(
+    base_url: str,
+    username: str,
+    password: str,
+) -> dict[str, Any]:
+    """Best-effort requests-only runtime discovery before client infrastructure.
+
+    A bad credential is deliberately distinct from an unavailable/unsupported
+    web publication: the former must be reported to the caller before Answer42
+    spends time creating Xvfb, manager and test-client processes.
+    """
+    if not _is_web_base_url(base_url):
+        return {"attempted": False, "status": "not_web_publication"}
+    if not username or not password:
+        return {"attempted": False, "status": "credentials_not_provided"}
+    try:
+        result = await asyncio.to_thread(probe_web_runtime, base_url, username, password)
+        return {"attempted": True, "status": "ok", "runtime": result}
+    except WebRuntimeAuthenticationError as exc:
+        return {
+            "attempted": True,
+            "status": "authentication_failed",
+            "authentication_failed": True,
+            "message": str(exc),
+        }
+    except (WebRuntimeProbeError, requests.RequestException) as exc:
+        logging.info("Web runtime probe skipped for %s: %s", _normalize_base_url(base_url), exc)
+        return {
+            "attempted": True,
+            "status": "unavailable",
+            "message": str(exc),
+        }
 
 
 def _users_url_for_base_url(base_url: str) -> str:

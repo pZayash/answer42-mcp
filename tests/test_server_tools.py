@@ -45,6 +45,7 @@ from mcp_1c.server import (
     _normalize_connection_mode,
     _parse_users_plain_text,
     _pid_is_running,
+    _probe_web_runtime_before_start,
     _rag_diagnostic,
     _reap_global_orphan_sessions,
     _register_dev_tools,
@@ -71,6 +72,7 @@ from mcp_1c.server import (
 from mcp_1c.server import (
     main as mcp_main,
 )
+from mcp_1c.webclient_probe import WebRuntimeAuthenticationError
 
 EXPECTED_NEW_TOOLS = {
     "wait_object",
@@ -4365,3 +4367,24 @@ def test_ui_tree_rag_auto_follows_profile(monkeypatch, tmp_path):
     diagnostic = asyncio.run(ui_tree(profile="diagnostic", session_id="unit_rag_auto"))
     assert "rag_diagnostic" in diagnostic
     assert dummy_rag.calls == [{"snapshot": "summary:bp:test", "object_full_name": "Документ.РеализацияТоваровУслуг"}]
+
+
+def test_web_runtime_probe_reports_authentication_failure(monkeypatch):
+    def failed_probe(*_args, **_kwargs):
+        raise WebRuntimeAuthenticationError("1C web authentication failed: incorrect user or password")
+
+    monkeypatch.setattr("mcp_1c.server.probe_web_runtime", failed_probe)
+
+    result = asyncio.run(_probe_web_runtime_before_start("https://example.test/ib", "user", "password"))
+
+    assert result["attempted"] is True
+    assert result["status"] == "authentication_failed"
+    assert result["authentication_failed"] is True
+    assert "incorrect user or password" in result["message"]
+
+
+def test_web_runtime_probe_skips_non_web_target():
+    assert asyncio.run(_probe_web_runtime_before_start("server/infobase", "user", "password")) == {
+        "attempted": False,
+        "status": "not_web_publication",
+    }
