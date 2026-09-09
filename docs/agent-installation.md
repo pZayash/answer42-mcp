@@ -105,12 +105,11 @@ pip install "answer42[screenshot,windows-window-control]"
 answer42 --help
 ```
 
-## 3. Используйте descriptions инструментов и form hints
+## 3. Используйте descriptions инструментов и встроенные prompts
 
 Answer42 больше не поставляет bundled skills. Инструкции по UI-автоматизации,
 RAG, Универсальному отчёту и табличным документам находятся в descriptions MCP
-инструментов. Для повторяемых особенностей конкретной базы/формы используйте
-`form_hints_get` и `form_hints_set`.
+инструментов и встроенных MCP prompts.
 
 Команды `answer42 install-skills` и `answer42 skills-install` сохранены как
 совместимые no-op: они завершаются успешно, но ничего не устанавливают.
