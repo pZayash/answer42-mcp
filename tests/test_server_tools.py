@@ -723,6 +723,23 @@ def test_universal_report_workflow_is_an_embedded_prompt():
     assert "form_hints" not in content
 
 
+def test_event_log_workflow_is_an_embedded_prompt():
+    from mcp_1c import server
+
+    prompts = {prompt.name: prompt for prompt in asyncio.run(server.mcp.list_prompts())}
+
+    assert "event_log_workflow" in prompts
+    assert "Журнал регистрации" in prompts["event_log_workflow"].title
+    result = asyncio.run(server.mcp.get_prompt("event_log_workflow"))
+    content = result.messages[0].content.text
+    assert "e1cib/app/Обработка.ЖурналРегистрации" in content
+    assert "Установить отбор" in content
+    assert "ДатаНачала" in content
+    assert "СтатусТранзакции" in content
+    assert "table_rows(name=\"Журнал\")" in content
+    assert "Выгрузить в файл" in content
+
+
 def test_removed_form_hints_tools_are_not_exposed():
     tools = _tools_by_name()
 
