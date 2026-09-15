@@ -37,6 +37,13 @@ from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 from mcp.server.mcpserver.resources import FileResource
 from mcp.server.subscriptions import ToolsListChanged
 from mcp_types import ListToolsResult, PaginatedRequestParams
+
+# mcp 2.x доносит до MCP-клиента текст только у ToolError; любое другое
+# исключение маскируется в "Error executing tool <name>".
+try:  # pragma: no cover - раскладка SDK может отличаться
+    from mcp.server.mcpserver.exceptions import ToolError as _McpToolError
+except Exception:  # pragma: no cover
+    _McpToolError = None
 from starlette.responses import FileResponse, PlainTextResponse
 
 from . import (
@@ -4724,6 +4731,23 @@ mcp.add_tool(manage_tool_groups, name="tool_groups", description=_tool_groups_de
 mcp._lowlevel_server.add_request_handler("tools/list", PaginatedRequestParams, _handle_list_tools_for_client)
 
 
+def _tool_error_text(exc: BaseException) -> str:
+    """Текст ошибки с учётом цепочки причин.
+
+    SDK оборачивает ошибку тула в `UnexpectedToolError("Error executing tool ...")`
+    и теряет исходный текст; он остаётся в `__cause__`/`__context__`.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        text = str(current).strip()
+        if text and not text.startswith("Error executing tool"):
+            return text
+        current = current.__cause__ or current.__context__
+    return str(exc).strip() or type(exc).__name__
+
+
 def _install_tool_call_logger() -> None:
     """Wrap mcp.call_tool so every MCP tool invocation is logged."""
     global _TOOL_CALL_WRAPPER_INSTALLED
@@ -4769,7 +4793,10 @@ def _install_tool_call_logger() -> None:
             _log_tool_call(session_id, name, params, None, str(visible), time.monotonic() - start)
             raise visible from exc.__cause__
         except Exception as exc:
-            _log_tool_call(session_id, name, params, None, str(exc), time.monotonic() - start)
+            text = _tool_error_text(exc)
+            _log_tool_call(session_id, name, params, None, text, time.monotonic() - start)
+            if _McpToolError is not None:
+                raise _McpToolError(text) from exc
             raise
         finally:
             _SESSION_ID_OMITTED.reset(omitted_token)
