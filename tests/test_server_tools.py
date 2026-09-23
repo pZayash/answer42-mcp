@@ -2258,7 +2258,7 @@ def test_dump_all_extensions_to_xml_uses_designer_all_extensions(monkeypatch, tm
 
     platform_dir = tmp_path / "platform"
     platform_dir.mkdir()
-    (platform_dir / "1cv8").write_text("", encoding="utf-8")
+    (platform_dir / rag_dump.os_support.executable_name("1cv8")).write_text("", encoding="utf-8")
     output_dir = tmp_path / "extensions"
 
     captured = {}

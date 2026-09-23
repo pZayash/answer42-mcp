@@ -40,7 +40,9 @@ def file_lock(path: Path) -> Iterator[None]:
     """Acquire an exclusive file lock on POSIX and Windows.
 
     The implementation imports fcntl/msvcrt lazily so importing Answer42 on
-    Windows does not fail on the POSIX-only ``fcntl`` module.
+    Windows does not fail on the POSIX-only ``fcntl`` module. The primitive
+    follows the real interpreter OS rather than ``IS_WINDOWS``, which tests
+    patch to simulate another platform's behaviour.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a+b") as lock_file:
@@ -49,7 +51,7 @@ def file_lock(path: Path) -> Iterator[None]:
             lock_file.write(b"0")
             lock_file.flush()
         lock_file.seek(0)
-        if IS_WINDOWS:
+        if os.name == "nt":
             import msvcrt  # type: ignore
 
             msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
