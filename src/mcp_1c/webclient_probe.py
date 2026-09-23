@@ -16,10 +16,10 @@ import re
 import uuid
 import zlib
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Any
 from urllib.parse import urljoin, urlparse
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import requests
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -36,6 +36,20 @@ _BOOTSTRAP_RE = re.compile(
     r'var BASE = "([^"]+)";.*?var LANG = "([^"]+)";.*?var VERSION = "([^"]+)";',
     re.DOTALL,
 )
+# Moscow has used a fixed UTC+3 offset without DST since 2014.
+_MOSCOW_FIXED_TZ = timezone(timedelta(hours=3), "MSK")
+
+
+def _moscow_tz() -> tzinfo:
+    """Return Europe/Moscow, falling back to UTC+3 when no tz database exists.
+
+    Windows has no system IANA database, so ``zoneinfo`` depends on the
+    ``tzdata`` package there; a missing package must not break the probe.
+    """
+    try:
+        return ZoneInfo("Europe/Moscow")
+    except (ZoneInfoNotFoundError, ValueError, OSError):
+        return _MOSCOW_FIXED_TZ
 
 
 class WebRuntimeProbeError(RuntimeError):
@@ -250,7 +264,7 @@ def probe_web_runtime(base_url: str, username: str, password: str, timeout: floa
                 "clnId": client_id,
                 "connSpeed": "normal",
                 "clnOS": "Linux",
-                "clientTime": datetime.now(ZoneInfo("Europe/Moscow")).strftime("%Y%m%d%H%M%S"),
+                "clientTime": datetime.now(_moscow_tz()).strftime("%Y%m%d%H%M%S"),
                 "defaultScale": "compact",
             },
         ).prepare().url

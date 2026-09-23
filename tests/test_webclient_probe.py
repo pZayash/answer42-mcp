@@ -90,3 +90,14 @@ def test_probe_does_not_attempt_logout_when_login_fails(monkeypatch):
 
     with pytest.raises(probe.WebRuntimeAuthenticationError, match="denied"):
         probe.probe_web_runtime("https://host/base", "user", "password")
+
+
+def test_moscow_tz_falls_back_to_fixed_offset_without_tz_database(monkeypatch):
+    def missing_zone(key: str):
+        raise probe.ZoneInfoNotFoundError(f"No time zone found with key {key}")
+
+    monkeypatch.setattr(probe, "ZoneInfo", missing_zone)
+
+    tz = probe._moscow_tz()
+
+    assert probe.datetime(2026, 1, 1, tzinfo=tz).utcoffset() == probe.timedelta(hours=3)
