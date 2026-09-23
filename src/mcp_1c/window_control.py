@@ -11,6 +11,8 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from . import win_desktop
+
 LOGGER = logging.getLogger(__name__)
 
 TEST_CLIENT_WINDOW_TITLE = "Клиент тестирования (1С:Предприятие)"
@@ -48,7 +50,7 @@ def maximize_test_client_window(
     This function controls only window geometry; it doesn't click or type in the application.
     """
     if os.name == "nt":
-        return _maximize_with_winapi(title_contains, width, height).as_dict()
+        return _maximize_with_winapi(title_contains, width, height, desktop=display or "").as_dict()
 
     env = os.environ.copy()
     if display:
@@ -70,7 +72,7 @@ def active_1c_window_geometry(title_contains: str = "", display: str | None = No
     type, or decide whether a 1C UI command succeeded; UI automation goes
     through the 1C test-client API.
     """
-    chosen = _find_windows_1c_window(title_contains) if os.name == "nt" else _find_x11_1c_window(title_contains, display)
+    chosen = _find_windows_1c_window(title_contains, desktop=display or "") if os.name == "nt" else _find_x11_1c_window(title_contains, display)
     if not chosen:
         return None
     return chosen.get("geometry")
@@ -398,7 +400,10 @@ def _maximize_with_xlib(title_contains: str, display: str, width: int | None, he
         return WindowControlResult(False, "xlib", error=str(e))
 
 
-def _find_windows_1c_window(title_contains: str = "") -> dict[str, Any] | None:
+def _find_windows_1c_window(title_contains: str = "", desktop: str = "") -> dict[str, Any] | None:
+    """Find the best 1C window on the current desktop or an Answer42 hidden desktop."""
+    if win_desktop.is_hidden_desktop_name(desktop):
+        return _find_hidden_desktop_1c_window(title_contains, desktop)
     user32 = ctypes.windll.user32
     candidates: list[dict[str, Any]] = []
 
@@ -448,17 +453,73 @@ def _find_windows_1c_window(title_contains: str = "") -> dict[str, Any] | None:
     return candidates[0]
 
 
-def _maximize_with_winapi(title_contains: str, width: int | None, height: int | None) -> WindowControlResult:
+def _window_priority(title: str, width: int, height: int) -> int:
+    priority = min(width * height // 10000, 50)
+    if "1С:Предприятие" in title:
+        priority += 50
+    if title and title not in {"1cv8c", "1cv8", "Конфигурация"}:
+        priority += 100
+    return priority
+
+
+def _find_hidden_desktop_1c_window(title_contains: str, desktop: str) -> dict[str, Any] | None:
+    try:
+        windows = win_desktop.list_windows(desktop)
+    except OSError as exc:
+        LOGGER.debug("Cannot enumerate hidden desktop %s: %s", desktop, exc)
+        return None
+    # A hidden desktop holds only one Answer42 session role, so without an
+    # explicit filter any large window there is ours: the Windows caption of
+    # the test client is often just "Конфигурация".
+    title_filter_matches = any(_title_matches(str(w.get("title") or ""), title_contains) for w in windows)
+    candidates: list[dict[str, Any]] = []
+    for item in windows:
+        title = str(item.get("title") or "")
+        width, height = int(item["width"]), int(item["height"])
+        if width < 300 or height < 150:
+            continue
+        if (title_contains or title_filter_matches) and not _title_matches(title, title_contains):
+            continue
+        candidates.append({
+            "hwnd": int(item["hwnd"]),
+            "title": title,
+            "priority": _window_priority(title, width, height),
+            "geometry": {
+                "left": int(item["left"]),
+                "top": int(item["top"]),
+                "width": width,
+                "height": height,
+                "title": title,
+                "hwnd": int(item["hwnd"]),
+                "desktop": desktop,
+            },
+        })
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: int(item.get("priority") or 0), reverse=True)
+    return candidates[0]
+
+
+def _maximize_with_winapi(title_contains: str, width: int | None, height: int | None, desktop: str = "") -> WindowControlResult:
     try:
         import ctypes.wintypes  # type: ignore
 
         user32 = ctypes.windll.user32
-        chosen = _find_windows_1c_window(title_contains)
+        chosen = _find_windows_1c_window(title_contains, desktop=desktop)
         if chosen is None:
             return WindowControlResult(False, "winapi", error="window not found")
         hwnd = int(chosen["hwnd"])
         screen_w = width or user32.GetSystemMetrics(0) or 1920
         screen_h = height or user32.GetSystemMetrics(1) or 1080
+        if win_desktop.is_hidden_desktop_name(desktop):
+            win_desktop.maximize_window(desktop, hwnd, int(screen_w), int(screen_h))
+            return WindowControlResult(
+                True,
+                "winapi-hidden-desktop",
+                title=str(chosen.get("title") or ""),
+                geometry={"x": 0, "y": 0, "width": int(screen_w), "height": int(screen_h)},
+                candidates=[{"title": str(chosen.get("title") or ""), "hwnd": hwnd, "desktop": desktop}],
+            )
         user32.ShowWindow(hwnd, 9)  # SW_RESTORE
         user32.MoveWindow(hwnd, 0, 0, int(screen_w), int(screen_h), True)
         user32.ShowWindow(hwnd, 3)  # SW_MAXIMIZE

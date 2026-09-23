@@ -109,7 +109,11 @@ class SessionState:
 
 ### `mcp_1c.window_control`
 
-OS-specific слой окна тест-клиента: Linux (`wmctrl`/`xdotool`/`python-xlib`, `xwininfo`), Windows (WinAPI). Допускается для подготовки геометрии окна и скриншотов (resize/maximize/geometry capture). Ввод, клики и результат действий 1С не определяются через X11/WinAPI; автоматизация 1С идёт через API клиента тестирования.
+OS-specific слой окна тест-клиента: Linux (`wmctrl`/`xdotool`/`python-xlib`, `xwininfo`), Windows (WinAPI; для скрытых рабочих столов — через `mcp_1c.win_desktop`). Допускается для подготовки геометрии окна и скриншотов (resize/maximize/geometry capture). Ввод, клики и результат действий 1С не определяются через X11/WinAPI; автоматизация 1С идёт через API клиента тестирования.
+
+### `mcp_1c.win_desktop`
+
+Windows-аналог Xvfb: скрытые рабочие столы (`CreateDesktopW` в `WinSta0`), `DesktopPopen` — `subprocess.Popen` с `STARTUPINFO.lpDesktop` (CPython его не поддерживает), перечисление окон рабочего стола, `PrintWindow`-скриншоты и maximize из вспомогательного потока, привязанного к рабочему столу через `SetThreadDesktop`. Включается `ONEC_MCP_WINDOWS_DESKTOP=hidden`; тогда `session.display`/`client_display` содержат имена рабочих столов.
 
 ### `mcp_1c.runtime`
 
@@ -233,6 +237,7 @@ large remote infobases.
 | `ONEC_MCP_WS_HOST` | WebSocket host | `127.0.0.1` |
 | `ONEC_MCP_WS_PORT` | WebSocket port | `8765` |
 | `ONEC_MCP_REQUEST_TIMEOUT` | Таймаут запроса, сек | `60` |
+| `ONEC_MCP_WINDOWS_DESKTOP` | Windows: `hidden` — запускать менеджер и клиент 1С на скрытых рабочих столах сессии; `current` — на текущем рабочем столе | `current` |
 | `ONEC_MCP_DATA_DIR` | Рабочая директория | OS tempdir + `answer42` (`/tmp/answer42` on Linux, `%TEMP%\answer42` on Windows) |
 | `MCP_1C_RAG_DB` | Путь к RAG SQLite | `build/rag/onec-rag.sqlite` |
 | `ONEC_MCP_DISABLE_RAG` | Отключить встроенный RAG (`1/true/yes/on`) | пусто |

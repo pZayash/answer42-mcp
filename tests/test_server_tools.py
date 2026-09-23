@@ -1989,7 +1989,7 @@ def test_start_session_does_not_require_xvfb_with_inherited_display(monkeypatch)
     monkeypatch.setattr(
         server.runtime,
         "session_displays",
-        lambda display_offset: (_ for _ in ()).throw(RuntimeError("reached display allocation without Xvfb prerequisite")),
+        lambda display_offset, **_kwargs: (_ for _ in ()).throw(RuntimeError("reached display allocation without Xvfb prerequisite")),
     )
 
     with pytest.raises(RuntimeError, match="reached display allocation"):
