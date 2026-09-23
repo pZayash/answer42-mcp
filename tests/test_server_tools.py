@@ -49,6 +49,7 @@ from mcp_1c.server import (
     _rag_diagnostic,
     _reap_global_orphan_sessions,
     _register_dev_tools,
+    _run_start_session_with_diagnostics,
     _runtime_output_file,
     _state_file_for_scope,
     _summary_rag_config_from_42clouds_url,
@@ -1883,6 +1884,43 @@ def test_test_client_startup_error_from_logs_detects_generic_1c_error(tmp_path):
     )
 
     assert _test_client_startup_error_from_logs(sess) == "Ошибка при выполнении операции"
+
+
+def test_test_client_startup_error_from_logs_preserves_bsl_compile_failure(tmp_path):
+    """A 1C /Out compile error must reach the MCP caller, not become a generic crash."""
+    sess = _session_with_client_log_dir(tmp_path)
+    bsl_error = (
+        "{Platform42 Справочник.ОбластиДанных.МодульМенеджера(112,27)}: "
+        "Процедура или функция с указанным именем не определена "
+        "(НовыеПараметрыУстановкиПравНаПриложение)"
+    )
+    (sess.client_log_dir / "test_client_1c_out.log").write_text(
+        f"ordinary startup line\n{bsl_error}\n", encoding="utf-8"
+    )
+
+    assert _test_client_startup_error_from_logs(sess) == bsl_error
+
+
+def test_start_session_diagnostic_wrapper_preserves_expected_startup_failure():
+    """An expected 1C startup failure must remain visible through the MCP tool boundary."""
+
+    async def failing_startup():
+        raise RuntimeError("Пользователь ИБ не идентифицирован")
+
+    from mcp_1c import server
+
+    call_token = server._MCP_TOOL_CALL_ACTIVE.set(True)
+    try:
+        asyncio.run(_run_start_session_with_diagnostics(failing_startup))
+    except Exception as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("The startup failure must be returned to the caller")
+    finally:
+        server._MCP_TOOL_CALL_ACTIVE.reset(call_token)
+
+    assert "Пользователь ИБ не идентифицирован" in message
+
 
 
 def test_attach_test_client_surfaces_auth_error_from_logs(tmp_path):

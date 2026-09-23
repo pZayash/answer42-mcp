@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextvars
 import copy
+import functools
 import hashlib
 import importlib.resources
 import json
@@ -27,6 +29,7 @@ from urllib.parse import parse_qs, unquote, urlsplit, urlunsplit
 import requests
 from mcp.server import MCPServer
 from mcp.server.lowlevel import NotificationOptions
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.mcpserver.resources import FileResource
 from mcp.server.subscriptions import ToolsListChanged
 from starlette.responses import FileResponse, PlainTextResponse
@@ -3734,6 +3737,9 @@ def _configure_tool_logging(log_path: str | Path) -> None:
 
 
 _TOOL_CALL_WRAPPER_INSTALLED = False
+_MCP_TOOL_CALL_ACTIVE: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "mcp_tool_call_active", default=False
+)
 
 
 def _install_tool_call_logger() -> None:
@@ -3763,6 +3769,7 @@ def _install_tool_call_logger() -> None:
         if isinstance(params, dict):
             session_id = params.get("session_id", DEFAULT_SESSION)
         start = time.monotonic()
+        call_token = _MCP_TOOL_CALL_ACTIVE.set(True)
         try:
             result = await original(*args, **kwargs)
             _log_tool_call(session_id, name, params, result, None, time.monotonic() - start)
@@ -3770,6 +3777,8 @@ def _install_tool_call_logger() -> None:
         except Exception as exc:
             _log_tool_call(session_id, name, params, None, str(exc), time.monotonic() - start)
             raise
+        finally:
+            _MCP_TOOL_CALL_ACTIVE.reset(call_token)
 
     mcp.call_tool = _logged_call_tool
     _TOOL_CALL_WRAPPER_INSTALLED = True
@@ -4592,7 +4601,27 @@ def session_status(*,
     }
 
 
-@mcp.tool()
+async def _run_start_session_with_diagnostics(operation: Any) -> Any:
+    """Translate an anticipated startup failure into caller-visible MCP content."""
+    try:
+        return await operation()
+    except RuntimeError as exc:
+        if _MCP_TOOL_CALL_ACTIVE.get():
+            raise ToolError(str(exc)) from exc
+        raise
+
+
+def _start_session_tool(function: Any) -> Any:
+    """Register start_session while preserving its 1C diagnostics at the MCP boundary."""
+
+    @functools.wraps(function)
+    async def guarded_start_session(*args: Any, **kwargs: Any) -> Any:
+        return await _run_start_session_with_diagnostics(lambda: function(*args, **kwargs))
+
+    return mcp.tool()(guarded_start_session)
+
+
+@_start_session_tool
 async def start_session(
     base_url: Annotated[str, "Target 1C infobase URL; used for version detection and test-client connection"] = "",
     username: Annotated[str, "1C username"] = "",
