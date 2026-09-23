@@ -31,7 +31,7 @@ from mcp.server.mcpserver.resources import FileResource
 from mcp.server.subscriptions import ToolsListChanged
 from starlette.responses import FileResponse, PlainTextResponse
 
-from . import __version__, os_support, release_helper, runtime, skill_installer
+from . import __version__, os_support, release_helper, runtime, skill_installer, win_desktop
 from . import platform as _platform
 from .auth import build_auth_settings, build_token_verifier, load_static_token_config
 from .auth import current_account_id as _current_account_id
@@ -1614,6 +1614,8 @@ async def _cleanup_failed_start_session(sess: SessionState, reason: str) -> None
         pass
     runtime.stop_xvfb(sess.client_xvfb_process)
     runtime.stop_xvfb(sess.xvfb_process)
+    runtime.release_display(sess.client_display)
+    runtime.release_display(sess.display)
     _cleanup_stale_session_processes(sess, reason)
     if sess.data_dir.exists():
         shutil.rmtree(sess.data_dir, ignore_errors=True)
@@ -4688,7 +4690,9 @@ async def start_session(
     with _port_allocation_lock():
         port_offset = _stable_session_port_offset(sid)
         display_offset = port_offset // _PORT_BAND_SIZE
-        display, client_display, starts_xvfb = runtime.session_displays(display_offset)
+        display, client_display, starts_xvfb = runtime.session_displays(
+            display_offset, session_key=f"{SESSION_SCOPE_ID or 'local'}-{sid}"
+        )
         ws_port = _find_session_port(runtime.DEFAULT_WS_PORT, port_offset, sub_offset=0)
         ibsrv_port = _find_session_port(runtime.DEFAULT_IBSRV_HTTP_PORT, port_offset, sub_offset=0)
         ibsrv_direct_regport = _find_session_port(runtime.DEFAULT_IBSRV_DIRECT_PORT, port_offset, sub_offset=0)
@@ -5053,6 +5057,8 @@ async def _stop_session_impl(session_id: str = DEFAULT_SESSION, clean_data: bool
     stopped.append("client-xvfb")
     runtime.stop_xvfb(sess.xvfb_process)
     stopped.append("xvfb")
+    runtime.release_display(sess.client_display)
+    runtime.release_display(sess.display)
     _cleanup_stale_session_processes(sess, "stop_session")
     stopped.append("stale-processes")
     if clean_data and sess.data_dir.exists():
@@ -10460,6 +10466,31 @@ def _register_screenshot_url(path: Path) -> dict[str, Any] | None:
     }
 
 
+def _capture_hidden_desktop_screenshot(
+    desktop: str, output_path: Path, *, window: bool
+) -> tuple[dict[str, Any] | None, str, str]:
+    """Capture a 1C window from an Answer42 hidden Windows desktop.
+
+    A hidden desktop is never composed on screen, so there is no "whole
+    display" bitmap: the fallback is the largest visible window there.
+    """
+    geometry = _active_external_1c_window_geometry(display=desktop) if window else None
+    fallback = ""
+    fallback_reason = ""
+    if geometry is None:
+        windows = [w for w in win_desktop.list_windows(desktop) if w["width"] >= 100 and w["height"] >= 100]
+        if not windows:
+            raise RuntimeError(f"Cannot capture screenshot: no visible windows on hidden desktop {desktop!r}")
+        largest = max(windows, key=lambda w: w["width"] * w["height"])
+        geometry = {key: largest[key] for key in ("left", "top", "width", "height", "title", "hwnd")}
+        geometry["desktop"] = desktop
+        if window:
+            fallback = "largest_window"
+            fallback_reason = "1C window was not detected on the hidden desktop; captured the largest window instead"
+    win_desktop.capture_window_png(desktop, int(geometry["hwnd"]), int(geometry["width"]), int(geometry["height"]), output_path)
+    return (geometry if window else None), fallback, fallback_reason
+
+
 @mcp.tool()
 def screenshot(
     path: Annotated[str, "Output image path"] = "build/screenshots/screenshot.png",
@@ -10491,7 +10522,11 @@ def screenshot(
         geometry: dict[str, Any] | None = None
         fallback = ""
         fallback_reason = ""
-        if os_support.IS_WINDOWS:
+        if win_desktop.is_hidden_desktop_name(resolved_display):
+            geometry, fallback, fallback_reason = _capture_hidden_desktop_screenshot(
+                resolved_display, output_path, window=window
+            )
+        elif os_support.IS_WINDOWS:
             geometry = _active_external_1c_window_geometry() if window else None
             if window and geometry is None:
                 fallback = "full_display"
@@ -10677,6 +10712,8 @@ async def _cleanup_sessions() -> None:
             pass
         runtime.stop_xvfb(sess.client_xvfb_process)
         runtime.stop_xvfb(sess.xvfb_process)
+        runtime.release_display(sess.client_display)
+        runtime.release_display(sess.display)
     if SESSION_SCOPE_ID:
         _persist_sessions()
         _mark_global_sessions_orphaned_for_owner()

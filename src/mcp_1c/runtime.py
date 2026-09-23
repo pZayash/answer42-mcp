@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import os_support
+from . import os_support, win_desktop
 
 LOGGER = logging.getLogger(__name__)
 
@@ -143,19 +143,30 @@ def require_xvfb() -> str:
     return xvfb_bin
 
 
-def session_displays(display_offset: int) -> tuple[str, str, bool]:
+def session_displays(display_offset: int, session_key: str = "") -> tuple[str, str, bool]:
     """Choose inherited desktop display or two Answer42-owned Xvfb displays.
 
     Returns ``(manager_display, client_display, starts_xvfb)``. A live X11
     display is deliberately shared by manager and client: it is the caller's
     explicit request to run visibly on that desktop. Otherwise the historical
     isolated two-Xvfb setup is retained for headless operation.
+
+    On Windows the "display" is either empty (the user's current desktop) or,
+    with ``ONEC_MCP_WINDOWS_DESKTOP=hidden``, the names of two hidden desktops
+    for manager and client; they are created lazily when 1C is launched.
     """
     desktop_display = inherited_x11_display()
     if desktop_display:
         return desktop_display, desktop_display, False
     if os_support.IS_WINDOWS:
-        return "", "", False
+        if not win_desktop.hidden_desktop_enabled():
+            return "", "", False
+        key = session_key or str(display_offset)
+        return (
+            win_desktop.session_desktop_name(key, "manager"),
+            win_desktop.session_desktop_name(key, "client"),
+            False,
+        )
     require_xvfb()
     manager_display = find_free_display(DEFAULT_DISPLAY_START + display_offset)
     # The first X socket does not exist until start_xvfb() is called, so derive
@@ -184,6 +195,23 @@ def start_xvfb(display: str, resolution: str = DEFAULT_DISPLAY_RES) -> subproces
 def stop_xvfb(proc: subprocess.Popen | None) -> None:
     """Stop the Xvfb process started by start_xvfb."""
     kill_process(proc, "Xvfb")
+
+
+def release_display(display: str) -> None:
+    """Release an Answer42-owned hidden Windows desktop; no-op for X11 displays."""
+    if win_desktop.is_hidden_desktop_name(display):
+        win_desktop.release_desktop(display)
+
+
+def _popen_on_display(argv: list[str], display: str, **kwargs: Any) -> subprocess.Popen:
+    """Start a 1C process on the given X11 display or hidden Windows desktop."""
+    env = kwargs.pop("env", None) or os.environ.copy()
+    if win_desktop.is_hidden_desktop_name(display):
+        win_desktop.ensure_desktop(display)
+        return win_desktop.DesktopPopen(argv, desktop=display, env=env, **kwargs)
+    if display:
+        env["DISPLAY"] = display
+    return subprocess.Popen(argv, env=env, **kwargs)
 
 
 def is_port_listening(host: str, port: int, timeout: float = 1.0) -> bool:
@@ -534,16 +562,13 @@ def _start_thin_test_manager_argv(
     argv = add_1c_out_args_before_testmanager(argv, onec_out_path)
     with log_path.open("ab", buffering=0) as log_handle:
         LOGGER.info("Starting thin test manager: %s", " ".join(argv))
-        env = os.environ.copy()
-        if display:
-            env["DISPLAY"] = display
-        proc = subprocess.Popen(
+        proc = _popen_on_display(
             argv,
+            display,
             stdout=log_handle,
             stderr=log_handle,
             stdin=subprocess.DEVNULL,
             **os_support.subprocess_creation_kwargs(),
-            env=env,
         )
         proc.answer42_stdout_log_path = str(log_path)  # type: ignore[attr-defined]
         proc.answer42_out_log_path = str(onec_out_path)  # type: ignore[attr-defined]
@@ -662,16 +687,13 @@ def start_test_client(
     stdout_log_path = log_dir / log_name
     with stdout_log_path.open("ab", buffering=0) as log_handle:
         LOGGER.info("Starting test client: %s", " ".join(argv))
-        env = os.environ.copy()
-        if display:
-            env["DISPLAY"] = display
-        proc = subprocess.Popen(
+        proc = _popen_on_display(
             argv,
+            display,
             stdout=log_handle,
             stderr=log_handle,
             stdin=subprocess.DEVNULL,
             **os_support.subprocess_creation_kwargs(),
-            env=env,
         )
         proc.answer42_stdout_log_path = str(stdout_log_path)  # type: ignore[attr-defined]
         proc.answer42_argv = argv  # type: ignore[attr-defined]
