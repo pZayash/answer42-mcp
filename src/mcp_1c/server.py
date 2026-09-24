@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import time
+import typing
 import urllib.request
 import uuid
 from collections.abc import Sequence
@@ -1477,6 +1478,21 @@ def _cleanup_stale_session_processes(sess: SessionState, reason: str) -> None:
     )
 
 
+def _release_session_shared_servers(sess: SessionState) -> None:
+    """Drop this session's refs on shared autonomous servers.
+
+    A shared file ibsrv keeps an exclusive lock on the tested file infobase;
+    killing only the session's own processes leaves it running forever and
+    nobody else (another session, Designer, a /F client) can open the base.
+    """
+    for key in (sess.shared_file_key, sess.shared_client_key):
+        if key:
+            with suppress(Exception):
+                _release_shared_file_server(key, sess.session_id)
+    sess.shared_file_key = ""
+    sess.shared_client_key = ""
+
+
 def _kill_persisted_session_processes(sess: SessionState, reason: str, *, include_test_client: bool) -> None:
     logging.info("Cleaning persisted session %s processes: %s", sess.session_id, reason)
     for pid, label in (
@@ -1489,6 +1505,7 @@ def _kill_persisted_session_processes(sess: SessionState, reason: str, *, includ
     if include_test_client:
         _kill_pid_group(sess.test_client_pid, f"test-client for Answer42 session {sess.session_id}")
         _cleanup_stale_session_processes(sess, reason)
+    _release_session_shared_servers(sess)
 
 
 async def _reconnect_persisted_session(sess: SessionState) -> bool:
@@ -1654,9 +1671,12 @@ async def _ensure_restored_session(session_id: str = DEFAULT_SESSION) -> Session
     sess = persisted.get(session_id)
     if sess is None:
         raise ValueError(f"Session {session_id!r} not found. Call start_session first.")
-    cf_path = _ensure_cf_built(runtime.DEFAULT_CF_BUILT, src_dir="src/cf", platform_dir=sess.platform_dir)
+    cf_path = await asyncio.to_thread(
+        _ensure_cf_built, runtime.DEFAULT_CF_BUILT, src_dir="src/cf", platform_dir=sess.platform_dir
+    )
     if not _cf_marker_matches(sess.db_path, cf_path):
         _cleanup_stale_session_processes(sess, "stale manager CF marker")
+        _release_session_shared_servers(sess)
         shutil.rmtree(sess.data_dir, ignore_errors=True)
         persisted.pop(session_id, None)
         STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -1758,12 +1778,27 @@ def _normalized_text_for_value_check(value: Any) -> str:
     return text.replace("\u00a0", "").replace(" ", "").replace(",", ".")
 
 
+_NUMERIC_VALUE_RE = re.compile(r"^-?\d+(?:\.\d+)?$")
+_EMPTY_PRESENTATION_CHARS = set("0.:-/")
+
+
 def _values_match_for_verification(actual: Any, expected: Any) -> bool:
     actual_text = _normalized_text_for_value_check(actual)
     expected_text = _normalized_text_for_value_check(expected)
     if actual_text == expected_text:
         return True
-    return bool(actual_text and expected_text and (actual_text in expected_text or expected_text in actual_text))
+    if not expected_text:
+        # Cleared number/date fields display "0" or " .  .    ", not "".
+        return set(actual_text) <= _EMPTY_PRESENTATION_CHARS
+    if _NUMERIC_VALUE_RE.match(expected_text):
+        # "10" must not verify against a stale "100": compare numbers exactly.
+        try:
+            return float(actual_text) == float(expected_text)
+        except ValueError:
+            return False
+    # References and dates display more than was typed ("Ромашка" ->
+    # "Ромашка ООО", "01.01.2026" -> "01.01.2026 0:00:00").
+    return bool(actual_text and (actual_text in expected_text or expected_text in actual_text))
 
 
 def _normalize_creation_window_result(result: Any, *, create_if_missing: bool) -> Any:
@@ -3449,6 +3484,9 @@ def _compact_start_test_client_result(result: Any, *, include_timings: bool = Fa
         compact["_timings"] = result["_timings"]
     return compact
 
+_BRIDGE_COMMAND_WAIT_MARGIN = 30.0
+
+
 async def _bridge_call_recorded(
     session_id: str,
     method: str,
@@ -3471,6 +3509,16 @@ async def _bridge_call_recorded(
         request_timeout = float(os.getenv(env_name, str(default_timeout)))
     if timeout is not None:
         request_timeout = timeout
+    else:
+        # A command that waits inside 1C (wait_form(timeout=300), dynamic_list_output
+        # wait_seconds, ...) must not be abandoned by Python before 1C gives up:
+        # otherwise every later command queues behind the still-running wait.
+        command_wait = max(
+            (float(params[key]) for key in ("timeout", "wait_seconds")
+             if isinstance(params.get(key), int | float) and not isinstance(params.get(key), bool)),
+            default=0.0,
+        )
+        request_timeout = max(request_timeout, command_wait + _BRIDGE_COMMAND_WAIT_MARGIN)
     result = await sess.bridge.call(method, params, timeout=request_timeout)
     return _record_tool(session_id, method, params, result)
 
@@ -3580,6 +3628,9 @@ async def _dangerous_bridge_call_recorded(
     timeout: float,
     danger: str,
 ) -> Any:
+    if timeout <= 0:
+        # watchdog_timeout=0 means "no watchdog": use the ordinary bridge timeout.
+        return await _bridge_call_recorded(session_id, method, params)
     sess = await _ensure_restored_session(session_id)
     try:
         result = await _bridge_call_recorded(session_id, method, params, timeout=timeout)
@@ -3587,7 +3638,7 @@ async def _dangerous_bridge_call_recorded(
         if not _looks_like_bridge_timeout(exc):
             raise
         error = _bridge_timeout_text(exc)
-        screenshot_diagnostic = _capture_dangerous_action_timeout_screenshot(sess, method)
+        screenshot_diagnostic = await asyncio.to_thread(_capture_dangerous_action_timeout_screenshot, sess, method)
         blocked_action = _mark_session_blocked_action(
             sess,
             method,
@@ -3778,10 +3829,241 @@ def _configure_tool_logging(log_path: str | Path) -> None:
 
 
 _TOOL_CALL_WRAPPER_INSTALLED = False
+
+# Repeated in ~120 tools, so it is kept short; the StreamableHTTP rule is
+# explained by the error a tool returns when session_id is missing.
+_SESSION_ID_SCHEMA_DESCRIPTION = "Session id from start_session"
+
+
+def _strip_schema_titles(schema: Any) -> Any:
+    """Drop pydantic's auto-generated ``title`` annotations from a JSON schema.
+
+    Only schema keywords are removed: a property that is literally named
+    ``title`` (e.g. activate_window(title=...)) is kept.
+    """
+    if isinstance(schema, list):
+        return [_strip_schema_titles(item) for item in schema]
+    if not isinstance(schema, dict):
+        return schema
+    cleaned: dict[str, Any] = {}
+    for key, value in schema.items():
+        if key == "title" and isinstance(value, str):
+            continue
+        if key in {"properties", "$defs", "definitions", "patternProperties"} and isinstance(value, dict):
+            cleaned[key] = {name: _strip_schema_titles(sub) for name, sub in value.items()}
+        else:
+            cleaned[key] = _strip_schema_titles(value)
+    return cleaned
+
+
+def _annotated_descriptions(fn: Any) -> dict[str, str]:
+    """Map parameter name -> the plain-string metadata of ``Annotated[T, "..."]``.
+
+    The MCP SDK only publishes ``Field(description=...)``; the bare strings
+    Answer42 uses in ``Annotated`` never reached the input schema.
+    """
+    try:
+        hints = typing.get_type_hints(fn, include_extras=True)
+    except Exception:
+        return {}
+    descriptions: dict[str, str] = {}
+    for name, hint in hints.items():
+        for meta in getattr(hint, "__metadata__", ()):
+            if isinstance(meta, str) and meta.strip():
+                descriptions[name] = meta.strip()
+                break
+    return descriptions
+
+
+def _polish_tool_schemas() -> None:
+    """Make the published tool list smaller, stable across restarts and self-describing."""
+    for tool in mcp._tool_manager.list_tools():
+        parameters = _strip_schema_titles(tool.parameters)
+        properties = parameters.get("properties") if isinstance(parameters, dict) else None
+        if isinstance(properties, dict):
+            for name, description in _annotated_descriptions(tool.fn).items():
+                if isinstance(properties.get(name), dict):
+                    properties[name].setdefault("description", description)
+            session_schema = properties.get("session_id")
+            if isinstance(session_schema, dict):
+                # The default is "default-<pid>": it changes on every restart and
+                # would invalidate clients' cached tool lists for no benefit.
+                session_schema.pop("default", None)
+                session_schema["description"] = _SESSION_ID_SCHEMA_DESCRIPTION
+        tool.parameters = parameters
+        output_schema = tool.fn_metadata.output_schema
+        if isinstance(output_schema, dict) and not output_schema.get("properties"):
+            # dict[str, Any] results: an untyped outputSchema only makes the SDK
+            # send every result twice (text + structuredContent).
+            tool.fn_metadata.output_schema = None
+            tool.fn_metadata.output_model = None
+
+
+# Everything below only rewrites what is sent to the MCP client.  Internal
+# Python logic keeps reading the full dict returned by _bridge_call_recorded.
+
+_UI_NODE_DEFAULTS: dict[str, Any] = {
+    "visible": True, "available": True, "enabled": True, "read_only": False,
+    "main": False, "home": False,
+}
+_UI_NODE_EFFECTIVE_FLAGS = {"current_visible": "visible", "current_available": "available", "current_read_only": "read_only"}
+_DIAGNOSTICS_DROPPED_KEYS = {"events", "user_message_texts"}
+# Tools that report *which* window/form they found or switched to; the full
+# subtree of that object is ui_tree's job and cost up to ~40k tokens per call.
+_SUBTREE_SUMMARY_TOOLS = {
+    "windows_list", "active_window", "activate_window", "goto_start_page", "goto_previous_window",
+    "goto_next_window", "wait_form", "wait_object", "wait_window",
+}
+_SUMMARY_KEYS_WITHOUT_CHILDREN = {"window", "before", "active_window"}
+
+
+def _is_ui_node(value: Any) -> bool:
+    return isinstance(value, dict) and str(value.get("type") or "").startswith("Тестируем")
+
+
+def _compact_outbound_ui_node(node: dict[str, Any]) -> dict[str, Any]:
+    compact: dict[str, Any] = {}
+    for key, value in node.items():
+        if value in ("", [], {}, None):
+            continue
+        if key in _UI_NODE_DEFAULTS and value == _UI_NODE_DEFAULTS[key]:
+            continue
+        if key == "enabled" and value == node.get("available"):
+            continue
+        effective = _UI_NODE_EFFECTIVE_FLAGS.get(key)
+        if effective and value == node.get(effective):
+            continue
+        compact[key] = value
+    return compact
+
+
+def _compact_client_diagnostics(diagnostics: dict[str, Any]) -> dict[str, Any]:
+    compact = {
+        key: value for key, value in diagnostics.items()
+        if key not in _DIAGNOSTICS_DROPPED_KEYS and value not in ("", [], {}, None, False)
+    }
+    for modal_key, active_key in (("modal_title", "active_window_title"), ("modal_form_name", "active_form_name")):
+        if modal_key in compact and compact[modal_key] == diagnostics.get(active_key):
+            compact.pop(modal_key)
+    if compact.get("modal_text"):
+        compact.pop("modal_texts", None)
+    return _cap_modal_texts(compact)
+
+
+_MODAL_TEXTS_LIMIT = 30
+
+
+def _cap_modal_texts(payload: dict[str, Any]) -> dict[str, Any]:
+    """A misdetected "dialog" (a whole form) can list hundreds of texts."""
+    texts = payload.get("modal_texts")
+    if isinstance(texts, list) and len(texts) > _MODAL_TEXTS_LIMIT:
+        payload = dict(payload)
+        payload["modal_texts"] = texts[:_MODAL_TEXTS_LIMIT]
+        payload["modal_texts_truncated"] = len(texts)
+    return payload
+
+
+def _strip_children(node: Any) -> Any:
+    if isinstance(node, dict) and isinstance(node.get("children"), list):
+        node = dict(node)
+        node["children_count"] = len(node.pop("children"))
+    return node
+
+
+def _compact_payload(value: Any, *, strip_subtrees: bool = False, parent_key: str = "") -> Any:
+    if isinstance(value, list):
+        return [_compact_payload(item, strip_subtrees=strip_subtrees, parent_key=parent_key) for item in value]
+    if not isinstance(value, dict):
+        return value
+    if strip_subtrees and _is_ui_node(value) and parent_key != "children":
+        value = _strip_children(value)
+    value = _cap_modal_texts(value)
+    compact: dict[str, Any] = {}
+    for key, item in value.items():
+        if key == "client_diagnostics" and isinstance(item, dict):
+            item = _compact_client_diagnostics(item)
+            if not item:
+                continue
+        elif key in _SUMMARY_KEYS_WITHOUT_CHILDREN and _is_ui_node(item):
+            item = _strip_children(item)
+        compact[key] = _compact_payload(item, strip_subtrees=strip_subtrees, parent_key=key)
+    return _compact_outbound_ui_node(compact) if _is_ui_node(compact) else compact
+
+
+def _compact_json_text(text: str, *, strip_subtrees: bool = False) -> str:
+    stripped = text.lstrip()
+    if not stripped.startswith(("{", "[")):
+        return text
+    try:
+        payload = json.loads(text)
+    except ValueError:
+        return text
+    payload = _compact_payload(payload, strip_subtrees=strip_subtrees)
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+def _compact_error_text(text: str) -> str:
+    """Compact the client_diagnostics JSON that bridge errors append to their text."""
+    marker = "client_diagnostics="
+    head, sep, tail = text.partition(marker)
+    if not sep:
+        return text
+    try:
+        diagnostics = json.loads(tail)
+    except ValueError:
+        return text
+    compact = _compact_client_diagnostics(diagnostics) if isinstance(diagnostics, dict) else diagnostics
+    if not compact:
+        return head.rstrip()
+    return head + marker + json.dumps(compact, ensure_ascii=False, separators=(",", ":"))
+
+
+def _compact_tool_result(result: Any, tool_name: str = "", arguments: Any = None) -> Any:
+    """Shrink what the client receives: no indent=2 whitespace, no empty/default fields."""
+    content = getattr(result, "content", None)
+    if not isinstance(content, list):
+        return result
+    strip_subtrees = tool_name in _SUBTREE_SUMMARY_TOOLS and not (
+        isinstance(arguments, dict) and arguments.get("include_children")
+    )
+    for block in content:
+        if getattr(block, "type", "") == "text" and isinstance(getattr(block, "text", None), str):
+            if getattr(result, "is_error", False):
+                block.text = _compact_error_text(block.text)
+            else:
+                block.text = _compact_json_text(block.text, strip_subtrees=strip_subtrees)
+    return result
+
 _MCP_TOOL_CALL_ACTIVE: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "mcp_tool_call_active", default=False
 )
 _TOOL_ERROR_MAX_CHARS = int(os.getenv("ONEC_MCP_TOOL_ERROR_MAX_CHARS", "20000"))
+
+
+def _json_object_argument(value: str, name: str) -> dict[str, Any]:
+    """Parse a JSON-object tool argument with a readable error instead of a traceback."""
+    try:
+        parsed = json.loads(value) if isinstance(value, str) else value
+    except ValueError as exc:
+        raise ToolError(f"{name} must be a JSON object, e.g. {{\"Поле\": \"значение\"}}: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise ToolError(f"{name} must be a JSON object mapping names to values, got {type(parsed).__name__}")
+    return parsed
+
+
+def _json_array_argument(value: str, name: str) -> list[Any]:
+    """Parse an optional JSON-array tool argument; a single object is wrapped."""
+    if not value:
+        return []
+    try:
+        parsed = json.loads(value)
+    except ValueError as exc:
+        raise ToolError(f"{name} must be a JSON array, e.g. [{{\"field\": \"Наименование\", \"value\": \"...\"}}]: {exc}") from exc
+    if isinstance(parsed, dict):
+        return [parsed]
+    if not isinstance(parsed, list):
+        raise ToolError(f"{name} must be a JSON array of objects, got {type(parsed).__name__}")
+    return parsed
 
 
 def _visible_tool_error(name: str, exc: UnexpectedToolError) -> ToolError:
@@ -3798,7 +4080,7 @@ def _visible_tool_error(name: str, exc: UnexpectedToolError) -> ToolError:
     if cause is exc:
         return ToolError(str(exc))
     logging.getLogger(__name__).error("Tool %s failed", name, exc_info=cause)
-    detail = str(cause).strip() or repr(cause)
+    detail = _compact_error_text(str(cause).strip()) or repr(cause)
     if len(detail) > _TOOL_ERROR_MAX_CHARS:
         detail = detail[:_TOOL_ERROR_MAX_CHARS] + "\n<...truncated>"
     return ToolError(f"Error executing tool {name}: {type(cause).__name__}: {detail}")
@@ -3836,7 +4118,7 @@ def _install_tool_call_logger() -> None:
             not (isinstance(params, dict) and str(params.get("session_id") or "").strip())
         )
         try:
-            result = await original(*args, **kwargs)
+            result = _compact_tool_result(await original(*args, **kwargs), name, params)
             _log_tool_call(session_id, name, params, result, None, time.monotonic() - start)
             return result
         except UnexpectedToolError as exc:
@@ -4075,25 +4357,12 @@ async def rag_session_autoconfigure(
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> dict[str, Any]:
-    """Auto-configure the session RAG snapshot from the live 1C configuration and installed extensions.
+    """Match the live configuration and extension versions to RAG sources and bind a snapshot.
 
-    The tool reads the live main configuration/version from `ВерсииПодсистем`, reads
-    installed extensions from `ВерсииРасширений`, matches them against registered
-    RAG sources by metadata name and version, and creates/binds a snapshot.
-
-    When no exact/suitable source exists and `dump_if_missing=true`, Answer42 can
-    create RAG sources by dumping the configuration and extensions to Designer XML.
-    Dumping requires a direct Designer connection: server infobase (`server/ib`) or
-    file infobase path.  Web `/WS` URLs cannot be dumped; for web sessions pass
-    `dump_connection_value`, `file_infobase_path`, or `cf_files`/`cfe_files`.
-    If the direct dump connection has different users than the web publication
-    (for example multitenant/separated-data infobases), pass `dump_username` and
-    `dump_password`; otherwise the current session credentials are reused.
-    Temporary infobases created from CF/CFE files are deleted after dumping by
-    default.  Generated XML source directories are removed after a successful
-    index build by default, because the SQLite RAG index is self-contained; pass
-    `cleanup_generated_sources=false` when the dumped XML source tree should be
-    kept under `dump_root` for inspection or reuse.
+With `dump_if_missing=true` missing sources are dumped to Designer XML; this
+needs a direct connection (server/ib or a file infobase path). For web /WS
+sessions pass `dump_connection_value`, `file_infobase_path` or
+`cf_files`/`cfe_files` (and `dump_username`/`dump_password` if users differ).
     """
     params = {
         "snapshot_name": snapshot_name,
@@ -4898,14 +5167,18 @@ async def start_session(
     runtime_state.log_dir = log_dir
 
     try:
+        # Blocking ibcmd/Designer work runs in a thread: over StreamableHTTP one
+        # event loop serves every client, and a starting session must not stall
+        # the bridges of the others.
         with _port_allocation_lock():
-            runtime.create_file_infobase(sess.ibcmd, sess.db_path)
-            cf_path = _ensure_cf_built(
+            await asyncio.to_thread(runtime.create_file_infobase, sess.ibcmd, sess.db_path)
+            cf_path = await asyncio.to_thread(
+                _ensure_cf_built,
                 runtime.DEFAULT_CF_BUILT,
                 src_dir="src/cf",
                 platform_dir=platform_dir,
             )
-            runtime.load_configuration(sess.ibcmd, sess.db_path, cf_path)
+            await asyncio.to_thread(runtime.load_configuration, sess.ibcmd, sess.db_path, cf_path)
             _write_cf_marker(sess.db_path, cf_path)
         mark_stage("prepare_manager_infobase")
     except Exception:
@@ -4916,7 +5189,8 @@ async def start_session(
     sess.runtime = runtime_state
     try:
         if ibsrv_available:
-            server_proc = runtime.start_standalone_server(
+            server_proc = await asyncio.to_thread(
+                runtime.start_standalone_server,
                 ibsrv=sess.ibsrv, address=ibsrv_address, port=ibsrv_port,
                 name=ibsrv_name, data_dir=sess.server_data_dir,
                 log_dir=log_dir, db_path=sess.db_path,
@@ -4962,12 +5236,14 @@ async def start_session(
             shared_client_id = os.getenv("ONEC_MCP_SHARED_CLIENT_BASE_ID") or "default"
             shared_client_root = Path(os.getenv("ONEC_MCP_SHARED_CLIENT_BASE_DIR", str(os_support.default_data_dir() / "shared-client-bases")))
             shared_client_db = shared_client_root / shared_client_id / "ib"
-            client_cf_path = _ensure_cf_built(
+            client_cf_path = await asyncio.to_thread(
+                _ensure_cf_built,
                 runtime.DEFAULT_CLIENT_CF_BUILT,
                 src_dir="src/client_cf",
                 platform_dir=platform_dir,
             )
-            shared_client = _acquire_shared_file_server(
+            shared_client = await asyncio.to_thread(
+                _acquire_shared_file_server,
                 owner_session_id=sid,
                 kind="demo-client",
                 platform_dir=platform_dir,
@@ -5847,7 +6123,8 @@ async def _connect_test_client_impl(
             runtime.kill_process(sess.file_client_runtime.server_process, "ibsrv-file-client")
             sess.file_client_runtime = None
         try:
-            shared_file = _acquire_shared_file_server(
+            shared_file = await asyncio.to_thread(
+                _acquire_shared_file_server,
                 owner_session_id=sess.session_id,
                 kind="file",
                 platform_dir=sess.platform_dir,
@@ -6050,19 +6327,23 @@ def _auto_maximize_test_client_result(result: Any, display: str) -> None:
 
 
 @mcp.tool()
-async def active_window(*,
+async def active_window(
+    include_children: Annotated[bool, "Include the window's full UI subtree (large); prefer ui_tree"] = False,
+    *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
-    """Return active 1C test client window state."""
+    """Return the active 1C test client window (title, form, state; children_count instead of the subtree)."""
     return await _bridge_call_recorded(session_id, "active_window", {})
 
 
 @mcp.tool()
-async def windows_list(*,
+async def windows_list(
+    include_children: Annotated[bool, "Include each window's full UI subtree (very large); prefer ui_tree"] = False,
+    *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
-    """Return all windows of the tested 1C client application."""
-    return await _bridge_call_recorded(session_id, "windows_list", {})
+    """Return all windows of the tested 1C client application (index, title, form, active flag)."""
+    return await _bridge_call_recorded(session_id, "windows_list", {"include_children": include_children})
 
 
 @mcp.tool()
@@ -6496,37 +6777,15 @@ async def ui_tree(
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
-    """Return a serialized snapshot of the active 1C UI tree.
+    """Snapshot of the active 1C UI tree.
 
-    Default profile is `navigation`: visible elements, compact fields, no data
-    presentations, no RAG enrichment, and command panels excluded unless requested.
-    `include_rag_types` defaults to `auto`: RAG enrichment is enabled for
-    `diagnostic`, `data` and `full` profiles and disabled for navigation profiles.
-    The tree has no depth limit. Use `include_hidden=true` for hidden pages/elements.
-    Pass `parent_name` to serialize only the subtree rooted at a specific form element.
-    Use `fields=minimal|navigation|diagnostic|data|full` (or a comma-separated
-    field list) to control returned node fields without changing traversal.
-
-    `include_data=true` may call 1C `ПолучитьПредставлениеДанных()` for many nodes;
-    do not enable it casually on large forms. Prefer targeted tools for data:
-    `field_value_text` for one field, `table_rows` for tables/dynamic lists, and
-    `tabular_document_text`/`tabular_document_save` for reports/tabular documents.
-
-    When `name`, `title` or `type` filter is set, the result is a flat `objects` list instead
-    of a nested tree. For finding one control, prefer `search_objects`/`find_object`.
-    `format=outline` and `format=yaml|yml` return readable text representations
-    inside a structured tool result; JSON remains the default machine-readable form.
-
-    `delivery=auto` is the default: small results stay inline, but large results
-    above `ONEC_MCP_UI_TREE_RESOURCE_AUTO_THRESHOLD_TOKENS` (default 50k estimated tokens) are
-    saved as MCP resources. Use `delivery=inline` to force inline output and
-    `delivery=resource` to force resource output for large/verbose diagnostics
-    (`profile=full`, `include_hidden=true`, `include_data=true`). Resource
-    responses contain only `resource_uri`, `snapshot_id`, summary, metrics and a
-    small preview. Then inspect the saved snapshot with
-    `ui_tree_resource_search`, `ui_tree_resource_get_node`,
-    `ui_tree_resource_children`, or `ui_tree_diff` instead of loading the whole
-    tree into the agent context.
+Default profile `navigation`: visible elements, compact fields, no data, no
+command panels. `parent_name` limits it to a subtree; `name`/`title`/`type`
+return a flat `objects` list (for one control prefer find_object). Large
+results are saved as a resource (`delivery=auto`); inspect them with
+ui_tree_resource_search/get_node/children or ui_tree_diff. For data use
+field_value_text, table_rows or tabular_document_text rather than
+`include_data=true` on large forms.
     """
     stage_timings: dict[str, float] = {}
 
@@ -7050,7 +7309,7 @@ async def click_button(
         session_id,
         "click_button",
         params,
-        timeout=max(1, int(watchdog_timeout)),
+        timeout=int(watchdog_timeout),
         danger="click_button_may_start_long_ui_action",
     )
 
@@ -7543,18 +7802,18 @@ async def tabular_document_save(
             session_id,
             params,
             format,
-            timeout=max(1, int(watchdog_timeout)),
+            timeout=int(watchdog_timeout),
         )
     result = await _dangerous_bridge_call_recorded(
         session_id,
         "tabular_document_save",
         params,
-        timeout=max(1, int(watchdog_timeout)),
+        timeout=int(watchdog_timeout),
         danger="tabular_document_file_save_may_block_thin_client",
     )
     if isinstance(result, dict) and result.get("interface_blocked"):
         return result
-    return _select_saved_tabular_document_file(result, format)
+    return await asyncio.to_thread(_select_saved_tabular_document_file, result, format)
 
 
 async def _tabular_document_save_filter_by_filter(
@@ -7589,7 +7848,7 @@ async def _tabular_document_save_filter_by_filter(
             result["attempts"] = attempts
             result["last_filter_index"] = filter_index
             return result
-        selected = _select_saved_tabular_document_file(result, format)
+        selected = await asyncio.to_thread(_select_saved_tabular_document_file, result, format)
         attempts.append(dict(selected) if isinstance(selected, dict) else selected)
         if isinstance(selected, dict) and selected.get("saved") is True:
             final_result = dict(selected)
@@ -7665,7 +7924,32 @@ def _select_saved_tabular_document_file(result: Any, format: str) -> Any:
             result["path"] = requested_path
     result["selected"] = selected
     result["saved"] = True
+    _discard_unselected_tabular_document_files(result, files)
     return result
+
+
+def _discard_unselected_tabular_document_files(result: dict[str, Any], files: list[Any]) -> None:
+    """Delete the per-filter probe files and keep only the delivered file.
+
+    The save probes up to ~30 file-dialog filters and each probe leaves a file
+    in the temp directory (megabytes per save); the full list also inflated
+    the tool response.
+    """
+    keep = {str(result.get("path") or "")}
+    selected = result.get("selected")
+    if isinstance(selected, dict) and not selected.get("copied_to"):
+        keep.add(str(selected.get("path") or ""))
+    removed = 0
+    for item in files:
+        file_path = str(item.get("path") or "") if isinstance(item, dict) else ""
+        if not file_path or file_path in keep:
+            continue
+        with suppress(OSError):
+            Path(file_path).unlink()
+            removed += 1
+    result["files"] = [selected] if isinstance(selected, dict) else []
+    result["probe_files_count"] = len(files)
+    result["probe_files_removed"] = removed
 
 
 def _find_saved_tabular_document_file_with_retry(files: list[Any], format: str, *, timeout: float = 2.0, interval: float = 0.05) -> dict[str, Any] | None:
@@ -9571,7 +9855,6 @@ async def _load_metadata_objects_from_catalog(session_id: str, limit: int, query
     return data
 
 
-@mcp.tool()
 async def _metadata_objects_from_catalog_impl(
     *,
     query: str,
@@ -9636,14 +9919,11 @@ async def metadata_objects_from_catalog(
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> dict[str, Any]:
-    """Return/search metadata objects from `Справочник.ИдентификаторыОбъектовМетаданных`.
+    """Search metadata objects in `Справочник.ИдентификаторыОбъектовМетаданных` via the Universal report.
 
-    The first call opens the standard Universal report for the metadata-identifiers
-    catalog, reads a normalized snapshot with metadata names/synonyms, excludes
-    deleted rows plus roles/subsystems, and stores the result in an in-memory
-    per-session cache. Later calls search that cache unless `refresh_cache=true`.
-    This is a live UI fallback when RAG is unavailable or stale; if its watchdog
-    reports a blocked interface, wait for client recovery before further UI calls.
+The snapshot is cached per session (`refresh_cache=true` reloads it). This is a
+live UI fallback when RAG is unavailable or stale; after a watchdog timeout
+wait for the client to recover before further UI calls.
     """
     params = {
         "query": query,
@@ -10200,12 +10480,25 @@ async def set_form_fields(
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
-    """Set multiple ordinary form fields using the same logic as set_field_value."""
-    return await _bridge_call_recorded(session_id, "set_form_fields", {
-        "values": values,
-        "search_by_title": search_by_title,
-        "create_if_missing": create_if_missing,
-    })
+    """Set several form fields one by one with set_field_value; returns a per-field result."""
+    mapping = _json_object_argument(values, "values")
+    results: list[dict[str, Any]] = []
+    for field_name, field_value in mapping.items():
+        try:
+            result = await set_field_value(
+                str(field_name), "" if field_value is None else str(field_value),
+                search_by_title=search_by_title, create_if_missing=create_if_missing,
+                session_id=session_id,
+            )
+            entry = dict(result) if isinstance(result, dict) else {"result": result}
+            entry.setdefault("set", False)
+        except Exception as exc:
+            entry = {"set": False, "error": _compact_error_text(str(exc))}
+        entry["field"] = str(field_name)
+        entry.pop("client_diagnostics", None)
+        results.append(entry)
+    failed = [entry["field"] for entry in results if not entry.get("set")]
+    return {"set": not failed, "count": len(results), "failed": failed, "results": results}
 
 
 @mcp.tool()
@@ -10222,7 +10515,7 @@ async def table_choose_field_from_list(
 
 @mcp.tool()
 async def table_edit_info(
-    table: Annotated[str, "Table technical name"] = "ДополнительнаяИнформация",
+    table: Annotated[str, "Table technical name; empty = the first table of the active form"] = "",
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
@@ -10384,8 +10677,8 @@ async def dynamic_list_set_settings(
     This is the preferred way to apply settings; it uses the same dialog the user sees.
     Keep `clear_first=false` unless replacing all user settings was explicitly requested.
     """
-    filter_list = json.loads(filters) if filters else []
-    order_list = json.loads(orders) if orders else []
+    filter_list = _json_array_argument(filters, "filters")
+    order_list = _json_array_argument(orders, "orders")
     return await _bridge_call_recorded(session_id, "dynamic_list_set_settings", {
         "filters": filter_list,
         "orders": order_list,
@@ -10541,7 +10834,7 @@ async def close_form(*,
     try:
         return await _bridge_call_recorded(session_id, "close_form", {})
     except (TimeoutError, BridgeError) as exc:
-        error_text = str(exc).strip() or "close_form failed without error text"
+        error_text = _compact_error_text(str(exc).strip()) or "close_form failed without error text"
         try:
             window = await _bridge_call_recorded(session_id, "active_window", {})
         except Exception as diag_exc:
@@ -10568,6 +10861,9 @@ async def close_form(*,
             result["reason"] = "close_blocked_by_modal_dialog"
             result["modal_form_name"] = "MessageBox"
             result["modal_looks_like_dialog"] = True
+        elif isinstance(window, dict) and (window.get("home") or window.get("main")) and not modal_buttons:
+            # The start page / main window has no form to close.
+            result["reason"] = "nothing_to_close"
         return _record_tool(session_id, "close_form", {}, result)
 
 
@@ -10709,15 +11005,11 @@ def screenshot(
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> dict[str, Any]:
-    """Capture a screenshot from the MCP host. Defaults to the active visible 1C window.
+    """Save a screenshot of the active 1C window (with its floating form windows) and return the path.
 
-    The response always contains the saved path, never image base64. In
-    StreamableHTTP mode it additionally contains an opaque download URL that
-    expires after one hour by default (``ONEC_MCP_SCREENSHOT_URL_TTL_SECONDS``).
-    Screenshots are for user evidence and UI diagnostics only. Do not use them
-    to analyze report/table/tabular-document/list data; use structured tools
-    such as tabular_document_text, tabular_documents, table_rows,
-    dynamic_list_output, or report export/save tools instead.
+Over StreamableHTTP the result also has a one-hour download URL. For evidence
+and UI diagnostics only: read data with table_rows, tabular_document_text or
+dynamic_list_output instead.
     """
     output_path = Path(path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -11117,6 +11409,7 @@ def main(argv: list[str] | None = None) -> None:
     else:
         logging.info("Built-in Answer42 RAG is disabled")
     profile_result = _apply_tool_profile(args.tool_profile)
+    _polish_tool_schemas()
     logging.info("Tool profile: %s (mode=%s, remaining=%d, removed=%d)", profile_result["profile"], profile_result["mode"], profile_result.get("remaining_count", 0), profile_result.get("removed_count", 0))
     _enable_tools_list_changed_capability()
     _start_autoreload_watcher(args.dev, args.dev_restart_timeout)
@@ -11134,6 +11427,7 @@ def main(argv: list[str] | None = None) -> None:
 
 
 _install_tool_call_logger()
+_polish_tool_schemas()
 
 
 if __name__ == "__main__":
