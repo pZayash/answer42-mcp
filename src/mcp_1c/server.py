@@ -240,6 +240,7 @@ def _shared_file_servers_lock():
 
 _PORT_BAND_SIZE = 20
 _PORT_SCAN_WIDTH = 10
+_PORT_FALLBACK_SCAN_WIDTH = 3000
 
 
 @dataclass(slots=True)
@@ -511,7 +512,14 @@ def _stable_session_port_offset(session_id: str) -> int:
 
 def _find_session_port(base: int, offset: int, *, sub_offset: int = 0) -> int:
     start = base + offset + sub_offset
-    return runtime.find_free_port(start, start + _PORT_SCAN_WIDTH)
+    try:
+        return runtime.find_free_port(start, start + _PORT_SCAN_WIDTH)
+    except RuntimeError:
+        # The whole band can be unusable, e.g. inside a Windows excluded port
+        # range reserved by Hyper-V/WinNAT (netsh ... show excludedportrange).
+        port = runtime.find_free_port(start + _PORT_SCAN_WIDTH, start + _PORT_FALLBACK_SCAN_WIDTH)
+        logging.info("Port band %s..%s is unavailable; using port %s", start, start + _PORT_SCAN_WIDTH - 1, port)
+        return port
 
 
 def _direct_range_from_regport(direct_regport: int, width: int = 8) -> tuple[int, int]:
@@ -1639,6 +1647,7 @@ async def _cleanup_failed_start_session(sess: SessionState, reason: str) -> None
 
 
 async def _ensure_restored_session(session_id: str = DEFAULT_SESSION) -> SessionState:
+    _require_explicit_session(session_id)
     if session_id in _SESSIONS:
         return _SESSIONS[session_id]
     persisted = _load_persisted_sessions()
@@ -1676,7 +1685,28 @@ async def _wait_for_bridge_connected(sess: SessionState, timeout: float = 45.0) 
     )
 
 
+# StreamableHTTP serves every MCP client from one process, so an implicit
+# DEFAULT_SESSION would be silently shared between unrelated clients.  In that
+# mode a tool that needs a 1C session must be given an explicit session_id.
+_REQUIRE_EXPLICIT_SESSION_ID = False
+_SESSION_ID_OMITTED: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "answer42_session_id_omitted", default=False
+)
+
+
+def _require_explicit_session(session_id: str) -> None:
+    if not (_REQUIRE_EXPLICIT_SESSION_ID and _SESSION_ID_OMITTED.get() and session_id == DEFAULT_SESSION):
+        return
+    known = sorted(set(_SESSIONS) | set(_load_persisted_sessions()))
+    hint = f" Известные сессии: {', '.join(known)}." if known else " Сначала вызовите start_session."
+    raise ToolError(
+        "В режиме StreamableHTTP сервер общий для всех клиентов, поэтому session_id обязателен: "
+        "передайте session_id, который вернул start_session (или см. sessions_list)." + hint
+    )
+
+
 def _session(session_id: str = DEFAULT_SESSION) -> SessionState:
+    _require_explicit_session(session_id)
     try:
         return _SESSIONS[session_id]
     except KeyError:
@@ -3802,6 +3832,9 @@ def _install_tool_call_logger() -> None:
             session_id = params.get("session_id", DEFAULT_SESSION)
         start = time.monotonic()
         call_token = _MCP_TOOL_CALL_ACTIVE.set(True)
+        omitted_token = _SESSION_ID_OMITTED.set(
+            not (isinstance(params, dict) and str(params.get("session_id") or "").strip())
+        )
         try:
             result = await original(*args, **kwargs)
             _log_tool_call(session_id, name, params, result, None, time.monotonic() - start)
@@ -3814,6 +3847,7 @@ def _install_tool_call_logger() -> None:
             _log_tool_call(session_id, name, params, None, str(exc), time.monotonic() - start)
             raise
         finally:
+            _SESSION_ID_OMITTED.reset(omitted_token)
             _MCP_TOOL_CALL_ACTIVE.reset(call_token)
 
     mcp.call_tool = _logged_call_tool
@@ -4571,6 +4605,7 @@ def session_status(*,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> dict[str, Any]:
     """Return bridge, runtime, test-client and RAG state for a session."""
+    _require_explicit_session(session_id)
     sess = _SESSIONS.get(session_id) or _load_persisted_sessions().get(session_id)
     if sess is not None:
         _touch_session(sess)
@@ -4757,7 +4792,9 @@ async def start_session(
     logging.info("start_session: version=%s platform_dir=%s", actual_version, platform_dir)
     mark_stage("resolve_credentials_version_platform")
 
-    sid = session_id or DEFAULT_SESSION
+    # Over StreamableHTTP an implicit shared default would mix clients up:
+    # give each new session its own id and return it to the caller.
+    sid = session_id or (_new_session_id() if _REQUIRE_EXPLICIT_SESSION_ID else DEFAULT_SESSION)
     if sid in _SESSIONS:
         raise ValueError(f"Session {sid!r} already exists.")
 
@@ -10944,7 +10981,7 @@ def _apply_tool_profile(profile: str) -> dict[str, Any]:
 
 
 def main(argv: list[str] | None = None) -> None:
-    global _RAG_ENABLED, _CREDENTIAL_STORE_ENABLED, _DEV_TOOLS_ENABLED
+    global _RAG_ENABLED, _CREDENTIAL_STORE_ENABLED, _DEV_TOOLS_ENABLED, _REQUIRE_EXPLICIT_SESSION_ID
 
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] in {"install-skills", "skills-install"}:
@@ -11090,6 +11127,7 @@ def main(argv: list[str] | None = None) -> None:
         stale = False
     _reap_global_orphan_sessions()
     if args.http:
+        _REQUIRE_EXPLICIT_SESSION_ID = True
         asyncio.run(_run_http(args))
     else:
         asyncio.run(_run(stale))
