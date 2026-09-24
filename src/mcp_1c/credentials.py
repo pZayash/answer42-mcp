@@ -110,6 +110,31 @@ class CredentialsStore:
 
         return None
 
+    def matching_entries(
+        self,
+        base_url: str,
+        account_id: str | None = None,
+    ) -> list[dict[str, object]]:
+        """Return every exact and wildcard credential candidate for a URL.
+
+        Exact URL entries precede wildcard entries so callers can try the most
+        specific mapping first without discarding other matching wildcards.
+        """
+        url = str(base_url or "").strip().rstrip("/")
+        if not url:
+            return []
+        entries = self._account_entries(account_id)
+        exact = [
+            dict(entry) for entry in entries
+            if str(entry.get("url", "")).rstrip("/") == url
+        ]
+        wildcard = [
+            dict(entry) for entry in entries
+            if self._has_wildcards(str(entry.get("url", "")))
+            and fnmatch.fnmatch(url, str(entry.get("url", "")).rstrip("/"))
+        ]
+        return exact + wildcard
+
     def list_entries(
         self,
         account_id: str | None = None,

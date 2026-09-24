@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextvars
 import copy
+import functools
 import hashlib
 import importlib.resources
 import json
@@ -3746,6 +3748,9 @@ def _configure_tool_logging(log_path: str | Path) -> None:
 
 
 _TOOL_CALL_WRAPPER_INSTALLED = False
+_MCP_TOOL_CALL_ACTIVE: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "mcp_tool_call_active", default=False
+)
 _TOOL_ERROR_MAX_CHARS = int(os.getenv("ONEC_MCP_TOOL_ERROR_MAX_CHARS", "20000"))
 
 
@@ -3796,6 +3801,7 @@ def _install_tool_call_logger() -> None:
         if isinstance(params, dict):
             session_id = params.get("session_id", DEFAULT_SESSION)
         start = time.monotonic()
+        call_token = _MCP_TOOL_CALL_ACTIVE.set(True)
         try:
             result = await original(*args, **kwargs)
             _log_tool_call(session_id, name, params, result, None, time.monotonic() - start)
@@ -3807,6 +3813,8 @@ def _install_tool_call_logger() -> None:
         except Exception as exc:
             _log_tool_call(session_id, name, params, None, str(exc), time.monotonic() - start)
             raise
+        finally:
+            _MCP_TOOL_CALL_ACTIVE.reset(call_token)
 
     mcp.call_tool = _logged_call_tool
     _TOOL_CALL_WRAPPER_INSTALLED = True
@@ -4629,7 +4637,27 @@ def session_status(*,
     }
 
 
-@mcp.tool()
+async def _run_start_session_with_diagnostics(operation: Any) -> Any:
+    """Translate an anticipated startup failure into caller-visible MCP content."""
+    try:
+        return await operation()
+    except RuntimeError as exc:
+        if _MCP_TOOL_CALL_ACTIVE.get():
+            raise ToolError(str(exc)) from exc
+        raise
+
+
+def _start_session_tool(function: Any) -> Any:
+    """Register start_session while preserving its 1C diagnostics at the MCP boundary."""
+
+    @functools.wraps(function)
+    async def guarded_start_session(*args: Any, **kwargs: Any) -> Any:
+        return await _run_start_session_with_diagnostics(lambda: function(*args, **kwargs))
+
+    return mcp.tool()(guarded_start_session)
+
+
+@_start_session_tool
 async def start_session(
     base_url: Annotated[str, "Target 1C infobase URL; used for version detection and test-client connection"] = "",
     username: Annotated[str, "1C username"] = "",
@@ -4654,17 +4682,26 @@ async def start_session(
     start_monotonic = time.perf_counter()
     stage_monotonic = start_monotonic
     timings: dict[str, float] = {}
+    supplied_username = username
+    supplied_password = password
 
     def mark_stage(name: str) -> None:
         nonlocal stage_monotonic
         now = time.perf_counter()
         timings[f"{name}_seconds"] = round(now - stage_monotonic, 3)
         stage_monotonic = now
-    credential_ref = _resolve_credential_reference(base_url)
+    input_looks_like_url = bool(re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", str(base_url or "")))
+    # A URL without explicitly supplied credentials is resolved by the web
+    # probe below.  It must try every exact/wildcard candidate and retain the
+    # one that authenticated, rather than preselecting the first match here.
+    credential_ref = (
+        None
+        if input_looks_like_url and not username and not password
+        else _resolve_credential_reference(base_url)
+    )
     credential_account_id = _current_account_id()
     saved_credentials_used = False
     saved_credentials_unverified = False
-    input_looks_like_url = bool(re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", str(base_url or "")))
     if credential_ref is not None:
         # For saved titles/aliases, replace title -> real URL.  For URL/wildcard matches,
         # keep the original requested URL; using the wildcard pattern itself as /WS value
@@ -4693,11 +4730,19 @@ async def start_session(
         base_url = ""
     web_runtime_probe: dict[str, Any] = {"attempted": False, "status": "not_applicable"}
     if base_url and initial_connection_mode == "ws":
-        web_runtime_probe = await _probe_web_runtime_before_start(base_url, username, password)
+        web_runtime_probe = await _probe_web_runtime_before_start(base_url, supplied_username, supplied_password)
         if web_runtime_probe.get("authentication_failed"):
             # No local 1C runtime/process has been started yet. Do not hide a
             # confirmed publication login rejection behind a later timeout.
             raise ValueError(str(web_runtime_probe.get("message") or "1C web authentication failed"))
+        selected_credential_index = web_runtime_probe.pop("_selected_credential_index", None)
+        if selected_credential_index is not None and not supplied_username and not supplied_password:
+            candidates = _credentials_store().matching_entries(base_url, account_id=credential_account_id)
+            selected = candidates[int(selected_credential_index)]
+            username = str(selected["username"])
+            password = str(selected["password"])
+            saved_credentials_used = True
+            saved_credentials_unverified = not bool(selected.get("verified", False))
     inferred_summary_rag_config = "" if summary_rag_config else _summary_rag_config_from_42clouds_url(base_url)
     effective_summary_rag_config = summary_rag_config or inferred_summary_rag_config
     resolved_version = version or None
@@ -5321,6 +5366,12 @@ _EVENTLOG_ERROR_MARKERS = (
     "failed",
     "fail",
 )
+_ONEC_BSL_STARTUP_ERROR_MARKERS = (
+    "процедура или функция с указанным именем не определена",
+    "неопределена",
+    "modulemanager",
+    "модульменеджера",
+)
 
 
 def _is_placeholder_password(password: str) -> bool:
@@ -5346,25 +5397,46 @@ async def _probe_web_runtime_before_start(
     """
     if not _is_web_base_url(base_url):
         return {"attempted": False, "status": "not_web_publication"}
-    if not username or not password:
-        return {"attempted": False, "status": "credentials_not_provided"}
-    try:
-        result = await asyncio.to_thread(probe_web_runtime, base_url, username, password)
-        return {"attempted": True, "status": "ok", "runtime": result}
-    except WebRuntimeAuthenticationError as exc:
-        return {
-            "attempted": True,
-            "status": "authentication_failed",
-            "authentication_failed": True,
-            "message": str(exc),
-        }
-    except (WebRuntimeProbeError, requests.RequestException) as exc:
-        logging.info("Web runtime probe skipped for %s: %s", _normalize_base_url(base_url), exc)
+    candidates: list[tuple[str, str, str, int | None]] = []
+    if username or password:
+        candidates.append((username, password, "explicit", None))
+    elif _CREDENTIAL_STORE_ENABLED:
+        for index, entry in enumerate(_credentials_store().matching_entries(base_url, account_id=_current_account_id())):
+            candidates.append((entry["username"], entry["password"], "saved", index))
+    if not candidates:
+        candidates.append(("", "", "empty", None))
+
+    authentication_messages: list[str] = []
+    unavailable_messages: list[str] = []
+    for candidate_username, candidate_password, source, index in candidates:
+        try:
+            result = await asyncio.to_thread(probe_web_runtime, base_url, candidate_username, candidate_password)
+            response: dict[str, Any] = {
+                "attempted": True,
+                "status": "ok",
+                "runtime": result,
+                "credentials_source": source,
+            }
+            if index is not None:
+                response["_selected_credential_index"] = index
+            return response
+        except WebRuntimeAuthenticationError as exc:
+            authentication_messages.append(str(exc))
+        except (WebRuntimeProbeError, requests.RequestException) as exc:
+            logging.info("Web runtime probe skipped for %s: %s", _normalize_base_url(base_url), exc)
+            unavailable_messages.append(str(exc))
+    if unavailable_messages:
         return {
             "attempted": True,
             "status": "unavailable",
-            "message": str(exc),
+            "message": unavailable_messages[-1],
         }
+    return {
+        "attempted": True,
+        "status": "authentication_failed",
+        "authentication_failed": True,
+        "message": authentication_messages[-1] if authentication_messages else "1C web authentication failed",
+    }
 
 
 def _users_url_for_base_url(base_url: str) -> str:
@@ -5592,6 +5664,15 @@ def _test_client_startup_error_from_logs(sess: SessionState) -> str:
     auth_lines = [line for line in text.splitlines() if _looks_like_auth_failure(line)]
     if auth_lines:
         return "\n".join(auth_lines[-20:])
+
+    # Compilation/runtime diagnostics in /Out often name neither "error" nor
+    # "ошибка". Preserve their source location and message for the MCP caller.
+    bsl_lines = [
+        line for line in text.splitlines()
+        if any(marker in line.lower() for marker in _ONEC_BSL_STARTUP_ERROR_MARKERS)
+    ]
+    if bsl_lines:
+        return "\n".join(bsl_lines[-20:])
 
     meaningful = _extract_error_lines(text, max_lines=20)
     if meaningful and any(marker in meaningful.lower() for marker in _EVENTLOG_ERROR_MARKERS):

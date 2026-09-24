@@ -49,6 +49,7 @@ from mcp_1c.server import (
     _rag_diagnostic,
     _reap_global_orphan_sessions,
     _register_dev_tools,
+    _run_start_session_with_diagnostics,
     _runtime_output_file,
     _state_file_for_scope,
     _summary_rag_config_from_42clouds_url,
@@ -72,7 +73,7 @@ from mcp_1c.server import (
 from mcp_1c.server import (
     main as mcp_main,
 )
-from mcp_1c.webclient_probe import WebRuntimeAuthenticationError
+from mcp_1c.webclient_probe import WebRuntimeAuthenticationError, WebRuntimeProbeError
 
 EXPECTED_NEW_TOOLS = {
     "wait_object",
@@ -1883,6 +1884,43 @@ def test_test_client_startup_error_from_logs_detects_generic_1c_error(tmp_path):
     )
 
     assert _test_client_startup_error_from_logs(sess) == "Ошибка при выполнении операции"
+
+
+def test_test_client_startup_error_from_logs_preserves_bsl_compile_failure(tmp_path):
+    """A 1C /Out compile error must reach the MCP caller, not become a generic crash."""
+    sess = _session_with_client_log_dir(tmp_path)
+    bsl_error = (
+        "{Platform42 Справочник.ОбластиДанных.МодульМенеджера(112,27)}: "
+        "Процедура или функция с указанным именем не определена "
+        "(НовыеПараметрыУстановкиПравНаПриложение)"
+    )
+    (sess.client_log_dir / "test_client_1c_out.log").write_text(
+        f"ordinary startup line\n{bsl_error}\n", encoding="utf-8"
+    )
+
+    assert _test_client_startup_error_from_logs(sess) == bsl_error
+
+
+def test_start_session_diagnostic_wrapper_preserves_expected_startup_failure():
+    """An expected 1C startup failure must remain visible through the MCP tool boundary."""
+
+    async def failing_startup():
+        raise RuntimeError("Пользователь ИБ не идентифицирован")
+
+    from mcp_1c import server
+
+    call_token = server._MCP_TOOL_CALL_ACTIVE.set(True)
+    try:
+        asyncio.run(_run_start_session_with_diagnostics(failing_startup))
+    except Exception as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("The startup failure must be returned to the caller")
+    finally:
+        server._MCP_TOOL_CALL_ACTIVE.reset(call_token)
+
+    assert "Пользователь ИБ не идентифицирован" in message
+
 
 
 def test_attach_test_client_surfaces_auth_error_from_logs(tmp_path):
@@ -4061,6 +4099,82 @@ def test_web_runtime_probe_reports_authentication_failure(monkeypatch):
     assert result["status"] == "authentication_failed"
     assert result["authentication_failed"] is True
     assert "incorrect user or password" in result["message"]
+
+
+def test_web_runtime_probe_tries_saved_exact_and_wildcard_credentials(monkeypatch):
+    from mcp_1c import server
+
+    attempts = []
+
+    class Store:
+        def matching_entries(self, base_url, account_id=None):
+            assert base_url == "https://example.test/ib"
+            return [
+                {"username": "exact", "password": "exact-password"},
+                {"username": "wild", "password": "wild-password"},
+            ]
+
+    def probe(_base_url, username, password):
+        attempts.append((username, password))
+        if username == "exact":
+            raise WebRuntimeAuthenticationError("incorrect user or password")
+        return {"found": True}
+
+    monkeypatch.setattr(server, "_credentials_store", lambda: Store())
+    monkeypatch.setattr(server, "probe_web_runtime", probe)
+
+    result = asyncio.run(_probe_web_runtime_before_start("https://example.test/ib", "", ""))
+
+    assert attempts == [("exact", "exact-password"), ("wild", "wild-password")]
+    assert result["status"] == "ok"
+    assert result["credentials_source"] == "saved"
+
+
+def test_web_runtime_probe_tries_empty_credentials_when_store_has_no_match(monkeypatch):
+    from mcp_1c import server
+
+    attempts = []
+
+    class Store:
+        def matching_entries(self, _base_url, account_id=None):
+            return []
+
+    def probe(_base_url, username, password):
+        attempts.append((username, password))
+        return {"found": True}
+
+    monkeypatch.setattr(server, "_credentials_store", lambda: Store())
+    monkeypatch.setattr(server, "probe_web_runtime", probe)
+
+    result = asyncio.run(_probe_web_runtime_before_start("https://example.test/ib", "", ""))
+
+    assert attempts == [("", "")]
+    assert result["status"] == "ok"
+    assert result["credentials_source"] == "empty"
+
+
+def test_web_runtime_probe_continues_after_an_unavailable_saved_candidate(monkeypatch):
+    from mcp_1c import server
+
+    class Store:
+        def matching_entries(self, _base_url, account_id=None):
+            return [
+                {"username": "first", "password": "first-password"},
+                {"username": "second", "password": "second-password"},
+            ]
+
+    def probe(_base_url, username, _password):
+        if username == "first":
+            raise WebRuntimeProbeError("temporary protocol error")
+        return {"found": True}
+
+    monkeypatch.setattr(server, "_credentials_store", lambda: Store())
+    monkeypatch.setattr(server, "probe_web_runtime", probe)
+
+    result = asyncio.run(_probe_web_runtime_before_start("https://example.test/ib", "", ""))
+
+    assert result["status"] == "ok"
+    assert result["_selected_credential_index"] == 1
 
 
 def test_web_runtime_probe_skips_non_web_target():
