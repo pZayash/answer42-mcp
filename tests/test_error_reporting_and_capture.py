@@ -320,3 +320,60 @@ def test_locked_file_infobase_falls_back_to_direct_file_connection(tmp_path, mon
     assert sess.shared_file_key == ""
     compact = server._compact_start_test_client_result(result)
     assert compact["connection_fallback"]["to"] == "file-direct"
+
+
+def _call_tool_error(name, arguments):
+    with pytest.raises(ToolError) as info:
+        asyncio.run(mcp.call_tool(name, arguments))
+    return str(info.value)
+
+
+def test_http_mode_requires_explicit_session_id(monkeypatch):
+    """One StreamableHTTP server serves all clients: no silently shared default session."""
+    monkeypatch.setattr(server, "_REQUIRE_EXPLICIT_SESSION_ID", True)
+    monkeypatch.setattr(server, "_load_persisted_sessions", dict)
+
+    for tool in ("session_status", "active_window", "stop_session"):
+        assert "session_id обязателен" in _call_tool_error(tool, {})
+
+    explicit = _call_tool_error("active_window", {"session_id": "unit-unknown"})
+    assert "session_id обязателен" not in explicit
+    assert "unit-unknown" in explicit
+    status = asyncio.run(mcp.call_tool("session_status", {"session_id": "unit-unknown"}))
+    assert not status.is_error
+
+
+def test_stdio_mode_keeps_default_session(monkeypatch):
+    monkeypatch.setattr(server, "_REQUIRE_EXPLICIT_SESSION_ID", False)
+    monkeypatch.setattr(server, "_load_persisted_sessions", dict)
+    message = _call_tool_error("active_window", {})
+    assert "session_id обязателен" not in message
+    assert server.DEFAULT_SESSION in message
+
+
+def test_http_mode_start_session_generates_its_own_session_id(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "_REQUIRE_EXPLICIT_SESSION_ID", True)
+    monkeypatch.setattr(server, "_new_session_id", lambda: "sess_unit_generated")
+    monkeypatch.setattr(server._platform, "find_platform_dir", lambda version=None: tmp_path)
+    monkeypatch.setattr(server._platform, "platform_version_from_dir", lambda path: "8.5.1.1343")
+    monkeypatch.setattr(server._platform, "require_websocket_support", lambda version: None)
+    sentinel = SessionState(
+        session_id="sess_unit_generated", display="", platform_dir=tmp_path, ws_port=1, ibsrv_port=2,
+        testclient_port=3, data_dir=tmp_path / "data",
+    )
+    _SESSIONS[sentinel.session_id] = sentinel
+    try:
+        # The generated id is already taken, so start_session stops right after choosing it.
+        message = _call_tool_error("start_session", {})
+    finally:
+        _SESSIONS.pop(sentinel.session_id, None)
+    assert "sess_unit_generated" in message
+    assert server.DEFAULT_SESSION not in message
+
+
+def test_session_port_band_falls_back_when_whole_band_is_reserved(monkeypatch):
+    """A Windows excluded port range can swallow a whole 10-port session band."""
+    reserved = range(3475, 3575)
+    monkeypatch.setattr(runtime, "_port_bindable", lambda port: port not in reserved)
+    port = server._find_session_port(1541, 1960)
+    assert port == 3575

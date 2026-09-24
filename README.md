@@ -153,6 +153,7 @@ answer42
 - Каждый MCP-запрос должен содержать заголовок `Authorization: Bearer <token>`.
 - `account_id` определяет namespace для credentials. Если не задан, вычисляется как стабильный хеш токена (`token-<16hex>`).
 - Режим по умолчанию **stateless** (`--http-stateless`/`ONEC_MCP_HTTP_STATELESS` default `1`); для resumable sessions передай `--http-stateless`/`0`.
+- Один HTTP-сервер обслуживает всех клиентов, поэтому неявной сессии по умолчанию нет: `start_session` без `session_id` создаёт сессию с уникальным id и возвращает его, а инструменты, работающие с сессией, без явного `session_id` возвращают ошибку. Список сессий — `sessions_list`.
 
 ## Безопасное хранение логинов и паролей
 
