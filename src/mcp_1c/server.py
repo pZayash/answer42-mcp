@@ -4705,6 +4705,8 @@ async def start_session(
             selected = candidates[int(selected_credential_index)]
             username = str(selected["username"])
             password = str(selected["password"])
+            saved_credentials_used = True
+            saved_credentials_unverified = not bool(selected.get("verified", False))
     inferred_summary_rag_config = "" if summary_rag_config else _summary_rag_config_from_42clouds_url(base_url)
     effective_summary_rag_config = summary_rag_config or inferred_summary_rag_config
     resolved_version = version or None
