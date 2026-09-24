@@ -537,7 +537,8 @@ def test_reference_setters_pass_create_if_missing_to_bridge(monkeypatch):
         ("unit", "set_field_value", {"field_name": "Номенклатура", "value": "Новый товар", "search_by_title": False, "create_if_missing": True}, None),
         ("unit", "table_set_field", {"table": "Товары", "field": "Номенклатура", "value": "Новый товар", "search_by_title": False, "create_if_missing": True, "row": "", "search_limit": 2000}, None),
         ("unit", "table_set_row_values", {"table": "Товары", "values": '{"Номенклатура":"Новый товар"}', "search_by_title": False, "create_if_missing": True}, None),
-        ("unit", "set_form_fields", {"values": '{"Контрагент":"Новый контрагент"}', "search_by_title": False, "create_if_missing": True}, None),
+        # set_form_fields sets fields one by one through set_field_value.
+        ("unit", "set_field_value", {"field_name": "Контрагент", "value": "Новый контрагент", "search_by_title": False, "create_if_missing": True}, None),
     ]
 
 

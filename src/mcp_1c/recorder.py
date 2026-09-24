@@ -75,7 +75,7 @@ class RecordingSession:
             try:
                 screenshot_func(str(frame), self.window, self.display)
             except Exception as exc:
-                event = {"index": index, "action": action, "params": params, "result": summarize(result), "screenshot_error": str(exc)}
+                event = {"index": index, "action": action, "params": safe_params, "result": summarize(safe_result), "screenshot_error": str(exc)}
                 self.events.append(event)
                 return event
             slide.write_text(make_slide_svg(frame, action, safe_params, safe_result, index), encoding="utf-8")

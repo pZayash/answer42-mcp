@@ -190,6 +190,7 @@ def test_capture_windows_png_nudges_every_captured_window(tmp_path, monkeypatch)
 
 
 _FORM_PROPERTIES = (
+    "Объект",  # main attribute of the manager data processor form
     "Заголовок", "ТекущийЭлемент", "ТолькоПросмотр", "Доступность", "Ширина", "Высота", "Окно",
     "Модифицированность", "ВводДоступен", "ВладелецФормы", "Элементы", "Команды", "РежимОткрытияОкна",
     "ИмяФормы", "КлючУникальности", "ТекущаяСтраница", "Подсказка", "Видимость",
@@ -215,7 +216,11 @@ def test_manager_form_module_does_not_assign_form_properties_as_locals():
         for prop in _FORM_PROPERTIES:
             if prop in params or prop in declared:
                 continue
-            if re.search(r"^\t+" + prop + r"\s*=(?!=)", chunk, re.MULTILINE):
+            assigned = re.search(r"^\t+" + prop + r"\s*=(?!=)", chunk, re.MULTILINE)
+            # A loop variable is assigned too: "Для Каждого Окно Из" writes the
+            # read-only form property Окно and fails at run time.
+            loop_variable = re.search(r"^\t+Для Каждого " + prop + r" Из ", chunk, re.MULTILINE)
+            if assigned or loop_variable:
                 offenders.append(f"{signature.group(1)}: {prop}")
     assert offenders == []
 
