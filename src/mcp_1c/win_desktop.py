@@ -45,6 +45,10 @@ _CREATE_UNICODE_ENVIRONMENT = 0x00000400
 _PW_RENDERFULLCONTENT = 0x00000002
 _SW_RESTORE = 9
 _SW_MAXIMIZE = 3
+_SRCCOPY = 0x00CC0020
+_WHITENESS = 0x00FF0062
+# SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER | SWP_FRAMECHANGED | SWP_NOACTIVATE
+_SWP_FRAME_NUDGE = 0x0001 | 0x0002 | 0x0004 | 0x0020 | 0x0010
 
 _T = TypeVar("_T")
 
@@ -130,6 +134,7 @@ def _winapi() -> Any:
     user32.GetWindowThreadProcessId.argtypes = [wt.HWND, ctypes.POINTER(wt.DWORD)]
     user32.ShowWindow.argtypes = [wt.HWND, ctypes.c_int]
     user32.MoveWindow.argtypes = [wt.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wt.BOOL]
+    user32.SetWindowPos.argtypes = [wt.HWND, wt.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wt.UINT]
     kernel32.CreateProcessW.argtypes = [
         wt.LPCWSTR, wt.LPWSTR, ctypes.c_void_p, ctypes.c_void_p, wt.BOOL, wt.DWORD,
         ctypes.c_void_p, wt.LPCWSTR, ctypes.c_void_p, ctypes.c_void_p,
@@ -144,6 +149,8 @@ def _winapi() -> Any:
     gdi32.GetDIBits.argtypes = [wt.HDC, wt.HBITMAP, wt.UINT, wt.UINT, ctypes.c_void_p, ctypes.c_void_p, wt.UINT]
     gdi32.DeleteObject.argtypes = [wt.HGDIOBJ]
     gdi32.DeleteDC.argtypes = [wt.HDC]
+    gdi32.BitBlt.argtypes = [wt.HDC, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wt.HDC, ctypes.c_int, ctypes.c_int, wt.DWORD]
+    gdi32.PatBlt.argtypes = [wt.HDC, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wt.DWORD]
 
     class _Api:
         pass
@@ -294,30 +301,84 @@ def _png_bytes(width: int, height: int, bgra: bytes) -> bytes:
 
 
 def capture_window_png(name: str, hwnd: int, width: int, height: int, path: Path | str) -> Path:
-    """Render a window of the named desktop into a PNG via PrintWindow."""
+    """Render one window of the named desktop into a PNG via PrintWindow."""
+    window = {"hwnd": hwnd, "left": 0, "top": 0, "width": width, "height": height}
+    return capture_windows_png(name, [window], {"left": 0, "top": 0, "width": width, "height": height}, path)
+
+
+def capture_windows_png(
+    name: str,
+    windows: list[dict[str, Any]],
+    canvas: dict[str, int],
+    path: Path | str,
+) -> Path:
+    """Compose several windows of the named desktop into one PNG.
+
+    ``windows`` are in ``EnumDesktopWindows`` order (topmost first) with
+    screen rectangles; ``canvas`` is the screen rectangle of the result.  A
+    hidden desktop is never composed by DWM, so every window is rendered with
+    PrintWindow and painted bottom-up; floating (ownerless) 1C form windows
+    are separate top-level windows and would be lost otherwise.
+
+    PrintWindow leaves the 1C test client in a state where its automation
+    server stops answering (``ПолучитьАктивноеОкно`` never returns) until the
+    window is next re-laid out.  A no-op ``SetWindowPos(SWP_FRAMECHANGED)``
+    on every captured window restores it, so it is always sent afterwards.
+    """
+    width, height = int(canvas["width"]), int(canvas["height"])
     if width <= 0 or height <= 0:
-        raise ValueError(f"Invalid window size {width}x{height}")
+        raise ValueError(f"Invalid canvas size {width}x{height}")
+    if not windows:
+        raise ValueError("No windows to capture")
     api = _winapi()
     output_path = Path(path)
 
     def capture() -> bytes:
         user32, gdi32, ctypes = api.user32, api.gdi32, api.ctypes
         screen_dc = user32.GetDC(None)
-        mem_dc = gdi32.CreateCompatibleDC(screen_dc)
-        bitmap = gdi32.CreateCompatibleBitmap(screen_dc, width, height)
-        previous = gdi32.SelectObject(mem_dc, bitmap)
+        canvas_dc = gdi32.CreateCompatibleDC(screen_dc)
+        canvas_bitmap = gdi32.CreateCompatibleBitmap(screen_dc, width, height)
+        canvas_previous = gdi32.SelectObject(canvas_dc, canvas_bitmap)
+        captured = 0
+        errors: list[str] = []
         try:
-            if not user32.PrintWindow(hwnd, mem_dc, _PW_RENDERFULLCONTENT):
-                raise _last_error(api, "PrintWindow")
+            gdi32.PatBlt(canvas_dc, 0, 0, width, height, _WHITENESS)
+            for item in reversed(windows):
+                hwnd = int(item["hwnd"])
+                w, h = int(item["width"]), int(item["height"])
+                if w <= 0 or h <= 0:
+                    continue
+                window_dc = gdi32.CreateCompatibleDC(screen_dc)
+                window_bitmap = gdi32.CreateCompatibleBitmap(screen_dc, w, h)
+                window_previous = gdi32.SelectObject(window_dc, window_bitmap)
+                try:
+                    if not user32.PrintWindow(hwnd, window_dc, _PW_RENDERFULLCONTENT):
+                        errors.append(str(_last_error(api, f"PrintWindow({hwnd})")))
+                        continue
+                    gdi32.BitBlt(
+                        canvas_dc,
+                        int(item["left"]) - int(canvas["left"]),
+                        int(item["top"]) - int(canvas["top"]),
+                        w, h, window_dc, 0, 0, _SRCCOPY,
+                    )
+                    captured += 1
+                finally:
+                    gdi32.SelectObject(window_dc, window_previous)
+                    gdi32.DeleteObject(window_bitmap)
+                    gdi32.DeleteDC(window_dc)
+            if not captured:
+                raise OSError("; ".join(errors) or "PrintWindow failed")
             header = api.BITMAPINFOHEADER(ctypes.sizeof(api.BITMAPINFOHEADER), width, -height, 1, 32, 0, 0, 0, 0, 0, 0)
             buffer = ctypes.create_string_buffer(width * height * 4)
-            if not gdi32.GetDIBits(mem_dc, bitmap, 0, height, buffer, ctypes.byref(header), 0):
+            if not gdi32.GetDIBits(canvas_dc, canvas_bitmap, 0, height, buffer, ctypes.byref(header), 0):
                 raise _last_error(api, "GetDIBits")
             return buffer.raw
         finally:
-            gdi32.SelectObject(mem_dc, previous)
-            gdi32.DeleteObject(bitmap)
-            gdi32.DeleteDC(mem_dc)
+            for item in windows:
+                user32.SetWindowPos(int(item["hwnd"]), None, 0, 0, 0, 0, _SWP_FRAME_NUDGE)
+            gdi32.SelectObject(canvas_dc, canvas_previous)
+            gdi32.DeleteObject(canvas_bitmap)
+            gdi32.DeleteDC(canvas_dc)
             user32.ReleaseDC(None, screen_dc)
 
     bgra = run_on_desktop(name, capture)

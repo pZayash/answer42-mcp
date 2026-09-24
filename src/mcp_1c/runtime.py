@@ -105,16 +105,30 @@ def find_free_display(start: int = DEFAULT_DISPLAY_START) -> str:
     raise RuntimeError("No free X display found")
 
 
+def _port_bindable(port: int) -> bool:
+    """Return True when *port* can be bound both on all interfaces and on loopback.
+
+    On Windows a wildcard bind succeeds even while another socket listens on
+    ``127.0.0.1:port`` (no SO_EXCLUSIVEADDRUSE), and the later loopback bind of
+    the bridge, ibsrv or test client then fails with WinError 10048.
+    """
+    for host in ("", "127.0.0.1"):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            if os_support.IS_WINDOWS and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            try:
+                s.bind((host, port))
+            except OSError:
+                return False
+    return True
+
+
 def find_free_port(start: int = DEFAULT_WS_PORT, end: int | None = None) -> int:
     """Find a free TCP port in the range start..start+500 (or start..end)."""
     end = end or start + 500
     for port in range(start, end):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            try:
-                s.bind(("", port))
-                return port
-            except OSError:
-                continue
+        if _port_bindable(port):
+            return port
     raise RuntimeError(f"No free port found in range {start}..{end}")
 
 
@@ -238,14 +252,33 @@ def kill_process(proc: subprocess.Popen | None, label: str) -> None:
     os_support.kill_process_tree(proc, label, LOGGER)
 
 
+def _cyrillic_score(text: str) -> int:
+    score = 0
+    for char in text:
+        if ord(char) < 128:
+            continue
+        score += 1 if ("А" <= char <= "я" or char in "Ёё") else -1
+    return score
+
+
+def decode_8bit_cyrillic(data: bytes) -> str:
+    """Decode single-byte Russian text written in either cp866 (OEM) or cp1251 (ANSI).
+
+    Windows ibsrv/ibcmd console output is OEM (cp866), while 1C /Out logs are
+    usually ANSI.  Both decodings always succeed, so pick the one that yields
+    Cyrillic letters instead of pseudographics/punctuation.
+    """
+    candidates = [data.decode(encoding, errors="replace") for encoding in ("cp1251", "cp866")]
+    return max(candidates, key=_cyrillic_score)
+
+
 def _decode_process_output(data: bytes) -> str:
-    encodings = ["utf-8-sig", "utf-8", "cp866", "cp1251"] if os_support.IS_WINDOWS else ["utf-8-sig", "utf-8", "cp866"]
-    for encoding in encodings:
+    for encoding in ("utf-8-sig", "utf-8"):
         try:
             return data.decode(encoding)
         except UnicodeDecodeError:
             continue
-    return data.decode(encodings[-1], errors="replace")
+    return decode_8bit_cyrillic(data)
 
 
 def _run_capture(argv: list[str], *, timeout: float, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
@@ -397,6 +430,7 @@ def start_standalone_server(
     data_dir.mkdir(parents=True, exist_ok=True)
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / "ibsrv.log"
+    log_offset = log_path.stat().st_size if log_path.exists() else 0
     with log_path.open("ab", buffering=0) as log_handle:
         LOGGER.info("Starting ibsrv (data=%s, name=%s, address=%s, port=%s, direct_regport=%s)", data_dir, name, address, port, direct_regport or "default")
         config_path = ensure_standalone_config(
@@ -423,14 +457,83 @@ def start_standalone_server(
             stdin=subprocess.DEVNULL,
             **os_support.subprocess_creation_kwargs(),
         )
-        if not wait_for_port(address, port, timeout=timeout):
-            kill_process(proc, "ibsrv")
-            raise RuntimeError(
-                f"ibsrv did not start listening on {address}:{port} within {timeout}s. "
-                f"See log: {log_path}"
-            )
+        _wait_standalone_server_ready(proc, address, port, timeout, log_path, log_offset, db_path=db_path)
         LOGGER.info("ibsrv is listening on %s:%s (pid=%s, name=%s)", address, port, proc.pid, name)
         return proc
+
+
+_IBSRV_FATAL_MARKERS = ("[fatal]", "[error]")
+_IBSRV_READY_MARKER = "server ready"
+
+
+def read_log_since(path: Path, offset: int = 0, *, max_chars: int = 8000) -> str:
+    """Return text appended to *path* after byte *offset* (ibsrv.log is shared across starts)."""
+    try:
+        with path.open("rb") as handle:
+            handle.seek(max(0, offset))
+            data = handle.read()
+    except OSError:
+        return ""
+    text = _decode_process_output(data).strip()
+    return text[-max_chars:]
+
+
+def _standalone_server_failure(proc: subprocess.Popen, output: str) -> str:
+    if proc.poll() is not None:
+        return f"ibsrv exited with code {proc.returncode}"
+    if any(marker in line.lower() for line in output.splitlines() for marker in _IBSRV_FATAL_MARKERS):
+        return "ibsrv reported a fatal error"
+    return ""
+
+
+def _wait_standalone_server_ready(
+    proc: subprocess.Popen,
+    address: str,
+    port: int,
+    timeout: float,
+    log_path: Path,
+    log_offset: int,
+    db_path: Path | None = None,
+    ready_grace: float = 10.0,
+    poll: float = 0.25,
+) -> None:
+    """Wait until ibsrv serves HTTP and has opened the infobase.
+
+    ibsrv opens its HTTP port *before* it locks the infobase, so a listening
+    port alone is not enough: with a file infobase already opened elsewhere
+    (Designer, a web publication in Apache) it prints ``[FATAL] Ошибка
+    исключительной блокировки информационной базы`` and exits a moment later.
+    """
+    def fail(reason: str) -> None:
+        kill_process(proc, "ibsrv")
+        output = read_log_since(log_path, log_offset)
+        message = f"ibsrv failed to start on {address}:{port}: {reason}. Log: {log_path}"
+        if output:
+            message += f"\n{output}"
+        if "исключительной блокировки" in output.lower() or "exclusive lock" in output.lower():
+            message += (
+                f"\nИнформационная база {db_path} уже открыта другим процессом (Конфигуратор, "
+                "клиент 1С, веб-публикация в Apache/IIS, другой ibsrv). Закройте его и повторите."
+            )
+        raise RuntimeError(message)
+
+    deadline = time.monotonic() + timeout
+    while not is_port_listening(address, port):
+        reason = _standalone_server_failure(proc, read_log_since(log_path, log_offset))
+        if reason:
+            fail(reason)
+        if time.monotonic() >= deadline:
+            fail(f"did not start listening within {timeout}s")
+        time.sleep(poll)
+    ready_deadline = time.monotonic() + ready_grace
+    while time.monotonic() < ready_deadline:
+        output = read_log_since(log_path, log_offset)
+        reason = _standalone_server_failure(proc, output)
+        if reason:
+            fail(reason)
+        if _IBSRV_READY_MARKER in output.lower():
+            return
+        time.sleep(poll)
 
 
 def export_eventlog(

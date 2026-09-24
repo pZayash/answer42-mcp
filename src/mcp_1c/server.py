@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextvars
 import copy
+import functools
 import hashlib
 import importlib.resources
 import json
@@ -27,6 +29,7 @@ from urllib.parse import parse_qs, unquote, urlsplit, urlunsplit
 import requests
 from mcp.server import MCPServer
 from mcp.server.lowlevel import NotificationOptions
+from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 from mcp.server.mcpserver.resources import FileResource
 from mcp.server.subscriptions import ToolsListChanged
 from starlette.responses import FileResponse, PlainTextResponse
@@ -163,7 +166,7 @@ _METADATA_OBJECTS_CACHE: dict[str, dict[str, Any]] = {}
 
 TOOL_PROFILE_GROUPS: dict[str, set[str]] = {
     "sessions": {
-        "sessions_list", "session_status", "start_session", "stop_session", "export_eventlog",
+        "sessions_list", "session_status", "start_session", "stop_session",
         "credentials_check", "credentials_save", "credentials_remove", "credentials_list", "credentials_titles",
     },
     "windows": {"active_window", "windows_list", "activate_window", "goto_start_page", "goto_previous_window", "goto_next_window"},
@@ -1592,22 +1595,33 @@ async def _global_orphan_reaper_loop(interval_seconds: float = 60.0) -> None:
         await asyncio.sleep(interval_seconds)
 
 
+_FAILED_START_DISCONNECT_TIMEOUT = 5.0
+_STOP_DISCONNECT_TIMEOUT = float(os.getenv("ONEC_MCP_STOP_DISCONNECT_TIMEOUT", "15"))
+
+
 async def _cleanup_failed_start_session(sess: SessionState, reason: str) -> None:
     logging.info("Cleaning failed start_session %s: %s", sess.session_id, reason)
-    try:
-        await sess.bridge.call("disconnect_test_client", {})
-    except Exception:
-        pass
+    # The manager may still be busy with the failed attach (1C retries the
+    # test-client connection for minutes); everything is killed below anyway,
+    # so do not let a polite disconnect delay the error report.
+    with suppress(Exception):
+        await sess.bridge.call("disconnect_test_client", {}, timeout=_FAILED_START_DISCONNECT_TIMEOUT)
     runtime.kill_process(sess.test_client_process, "test-client")
     sess.test_client_process = None
-    for rt, manager_label, server_label in (
-        (sess.runtime, "test-manager", "ibsrv"),
-        (sess.client_runtime, "test-manager-client", "ibsrv-client"),
-        (sess.file_client_runtime, "test-manager-file-client", "ibsrv-file-client"),
+    for rt, manager_label, server_label, shared_key in (
+        (sess.runtime, "test-manager", "ibsrv", ""),
+        (sess.client_runtime, "test-manager-client", "ibsrv-client", sess.shared_client_key),
+        (sess.file_client_runtime, "test-manager-file-client", "ibsrv-file-client", sess.shared_file_key),
     ):
         if rt is not None:
             runtime.kill_process(rt.manager_process, manager_label)
-            runtime.kill_process(rt.server_process, server_label)
+            if shared_key:
+                # Shared autonomous servers may serve other sessions: drop only our ref.
+                _release_shared_file_server(shared_key, sess.session_id)
+            else:
+                runtime.kill_process(rt.server_process, server_label)
+    sess.shared_client_key = ""
+    sess.shared_file_key = ""
     try:
         await sess.bridge.stop()
     except Exception:
@@ -3384,7 +3398,7 @@ def _compact_start_test_client_result(result: Any, *, include_timings: bool = Fa
     keep_keys = (
         "connected", "base_url", "connection_mode", "connection_value",
         "target_connection_mode", "port", "client_pid", "client_log",
-        "client_stdout_log", "auto_maximize", "auto_maximize_error",
+        "client_stdout_log", "auto_maximize", "auto_maximize_error", "connection_fallback",
     )
     compact = {key: _copy_compact_object(result[key]) for key in keep_keys if key in result and result.get(key) not in (None, "", [], {})}
     if isinstance(compact.get("auto_maximize"), dict):
@@ -3393,7 +3407,7 @@ def _compact_start_test_client_result(result: Any, *, include_timings: bool = Fa
     if isinstance(maximized, dict):
         compact_maximized = {
             key: _copy_compact_object(maximized[key])
-            for key in ("maximized", "method", "errors")
+            for key in ("maximized", "method", "errors", "skipped")
             if key in maximized and maximized.get(key) not in (None, "", [], {})
         }
         if maximized.get("window") not in (None, "", [], {}):
@@ -3734,6 +3748,30 @@ def _configure_tool_logging(log_path: str | Path) -> None:
 
 
 _TOOL_CALL_WRAPPER_INSTALLED = False
+_MCP_TOOL_CALL_ACTIVE: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "mcp_tool_call_active", default=False
+)
+_TOOL_ERROR_MAX_CHARS = int(os.getenv("ONEC_MCP_TOOL_ERROR_MAX_CHARS", "20000"))
+
+
+def _visible_tool_error(name: str, exc: UnexpectedToolError) -> ToolError:
+    """Turn an SDK-masked tool crash into a ToolError that carries the real cause.
+
+    The MCP SDK hides the text of any exception other than ToolError and
+    returns only ``Error executing tool <name>``.  Answer42 tools raise plain
+    RuntimeError/ValueError/BridgeError with 1C diagnostics (ibsrv log tails,
+    ErrorWindow text), which the caller needs to see.
+    """
+    cause: BaseException = exc
+    while isinstance(cause, UnexpectedToolError) and cause.__cause__ is not None:
+        cause = cause.__cause__
+    if cause is exc:
+        return ToolError(str(exc))
+    logging.getLogger(__name__).error("Tool %s failed", name, exc_info=cause)
+    detail = str(cause).strip() or repr(cause)
+    if len(detail) > _TOOL_ERROR_MAX_CHARS:
+        detail = detail[:_TOOL_ERROR_MAX_CHARS] + "\n<...truncated>"
+    return ToolError(f"Error executing tool {name}: {type(cause).__name__}: {detail}")
 
 
 def _install_tool_call_logger() -> None:
@@ -3763,13 +3801,20 @@ def _install_tool_call_logger() -> None:
         if isinstance(params, dict):
             session_id = params.get("session_id", DEFAULT_SESSION)
         start = time.monotonic()
+        call_token = _MCP_TOOL_CALL_ACTIVE.set(True)
         try:
             result = await original(*args, **kwargs)
             _log_tool_call(session_id, name, params, result, None, time.monotonic() - start)
             return result
+        except UnexpectedToolError as exc:
+            visible = _visible_tool_error(name, exc)
+            _log_tool_call(session_id, name, params, None, str(visible), time.monotonic() - start)
+            raise visible from exc.__cause__
         except Exception as exc:
             _log_tool_call(session_id, name, params, None, str(exc), time.monotonic() - start)
             raise
+        finally:
+            _MCP_TOOL_CALL_ACTIVE.reset(call_token)
 
     mcp.call_tool = _logged_call_tool
     _TOOL_CALL_WRAPPER_INSTALLED = True
@@ -4592,7 +4637,27 @@ def session_status(*,
     }
 
 
-@mcp.tool()
+async def _run_start_session_with_diagnostics(operation: Any) -> Any:
+    """Translate an anticipated startup failure into caller-visible MCP content."""
+    try:
+        return await operation()
+    except RuntimeError as exc:
+        if _MCP_TOOL_CALL_ACTIVE.get():
+            raise ToolError(str(exc)) from exc
+        raise
+
+
+def _start_session_tool(function: Any) -> Any:
+    """Register start_session while preserving its 1C diagnostics at the MCP boundary."""
+
+    @functools.wraps(function)
+    async def guarded_start_session(*args: Any, **kwargs: Any) -> Any:
+        return await _run_start_session_with_diagnostics(lambda: function(*args, **kwargs))
+
+    return mcp.tool()(guarded_start_session)
+
+
+@_start_session_tool
 async def start_session(
     base_url: Annotated[str, "Target 1C infobase URL; used for version detection and test-client connection"] = "",
     username: Annotated[str, "1C username"] = "",
@@ -4617,17 +4682,26 @@ async def start_session(
     start_monotonic = time.perf_counter()
     stage_monotonic = start_monotonic
     timings: dict[str, float] = {}
+    supplied_username = username
+    supplied_password = password
 
     def mark_stage(name: str) -> None:
         nonlocal stage_monotonic
         now = time.perf_counter()
         timings[f"{name}_seconds"] = round(now - stage_monotonic, 3)
         stage_monotonic = now
-    credential_ref = _resolve_credential_reference(base_url)
+    input_looks_like_url = bool(re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", str(base_url or "")))
+    # A URL without explicitly supplied credentials is resolved by the web
+    # probe below.  It must try every exact/wildcard candidate and retain the
+    # one that authenticated, rather than preselecting the first match here.
+    credential_ref = (
+        None
+        if input_looks_like_url and not username and not password
+        else _resolve_credential_reference(base_url)
+    )
     credential_account_id = _current_account_id()
     saved_credentials_used = False
     saved_credentials_unverified = False
-    input_looks_like_url = bool(re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", str(base_url or "")))
     if credential_ref is not None:
         # For saved titles/aliases, replace title -> real URL.  For URL/wildcard matches,
         # keep the original requested URL; using the wildcard pattern itself as /WS value
@@ -4656,11 +4730,19 @@ async def start_session(
         base_url = ""
     web_runtime_probe: dict[str, Any] = {"attempted": False, "status": "not_applicable"}
     if base_url and initial_connection_mode == "ws":
-        web_runtime_probe = await _probe_web_runtime_before_start(base_url, username, password)
+        web_runtime_probe = await _probe_web_runtime_before_start(base_url, supplied_username, supplied_password)
         if web_runtime_probe.get("authentication_failed"):
             # No local 1C runtime/process has been started yet. Do not hide a
             # confirmed publication login rejection behind a later timeout.
             raise ValueError(str(web_runtime_probe.get("message") or "1C web authentication failed"))
+        selected_credential_index = web_runtime_probe.pop("_selected_credential_index", None)
+        if selected_credential_index is not None and not supplied_username and not supplied_password:
+            candidates = _credentials_store().matching_entries(base_url, account_id=credential_account_id)
+            selected = candidates[int(selected_credential_index)]
+            username = str(selected["username"])
+            password = str(selected["password"])
+            saved_credentials_used = True
+            saved_credentials_unverified = not bool(selected.get("verified", False))
     inferred_summary_rag_config = "" if summary_rag_config else _summary_rag_config_from_42clouds_url(base_url)
     effective_summary_rag_config = summary_rag_config or inferred_summary_rag_config
     resolved_version = version or None
@@ -5023,7 +5105,8 @@ async def _stop_session_impl(session_id: str = DEFAULT_SESSION, clean_data: bool
         return {"stopped": False, "reason": f"session {session_id!r} not found"}
     stopped: list[str] = []
     try:
-        await sess.bridge.call("disconnect_test_client", {})
+        # A hung manager must not delay teardown: all processes are killed below.
+        await sess.bridge.call("disconnect_test_client", {}, timeout=_STOP_DISCONNECT_TIMEOUT)
         stopped.append("test-client")
     except Exception:
         pass
@@ -5151,34 +5234,6 @@ def launch_manager(
         "pid": manager_proc.pid, "argv": argv,
         "websocket_url": sess.bridge.url, "ws_url": ws_url, "log_dir": str(log_dir),
     }
-
-
-@mcp.tool()
-def export_eventlog(
-    platform_dir: Annotated[str, "1C platform dir override"] = "",
-    eventlog_dir: Annotated[str, "Event log directory"] = "",
-    out_path: Annotated[str, "Output file path"] = "",
-    from_time: Annotated[str, "Start timestamp"] = "",
-    to_time: Annotated[str, "End timestamp"] = "",
-    fmt: Annotated[str, "Export format: json or xml"] = "json",
-    *,
-    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
-) -> dict[str, Any]:
-    """Export the 1C event log."""
-    sess = _session(session_id)
-    ibcmd = str(Path(platform_dir) / "ibcmd") if platform_dir else sess.ibcmd
-    if sess.runtime is not None and not eventlog_dir:
-        eventlog_path = sess.runtime.server.data_dir / "log-data"
-        log_dir = sess.runtime.log_dir
-    else:
-        eventlog_path = Path(eventlog_dir or str(Path.home() / ".1cv8/1C/1cv8/standalone-server/log-data"))
-        log_dir = sess.log_dir
-    if not out_path:
-        out = log_dir / f"eventlog_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{fmt}"
-    else:
-        out = Path(out_path)
-    exported = runtime.export_eventlog(ibcmd, eventlog_path, out, from_time or None, to_time or None, fmt)
-    return {"path": str(exported), "format": fmt, "eventlog_dir": str(eventlog_path)}
 
 
 def _credential_store_disabled_error() -> RuntimeError:
@@ -5311,6 +5366,12 @@ _EVENTLOG_ERROR_MARKERS = (
     "failed",
     "fail",
 )
+_ONEC_BSL_STARTUP_ERROR_MARKERS = (
+    "процедура или функция с указанным именем не определена",
+    "неопределена",
+    "modulemanager",
+    "модульменеджера",
+)
 
 
 def _is_placeholder_password(password: str) -> bool:
@@ -5336,25 +5397,46 @@ async def _probe_web_runtime_before_start(
     """
     if not _is_web_base_url(base_url):
         return {"attempted": False, "status": "not_web_publication"}
-    if not username or not password:
-        return {"attempted": False, "status": "credentials_not_provided"}
-    try:
-        result = await asyncio.to_thread(probe_web_runtime, base_url, username, password)
-        return {"attempted": True, "status": "ok", "runtime": result}
-    except WebRuntimeAuthenticationError as exc:
-        return {
-            "attempted": True,
-            "status": "authentication_failed",
-            "authentication_failed": True,
-            "message": str(exc),
-        }
-    except (WebRuntimeProbeError, requests.RequestException) as exc:
-        logging.info("Web runtime probe skipped for %s: %s", _normalize_base_url(base_url), exc)
+    candidates: list[tuple[str, str, str, int | None]] = []
+    if username or password:
+        candidates.append((username, password, "explicit", None))
+    elif _CREDENTIAL_STORE_ENABLED:
+        for index, entry in enumerate(_credentials_store().matching_entries(base_url, account_id=_current_account_id())):
+            candidates.append((entry["username"], entry["password"], "saved", index))
+    if not candidates:
+        candidates.append(("", "", "empty", None))
+
+    authentication_messages: list[str] = []
+    unavailable_messages: list[str] = []
+    for candidate_username, candidate_password, source, index in candidates:
+        try:
+            result = await asyncio.to_thread(probe_web_runtime, base_url, candidate_username, candidate_password)
+            response: dict[str, Any] = {
+                "attempted": True,
+                "status": "ok",
+                "runtime": result,
+                "credentials_source": source,
+            }
+            if index is not None:
+                response["_selected_credential_index"] = index
+            return response
+        except WebRuntimeAuthenticationError as exc:
+            authentication_messages.append(str(exc))
+        except (WebRuntimeProbeError, requests.RequestException) as exc:
+            logging.info("Web runtime probe skipped for %s: %s", _normalize_base_url(base_url), exc)
+            unavailable_messages.append(str(exc))
+    if unavailable_messages:
         return {
             "attempted": True,
             "status": "unavailable",
-            "message": str(exc),
+            "message": unavailable_messages[-1],
         }
+    return {
+        "attempted": True,
+        "status": "authentication_failed",
+        "authentication_failed": True,
+        "message": authentication_messages[-1] if authentication_messages else "1C web authentication failed",
+    }
 
 
 def _users_url_for_base_url(base_url: str) -> str:
@@ -5456,12 +5538,11 @@ def _decode_log_bytes(data: bytes) -> str:
                 return data.decode("utf-16-be")
             except UnicodeDecodeError:
                 pass
-    for encoding in ("utf-8-sig", "cp1251"):
-        try:
-            return data.decode(encoding)
-        except UnicodeDecodeError:
-            pass
-    return data.decode("utf-8", errors="replace")
+    try:
+        return data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        pass
+    return runtime.decode_8bit_cyrillic(data)
 
 
 def _tail_text_file(path: Path | str, *, max_lines: int = 80, max_chars: int = 20000) -> str:
@@ -5538,13 +5619,34 @@ def _client_runtime_for_eventlog(sess: SessionState, target_connection_mode: str
     return None
 
 
+def _client_ibsrv_state(rt: runtime.ManagerRuntime | None) -> str:
+    """Describe the autonomous server that serves the tested infobase (file mode)."""
+    if rt is None or (rt.server_process is None and not rt.extra.get("shared_key")):
+        return ""
+    pid = getattr(rt.server_process, "pid", 0) or int(rt.extra.get("shared_pid") or 0)
+    alive = _pid_is_running(pid) if pid else False
+    listening = runtime.is_port_listening(rt.server.address, rt.server.port) if rt.server.port else False
+    state = f"pid={pid or '?'}; running={alive}; listening {rt.server.address}:{rt.server.port}={listening}"
+    if not alive or not listening:
+        state += (
+            " — автономный сервер тестируемой базы остановился. Частая причина: файловая база уже "
+            "открыта в другом процессе (Конфигуратор, веб-публикация Apache/IIS, другой клиент)."
+        )
+    return state
+
+
 def _client_failure_diagnostics(sess: SessionState, error: Exception, target_connection_mode: str) -> RuntimeError:
     message = str(error)
     message = _append_file_tail(message, "Лог stdout/stderr клиента тестирования", sess.client_log_dir / "test_client_stdout.log")
     message = _append_file_tail(message, "Лог 1С /Out клиента тестирования", sess.client_log_dir / "test_client_1c_out.log")
     rt = _client_runtime_for_eventlog(sess, target_connection_mode)
-    diagnostics = _eventlog_errors_for_runtime(sess, rt, "client")
-    message = _append_eventlog_diagnostics(message, diagnostics, "Последние ошибки ЖР автономного сервера клиента тестирования")
+    if rt is not None and target_connection_mode == "file":
+        state = _client_ibsrv_state(rt)
+        if state:
+            message += f"\n\nАвтономный сервер тестируемой файловой базы: {state}"
+        message = _append_file_tail(message, "Лог ibsrv тестируемой файловой базы", rt.log_dir / "ibsrv.log", max_lines=20)
+    diagnostics = _eventlog_errors_for_runtime(sess, sess.runtime, "manager")
+    message = _append_eventlog_diagnostics(message, diagnostics, "Последние ошибки ЖР менеджера тестирования")
     return RuntimeError(message)
 
 
@@ -5562,6 +5664,15 @@ def _test_client_startup_error_from_logs(sess: SessionState) -> str:
     auth_lines = [line for line in text.splitlines() if _looks_like_auth_failure(line)]
     if auth_lines:
         return "\n".join(auth_lines[-20:])
+
+    # Compilation/runtime diagnostics in /Out often name neither "error" nor
+    # "ошибка". Preserve their source location and message for the MCP caller.
+    bsl_lines = [
+        line for line in text.splitlines()
+        if any(marker in line.lower() for marker in _ONEC_BSL_STARTUP_ERROR_MARKERS)
+    ]
+    if bsl_lines:
+        return "\n".join(bsl_lines[-20:])
 
     meaningful = _extract_error_lines(text, max_lines=20)
     if meaningful and any(marker in meaningful.lower() for marker in _EVENTLOG_ERROR_MARKERS):
@@ -5618,6 +5729,14 @@ async def _verify_manager_protocol(sess: SessionState) -> dict[str, Any]:
     return info
 
 
+_INFOBASE_LOCK_MARKERS = ("исключительной блокировки", "exclusive lock", "монопольн")
+
+
+def _is_infobase_exclusive_lock_error(text: str) -> bool:
+    lowered = text.lower()
+    return any(marker in lowered for marker in _INFOBASE_LOCK_MARKERS)
+
+
 async def _connect_test_client_impl(
     sess: SessionState,
     *,
@@ -5654,6 +5773,7 @@ async def _connect_test_client_impl(
     r_pass = password if password else sess.password
     r_port = port if port else sess.testclient_port
     r_onec = onec_path or sess.onec_thin
+    connection_fallback: dict[str, Any] | None = None
 
     if mode == "ws":
         if not r_value and sess.client_ibsrv_port:
@@ -5689,36 +5809,64 @@ async def _connect_test_client_impl(
         elif sess.file_client_runtime is not None:
             runtime.kill_process(sess.file_client_runtime.server_process, "ibsrv-file-client")
             sess.file_client_runtime = None
-        shared_file = _acquire_shared_file_server(
-            owner_session_id=sess.session_id,
-            kind="file",
-            platform_dir=sess.platform_dir,
-            ibcmd=sess.ibcmd,
-            ibsrv=sess.ibsrv,
-            db_path=db_path,
-            create_if_missing=False,
-            port_seed=f"file:{db_path.resolve()}",
-            server_name="mcpfileclient",
-        )
-        sess.file_client_ibsrv_port = shared_file.port
-        sess.shared_file_key = shared_file.key
-        sess.file_client_runtime = runtime.ManagerRuntime(
-            infobase=runtime.InfobaseSpec(db_path=shared_file.db_path),
-            server=runtime.StandaloneServerSpec(
-                address=shared_file.address,
-                port=shared_file.port,
-                name=shared_file.name,
-                data_dir=shared_file.data_dir,
-            ),
-            manager=runtime.TestManagerSpec(onec_path=sess.onec_thin),
-            server_process=shared_file.process,
-            log_dir=shared_file.log_dir,
-            extra={"target_connection_mode": "file", "shared_key": shared_file.key, "shared_refcount": len(shared_file.owners)},
-        )
-        r_base = str(db_path)
-        r_value = shared_file.base_url
-        mode = "ws"
-        target_connection_mode = "file"
+        try:
+            shared_file = _acquire_shared_file_server(
+                owner_session_id=sess.session_id,
+                kind="file",
+                platform_dir=sess.platform_dir,
+                ibcmd=sess.ibcmd,
+                ibsrv=sess.ibsrv,
+                db_path=db_path,
+                create_if_missing=False,
+                port_seed=f"file:{db_path.resolve()}",
+                server_name="mcpfileclient",
+            )
+        except RuntimeError as exc:
+            if not _is_infobase_exclusive_lock_error(str(exc)):
+                raise
+            shared_file = None
+            connection_fallback = {
+                "from": "file",
+                "to": "file-direct",
+                "reason": "infobase_exclusive_lock",
+                "message": (
+                    "ibsrv не смог открыть файловую базу монопольно (она открыта другим процессом: "
+                    "Конфигуратор, клиент 1С, веб-публикация). Клиент тестирования подключён к базе "
+                    "напрямую через /F."
+                ),
+                "ibsrv_error": str(exc),
+            }
+            logging.warning("start_session %s: %s", sess.session_id, connection_fallback["message"])
+        if shared_file is None:
+            r_base = str(db_path)
+            r_value = str(db_path)
+            mode = "file-direct"
+            target_connection_mode = "file-direct"
+        else:
+            sess.file_client_ibsrv_port = shared_file.port
+            sess.shared_file_key = shared_file.key
+            sess.file_client_runtime = runtime.ManagerRuntime(
+                infobase=runtime.InfobaseSpec(db_path=shared_file.db_path),
+                server=runtime.StandaloneServerSpec(
+                    address=shared_file.address,
+                    port=shared_file.port,
+                    name=shared_file.name,
+                    data_dir=shared_file.data_dir,
+                ),
+                manager=runtime.TestManagerSpec(onec_path=sess.onec_thin),
+                server_process=shared_file.process,
+                log_dir=shared_file.log_dir,
+                extra={
+                    "target_connection_mode": "file",
+                    "shared_key": shared_file.key,
+                    "shared_pid": shared_file.pid,
+                    "shared_refcount": len(shared_file.owners),
+                },
+            )
+            r_base = str(db_path)
+            r_value = shared_file.base_url
+            mode = "ws"
+            target_connection_mode = "file"
     elif mode == "server":
         if not r_value:
             raise ValueError("connection_value or base_url must contain server/infobase for connection_mode='server'")
@@ -5818,6 +5966,8 @@ async def _connect_test_client_impl(
         if isinstance(result, dict):
             timings["total_seconds"] = round(time.perf_counter() - start_monotonic, 3)
             result["_timings"] = timings
+            if connection_fallback:
+                result["connection_fallback"] = connection_fallback
     except Exception as exc:
         runtime.kill_process(sess.test_client_process, "test-client")
         sess.test_client_process = None
@@ -10471,24 +10621,47 @@ def _capture_hidden_desktop_screenshot(
 ) -> tuple[dict[str, Any] | None, str, str]:
     """Capture a 1C window from an Answer42 hidden Windows desktop.
 
-    A hidden desktop is never composed on screen, so there is no "whole
-    display" bitmap: the fallback is the largest visible window there.
+    A hidden desktop is never composed on screen, so the picture is composed
+    from the visible top-level windows there.  ``window=True`` keeps the main
+    1C window and the other windows of the same process (floating forms opened
+    without an owner, dialogs); ``window=False`` keeps every visible window.
     """
+    windows = [
+        w for w in win_desktop.list_windows(desktop)
+        if w["width"] >= _SCREENSHOT_MIN_WINDOW_SIDE and w["height"] >= _SCREENSHOT_MIN_WINDOW_SIDE
+    ]
+    if not windows:
+        raise RuntimeError(f"Cannot capture screenshot: no visible windows on hidden desktop {desktop!r}")
     geometry = _active_external_1c_window_geometry(display=desktop) if window else None
     fallback = ""
     fallback_reason = ""
-    if geometry is None:
-        windows = [w for w in win_desktop.list_windows(desktop) if w["width"] >= 100 and w["height"] >= 100]
-        if not windows:
-            raise RuntimeError(f"Cannot capture screenshot: no visible windows on hidden desktop {desktop!r}")
-        largest = max(windows, key=lambda w: w["width"] * w["height"])
-        geometry = {key: largest[key] for key in ("left", "top", "width", "height", "title", "hwnd")}
-        geometry["desktop"] = desktop
-        if window:
+    selected = windows
+    if window:
+        main = next((w for w in windows if geometry and w["hwnd"] == int(geometry.get("hwnd") or 0)), None)
+        if main is None:
+            main = max(windows, key=lambda w: w["width"] * w["height"])
+            geometry = {key: main[key] for key in ("left", "top", "width", "height", "title", "hwnd")}
+            geometry["desktop"] = desktop
             fallback = "largest_window"
             fallback_reason = "1C window was not detected on the hidden desktop; captured the largest window instead"
-    win_desktop.capture_window_png(desktop, int(geometry["hwnd"]), int(geometry["width"]), int(geometry["height"]), output_path)
-    return (geometry if window else None), fallback, fallback_reason
+        selected = [w for w in windows if w["pid"] == main["pid"]]
+    canvas = _union_rect(selected)
+    win_desktop.capture_windows_png(desktop, selected, canvas, output_path)
+    if geometry is not None:
+        geometry = dict(geometry)
+        geometry["windows"] = [{"title": w["title"], "hwnd": w["hwnd"]} for w in selected]
+    return geometry, fallback, fallback_reason
+
+
+_SCREENSHOT_MIN_WINDOW_SIDE = 60
+
+
+def _union_rect(windows: list[dict[str, Any]]) -> dict[str, int]:
+    left = min(int(w["left"]) for w in windows)
+    top = min(int(w["top"]) for w in windows)
+    right = max(int(w["left"]) + int(w["width"]) for w in windows)
+    bottom = max(int(w["top"]) + int(w["height"]) for w in windows)
+    return {"left": left, "top": top, "width": right - left, "height": bottom - top}
 
 
 @mcp.tool()
