@@ -73,7 +73,7 @@ from mcp_1c.server import (
 from mcp_1c.server import (
     main as mcp_main,
 )
-from mcp_1c.webclient_probe import WebRuntimeAuthenticationError
+from mcp_1c.webclient_probe import WebRuntimeAuthenticationError, WebRuntimeProbeError
 
 EXPECTED_NEW_TOOLS = {
     "wait_object",
@@ -4151,6 +4151,30 @@ def test_web_runtime_probe_tries_empty_credentials_when_store_has_no_match(monke
     assert attempts == [("", "")]
     assert result["status"] == "ok"
     assert result["credentials_source"] == "empty"
+
+
+def test_web_runtime_probe_continues_after_an_unavailable_saved_candidate(monkeypatch):
+    from mcp_1c import server
+
+    class Store:
+        def matching_entries(self, _base_url, account_id=None):
+            return [
+                {"username": "first", "password": "first-password"},
+                {"username": "second", "password": "second-password"},
+            ]
+
+    def probe(_base_url, username, _password):
+        if username == "first":
+            raise WebRuntimeProbeError("temporary protocol error")
+        return {"found": True}
+
+    monkeypatch.setattr(server, "_credentials_store", lambda: Store())
+    monkeypatch.setattr(server, "probe_web_runtime", probe)
+
+    result = asyncio.run(_probe_web_runtime_before_start("https://example.test/ib", "", ""))
+
+    assert result["status"] == "ok"
+    assert result["_selected_credential_index"] == 1
 
 
 def test_web_runtime_probe_skips_non_web_target():

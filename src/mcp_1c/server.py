@@ -5398,6 +5398,7 @@ async def _probe_web_runtime_before_start(
         candidates.append(("", "", "empty", None))
 
     authentication_messages: list[str] = []
+    unavailable_messages: list[str] = []
     for candidate_username, candidate_password, source, index in candidates:
         try:
             result = await asyncio.to_thread(probe_web_runtime, base_url, candidate_username, candidate_password)
@@ -5414,7 +5415,13 @@ async def _probe_web_runtime_before_start(
             authentication_messages.append(str(exc))
         except (WebRuntimeProbeError, requests.RequestException) as exc:
             logging.info("Web runtime probe skipped for %s: %s", _normalize_base_url(base_url), exc)
-            return {"attempted": True, "status": "unavailable", "message": str(exc)}
+            unavailable_messages.append(str(exc))
+    if unavailable_messages:
+        return {
+            "attempted": True,
+            "status": "unavailable",
+            "message": unavailable_messages[-1],
+        }
     return {
         "attempted": True,
         "status": "authentication_failed",
