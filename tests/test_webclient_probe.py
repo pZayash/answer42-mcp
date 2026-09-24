@@ -109,6 +109,15 @@ def test_login_treats_invalid_password_proof_crc_as_authentication_failure(monke
         probe._login(FakeSession(), bootstrap, "user", "password", 5.0)
 
 
+def test_json_body_accepts_1c_start_info_with_javascript_undefined():
+    class Response:
+        content = b'{"response":{"presentation":undefined,"confName":"MS"}}'
+
+    assert probe._json_body(Response()) == {
+        "response": {"presentation": None, "confName": "MS"}
+    }
+
+
 def test_moscow_tz_falls_back_to_fixed_offset_without_tz_database(monkeypatch):
     def missing_zone(key: str):
         raise probe.ZoneInfoNotFoundError(f"No time zone found with key {key}")
