@@ -135,6 +135,34 @@ def test_credentials_wildcard_match(tmp_path):
     }
 
 
+def test_credentials_matching_entries_returns_all_exact_and_wildcard_candidates(tmp_path):
+    path = tmp_path / "credentials.json"
+    path.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "accounts": {
+                    "default": {
+                        "entries": [
+                            {"url": "https://*.example.invalid/*", "username": "wild", "password": "wild-pass"},
+                            {"url": "https://dev.example.invalid/infobase", "username": "exact", "password": "exact-pass"},
+                            {"url": "https://other.example.invalid/infobase", "username": "other", "password": "other-pass"},
+                        ]
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    matches = CredentialsStore(path).matching_entries("https://dev.example.invalid/infobase")
+
+    assert [(entry["username"], entry["password"]) for entry in matches] == [
+        ("exact", "exact-pass"),
+        ("wild", "wild-pass"),
+    ]
+
+
 def test_credentials_upsert_creates_file_and_returns_bool(tmp_path):
     path = tmp_path / "nested" / "credentials.json"
     store = CredentialsStore(path)

@@ -4617,6 +4617,8 @@ async def start_session(
     start_monotonic = time.perf_counter()
     stage_monotonic = start_monotonic
     timings: dict[str, float] = {}
+    supplied_username = username
+    supplied_password = password
 
     def mark_stage(name: str) -> None:
         nonlocal stage_monotonic
@@ -4656,11 +4658,17 @@ async def start_session(
         base_url = ""
     web_runtime_probe: dict[str, Any] = {"attempted": False, "status": "not_applicable"}
     if base_url and initial_connection_mode == "ws":
-        web_runtime_probe = await _probe_web_runtime_before_start(base_url, username, password)
+        web_runtime_probe = await _probe_web_runtime_before_start(base_url, supplied_username, supplied_password)
         if web_runtime_probe.get("authentication_failed"):
             # No local 1C runtime/process has been started yet. Do not hide a
             # confirmed publication login rejection behind a later timeout.
             raise ValueError(str(web_runtime_probe.get("message") or "1C web authentication failed"))
+        selected_credential_index = web_runtime_probe.pop("_selected_credential_index", None)
+        if selected_credential_index is not None and not supplied_username and not supplied_password:
+            candidates = _credentials_store().matching_entries(base_url, account_id=credential_account_id)
+            selected = candidates[int(selected_credential_index)]
+            username = str(selected["username"])
+            password = str(selected["password"])
     inferred_summary_rag_config = "" if summary_rag_config else _summary_rag_config_from_42clouds_url(base_url)
     effective_summary_rag_config = summary_rag_config or inferred_summary_rag_config
     resolved_version = version or None
@@ -5336,25 +5344,39 @@ async def _probe_web_runtime_before_start(
     """
     if not _is_web_base_url(base_url):
         return {"attempted": False, "status": "not_web_publication"}
-    if not username or not password:
-        return {"attempted": False, "status": "credentials_not_provided"}
-    try:
-        result = await asyncio.to_thread(probe_web_runtime, base_url, username, password)
-        return {"attempted": True, "status": "ok", "runtime": result}
-    except WebRuntimeAuthenticationError as exc:
-        return {
-            "attempted": True,
-            "status": "authentication_failed",
-            "authentication_failed": True,
-            "message": str(exc),
-        }
-    except (WebRuntimeProbeError, requests.RequestException) as exc:
-        logging.info("Web runtime probe skipped for %s: %s", _normalize_base_url(base_url), exc)
-        return {
-            "attempted": True,
-            "status": "unavailable",
-            "message": str(exc),
-        }
+    candidates: list[tuple[str, str, str, int | None]] = []
+    if username or password:
+        candidates.append((username, password, "explicit", None))
+    elif _CREDENTIAL_STORE_ENABLED:
+        for index, entry in enumerate(_credentials_store().matching_entries(base_url, account_id=_current_account_id())):
+            candidates.append((entry["username"], entry["password"], "saved", index))
+    if not candidates:
+        candidates.append(("", "", "empty", None))
+
+    authentication_messages: list[str] = []
+    for candidate_username, candidate_password, source, index in candidates:
+        try:
+            result = await asyncio.to_thread(probe_web_runtime, base_url, candidate_username, candidate_password)
+            response: dict[str, Any] = {
+                "attempted": True,
+                "status": "ok",
+                "runtime": result,
+                "credentials_source": source,
+            }
+            if index is not None:
+                response["_selected_credential_index"] = index
+            return response
+        except WebRuntimeAuthenticationError as exc:
+            authentication_messages.append(str(exc))
+        except (WebRuntimeProbeError, requests.RequestException) as exc:
+            logging.info("Web runtime probe skipped for %s: %s", _normalize_base_url(base_url), exc)
+            return {"attempted": True, "status": "unavailable", "message": str(exc)}
+    return {
+        "attempted": True,
+        "status": "authentication_failed",
+        "authentication_failed": True,
+        "message": authentication_messages[-1] if authentication_messages else "1C web authentication failed",
+    }
 
 
 def _users_url_for_base_url(base_url: str) -> str:

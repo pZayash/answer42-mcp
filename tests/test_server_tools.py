@@ -4063,6 +4063,58 @@ def test_web_runtime_probe_reports_authentication_failure(monkeypatch):
     assert "incorrect user or password" in result["message"]
 
 
+def test_web_runtime_probe_tries_saved_exact_and_wildcard_credentials(monkeypatch):
+    from mcp_1c import server
+
+    attempts = []
+
+    class Store:
+        def matching_entries(self, base_url, account_id=None):
+            assert base_url == "https://example.test/ib"
+            return [
+                {"username": "exact", "password": "exact-password"},
+                {"username": "wild", "password": "wild-password"},
+            ]
+
+    def probe(_base_url, username, password):
+        attempts.append((username, password))
+        if username == "exact":
+            raise WebRuntimeAuthenticationError("incorrect user or password")
+        return {"found": True}
+
+    monkeypatch.setattr(server, "_credentials_store", lambda: Store())
+    monkeypatch.setattr(server, "probe_web_runtime", probe)
+
+    result = asyncio.run(_probe_web_runtime_before_start("https://example.test/ib", "", ""))
+
+    assert attempts == [("exact", "exact-password"), ("wild", "wild-password")]
+    assert result["status"] == "ok"
+    assert result["credentials_source"] == "saved"
+
+
+def test_web_runtime_probe_tries_empty_credentials_when_store_has_no_match(monkeypatch):
+    from mcp_1c import server
+
+    attempts = []
+
+    class Store:
+        def matching_entries(self, _base_url, account_id=None):
+            return []
+
+    def probe(_base_url, username, password):
+        attempts.append((username, password))
+        return {"found": True}
+
+    monkeypatch.setattr(server, "_credentials_store", lambda: Store())
+    monkeypatch.setattr(server, "probe_web_runtime", probe)
+
+    result = asyncio.run(_probe_web_runtime_before_start("https://example.test/ib", "", ""))
+
+    assert attempts == [("", "")]
+    assert result["status"] == "ok"
+    assert result["credentials_source"] == "empty"
+
+
 def test_web_runtime_probe_skips_non_web_target():
     assert asyncio.run(_probe_web_runtime_before_start("server/infobase", "user", "password")) == {
         "attempted": False,
