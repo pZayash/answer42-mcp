@@ -5348,6 +5348,12 @@ _EVENTLOG_ERROR_MARKERS = (
     "failed",
     "fail",
 )
+_ONEC_BSL_STARTUP_ERROR_MARKERS = (
+    "процедура или функция с указанным именем не определена",
+    "неопределена",
+    "modulemanager",
+    "модульменеджера",
+)
 
 
 def _is_placeholder_password(password: str) -> bool:
@@ -5613,6 +5619,15 @@ def _test_client_startup_error_from_logs(sess: SessionState) -> str:
     auth_lines = [line for line in text.splitlines() if _looks_like_auth_failure(line)]
     if auth_lines:
         return "\n".join(auth_lines[-20:])
+
+    # Compilation/runtime diagnostics in /Out often name neither "error" nor
+    # "ошибка". Preserve their source location and message for the MCP caller.
+    bsl_lines = [
+        line for line in text.splitlines()
+        if any(marker in line.lower() for marker in _ONEC_BSL_STARTUP_ERROR_MARKERS)
+    ]
+    if bsl_lines:
+        return "\n".join(bsl_lines[-20:])
 
     meaningful = _extract_error_lines(text, max_lines=20)
     if meaningful and any(marker in meaningful.lower() for marker in _EVENTLOG_ERROR_MARKERS):
