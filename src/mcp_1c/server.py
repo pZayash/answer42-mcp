@@ -3398,7 +3398,7 @@ def _compact_start_test_client_result(result: Any, *, include_timings: bool = Fa
     keep_keys = (
         "connected", "base_url", "connection_mode", "connection_value",
         "target_connection_mode", "port", "client_pid", "client_log",
-        "client_stdout_log", "auto_maximize", "auto_maximize_error",
+        "client_stdout_log", "auto_maximize", "auto_maximize_error", "connection_fallback",
     )
     compact = {key: _copy_compact_object(result[key]) for key in keep_keys if key in result and result.get(key) not in (None, "", [], {})}
     if isinstance(compact.get("auto_maximize"), dict):
@@ -5729,6 +5729,14 @@ async def _verify_manager_protocol(sess: SessionState) -> dict[str, Any]:
     return info
 
 
+_INFOBASE_LOCK_MARKERS = ("исключительной блокировки", "exclusive lock", "монопольн")
+
+
+def _is_infobase_exclusive_lock_error(text: str) -> bool:
+    lowered = text.lower()
+    return any(marker in lowered for marker in _INFOBASE_LOCK_MARKERS)
+
+
 async def _connect_test_client_impl(
     sess: SessionState,
     *,
@@ -5765,6 +5773,7 @@ async def _connect_test_client_impl(
     r_pass = password if password else sess.password
     r_port = port if port else sess.testclient_port
     r_onec = onec_path or sess.onec_thin
+    connection_fallback: dict[str, Any] | None = None
 
     if mode == "ws":
         if not r_value and sess.client_ibsrv_port:
@@ -5800,41 +5809,64 @@ async def _connect_test_client_impl(
         elif sess.file_client_runtime is not None:
             runtime.kill_process(sess.file_client_runtime.server_process, "ibsrv-file-client")
             sess.file_client_runtime = None
-        shared_file = _acquire_shared_file_server(
-            owner_session_id=sess.session_id,
-            kind="file",
-            platform_dir=sess.platform_dir,
-            ibcmd=sess.ibcmd,
-            ibsrv=sess.ibsrv,
-            db_path=db_path,
-            create_if_missing=False,
-            port_seed=f"file:{db_path.resolve()}",
-            server_name="mcpfileclient",
-        )
-        sess.file_client_ibsrv_port = shared_file.port
-        sess.shared_file_key = shared_file.key
-        sess.file_client_runtime = runtime.ManagerRuntime(
-            infobase=runtime.InfobaseSpec(db_path=shared_file.db_path),
-            server=runtime.StandaloneServerSpec(
-                address=shared_file.address,
-                port=shared_file.port,
-                name=shared_file.name,
-                data_dir=shared_file.data_dir,
-            ),
-            manager=runtime.TestManagerSpec(onec_path=sess.onec_thin),
-            server_process=shared_file.process,
-            log_dir=shared_file.log_dir,
-            extra={
-                "target_connection_mode": "file",
-                "shared_key": shared_file.key,
-                "shared_pid": shared_file.pid,
-                "shared_refcount": len(shared_file.owners),
-            },
-        )
-        r_base = str(db_path)
-        r_value = shared_file.base_url
-        mode = "ws"
-        target_connection_mode = "file"
+        try:
+            shared_file = _acquire_shared_file_server(
+                owner_session_id=sess.session_id,
+                kind="file",
+                platform_dir=sess.platform_dir,
+                ibcmd=sess.ibcmd,
+                ibsrv=sess.ibsrv,
+                db_path=db_path,
+                create_if_missing=False,
+                port_seed=f"file:{db_path.resolve()}",
+                server_name="mcpfileclient",
+            )
+        except RuntimeError as exc:
+            if not _is_infobase_exclusive_lock_error(str(exc)):
+                raise
+            shared_file = None
+            connection_fallback = {
+                "from": "file",
+                "to": "file-direct",
+                "reason": "infobase_exclusive_lock",
+                "message": (
+                    "ibsrv не смог открыть файловую базу монопольно (она открыта другим процессом: "
+                    "Конфигуратор, клиент 1С, веб-публикация). Клиент тестирования подключён к базе "
+                    "напрямую через /F."
+                ),
+                "ibsrv_error": str(exc),
+            }
+            logging.warning("start_session %s: %s", sess.session_id, connection_fallback["message"])
+        if shared_file is None:
+            r_base = str(db_path)
+            r_value = str(db_path)
+            mode = "file-direct"
+            target_connection_mode = "file-direct"
+        else:
+            sess.file_client_ibsrv_port = shared_file.port
+            sess.shared_file_key = shared_file.key
+            sess.file_client_runtime = runtime.ManagerRuntime(
+                infobase=runtime.InfobaseSpec(db_path=shared_file.db_path),
+                server=runtime.StandaloneServerSpec(
+                    address=shared_file.address,
+                    port=shared_file.port,
+                    name=shared_file.name,
+                    data_dir=shared_file.data_dir,
+                ),
+                manager=runtime.TestManagerSpec(onec_path=sess.onec_thin),
+                server_process=shared_file.process,
+                log_dir=shared_file.log_dir,
+                extra={
+                    "target_connection_mode": "file",
+                    "shared_key": shared_file.key,
+                    "shared_pid": shared_file.pid,
+                    "shared_refcount": len(shared_file.owners),
+                },
+            )
+            r_base = str(db_path)
+            r_value = shared_file.base_url
+            mode = "ws"
+            target_connection_mode = "file"
     elif mode == "server":
         if not r_value:
             raise ValueError("connection_value or base_url must contain server/infobase for connection_mode='server'")
@@ -5934,6 +5966,8 @@ async def _connect_test_client_impl(
         if isinstance(result, dict):
             timings["total_seconds"] = round(time.perf_counter() - start_monotonic, 3)
             result["_timings"] = timings
+            if connection_fallback:
+                result["connection_fallback"] = connection_fallback
     except Exception as exc:
         runtime.kill_process(sess.test_client_process, "test-client")
         sess.test_client_process = None

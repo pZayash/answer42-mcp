@@ -257,3 +257,66 @@ def test_failed_start_releases_shared_file_server_instead_of_killing_it(tmp_path
     assert "ibsrv-file-client" not in killed
     assert sess.shared_file_key == ""
     assert sess.session_id not in _SESSIONS
+
+
+def test_locked_file_infobase_falls_back_to_direct_file_connection(tmp_path, monkeypatch):
+    """ibsrv needs an exclusive lock; a base opened elsewhere is still usable via /F."""
+    db_path = tmp_path / "bp"
+    db_path.mkdir()
+    sess = SessionState(
+        session_id="unit-fallback", display="", platform_dir=tmp_path, ws_port=1, ibsrv_port=2,
+        testclient_port=3, data_dir=tmp_path / "data",
+    )
+    launched = {}
+
+    async def fake_ready(*args, **kwargs):
+        return None
+
+    async def fake_protocol(sess):
+        return {}
+
+    async def fake_call(method, params, timeout=None):
+        launched["attach"] = params
+        return {"connected": True, "connection_mode": params["connection_mode"]}
+
+    def locked(**kwargs):
+        raise RuntimeError(
+            "ibsrv failed to start on 127.0.0.1:9304: ibsrv exited with code 4294967295.\n"
+            "[FATAL] Ошибка исключительной блокировки информационной базы."
+        )
+
+    class FakeProc:
+        pid = 777
+
+        def poll(self):
+            return None
+
+    def fake_start(argv, **kwargs):
+        launched["argv"] = argv
+        return FakeProc()
+
+    monkeypatch.setattr(server, "_wait_for_bridge_connected", fake_ready)
+    monkeypatch.setattr(server, "_verify_manager_protocol", fake_protocol)
+    monkeypatch.setattr(server, "_wait_for_test_client_ready", fake_ready)
+    monkeypatch.setattr(server, "_acquire_shared_file_server", locked)
+    monkeypatch.setattr(server, "_lookup_credentials", lambda base: None)
+    monkeypatch.setattr(server, "_snapshot_for_base_url", lambda base: "")
+    monkeypatch.setattr(server.runtime, "start_test_client", fake_start)
+    monkeypatch.setattr(sess.bridge, "call", fake_call)
+
+    _SESSIONS[sess.session_id] = sess
+    try:
+        result = asyncio.run(
+            server._connect_test_client_impl(sess, base_url=str(db_path), connection_value=str(db_path))
+        )
+    finally:
+        _SESSIONS.pop(sess.session_id, None)
+
+    assert launched["attach"]["connection_mode"] == "file-direct"
+    assert launched["attach"]["target_connection_mode"] == "file-direct"
+    assert any(str(db_path) in arg for arg in launched["argv"])
+    assert result["connection_fallback"]["reason"] == "infobase_exclusive_lock"
+    assert "исключительной блокировки" in result["connection_fallback"]["ibsrv_error"]
+    assert sess.shared_file_key == ""
+    compact = server._compact_start_test_client_result(result)
+    assert compact["connection_fallback"]["to"] == "file-direct"
