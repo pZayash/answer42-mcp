@@ -92,6 +92,23 @@ def test_probe_does_not_attempt_logout_when_login_fails(monkeypatch):
         probe.probe_web_runtime("https://host/base", "user", "password")
 
 
+def test_login_treats_invalid_password_proof_crc_as_authentication_failure(monkeypatch):
+    bootstrap = probe._Bootstrap("https://host/base/", "ru_RU", "8.5")
+    responses = [
+        (FakeResponse(status_code=402, payload={"exception": {"seanceID": "sid"}}), {"exception": {"seanceID": "sid"}}),
+        (FakeResponse(payload={"cred": "challenge"}), {"cred": "challenge"}),
+        (FakeResponse(payload={"cred": "proof"}), {"cred": "proof"}),
+    ]
+
+    monkeypatch.setattr(probe, "_post_json", lambda *_args, **_kwargs: responses.pop(0))
+    monkeypatch.setattr(probe, "_outer_decrypt", lambda _value: b"challenge")
+    monkeypatch.setattr(probe, "_verify_crc", lambda value, message: (_ for _ in ()).throw(probe.WebRuntimeProbeError(message)) if value == b"proof" else b"\0" * 20)
+    monkeypatch.setattr(probe.base64, "b64decode", lambda _value: b"proof")
+
+    with pytest.raises(probe.WebRuntimeAuthenticationError, match="incorrect user or password"):
+        probe._login(FakeSession(), bootstrap, "user", "password", 5.0)
+
+
 def test_moscow_tz_falls_back_to_fixed_offset_without_tz_database(monkeypatch):
     def missing_zone(key: str):
         raise probe.ZoneInfoNotFoundError(f"No time zone found with key {key}")

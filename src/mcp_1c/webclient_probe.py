@@ -196,6 +196,13 @@ def _login(
         key_size = reply[0]
         encrypted_login_key = reply[1 : 1 + key_size]
         login_key = _decrypt(encrypted_login_key, proof_key, _INNER_IV)
+    except WebRuntimeProbeError as exc:
+        # Some 1C web publications signal an invalid password only through a
+        # malformed encrypted proof instead of an HTTP 401/403. Treat it as an
+        # authentication rejection so callers can try the next stored match.
+        if "invalid password-proof CRC" in str(exc):
+            raise WebRuntimeAuthenticationError("1C web authentication failed: incorrect user or password") from exc
+        raise
     except (IndexError, KeyError, ValueError, TypeError) as exc:
         raise WebRuntimeProbeError("1C web authentication returned an unsupported password-proof response") from exc
 
