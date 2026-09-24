@@ -4654,11 +4654,18 @@ async def start_session(
         now = time.perf_counter()
         timings[f"{name}_seconds"] = round(now - stage_monotonic, 3)
         stage_monotonic = now
-    credential_ref = _resolve_credential_reference(base_url)
+    input_looks_like_url = bool(re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", str(base_url or "")))
+    # A URL without explicitly supplied credentials is resolved by the web
+    # probe below.  It must try every exact/wildcard candidate and retain the
+    # one that authenticated, rather than preselecting the first match here.
+    credential_ref = (
+        None
+        if input_looks_like_url and not username and not password
+        else _resolve_credential_reference(base_url)
+    )
     credential_account_id = _current_account_id()
     saved_credentials_used = False
     saved_credentials_unverified = False
-    input_looks_like_url = bool(re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", str(base_url or "")))
     if credential_ref is not None:
         # For saved titles/aliases, replace title -> real URL.  For URL/wildcard matches,
         # keep the original requested URL; using the wildcard pattern itself as /WS value
