@@ -6,8 +6,10 @@ from pathlib import Path
 
 import pytest
 
+from mcp_1c import os_support
 from mcp_1c.bridge import _bridge_error_text
 from mcp_1c.protocol import MANAGER_PROTOCOL_VERSION, BridgeRequest, BridgeResponse
+from mcp_1c.server import _decode_log_bytes
 
 
 def _bsl_function_body(module: str, name: str) -> str:
@@ -466,8 +468,8 @@ def _run_1c_command(argv: list[str], *, timeout: int = 300, input_text: str | No
 
 def test_manager_cf_passes_1c_configurator_syntax_check(tmp_path):
     platform_dir = Path(os.getenv("ONEC_PLATFORM_DIR") or os.getenv("PLATFORM_DIR") or "/opt/1cv8/x86_64/8.5.1.1150")
-    ibcmd = platform_dir / "ibcmd"
-    onec = platform_dir / "1cv8"
+    ibcmd = platform_dir / os_support.executable_name("ibcmd")
+    onec = platform_dir / os_support.executable_name("1cv8")
     if not ibcmd.exists() or not onec.exists():
         pytest.skip(f"1C platform tools not found in {platform_dir}")
 
@@ -512,7 +514,8 @@ def test_manager_cf_passes_1c_configurator_syntax_check(tmp_path):
         designer_cmd = ["xvfb-run", "-a", *designer_cmd]
 
     check = _run_1c_command(designer_cmd, timeout=300)
-    check_log = log_path.read_text(encoding="utf-8", errors="replace") if log_path.exists() else ""
+    # Windows Designer writes /Out in UTF-8 with BOM or in the ANSI code page.
+    check_log = _decode_log_bytes(log_path.read_bytes()) if log_path.exists() else ""
     assert check.returncode == 0, check.stdout + check.stderr + check_log
     assert "Синтаксических ошибок не обнаружено" in check_log
 
