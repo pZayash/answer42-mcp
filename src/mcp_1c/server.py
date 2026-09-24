@@ -27,6 +27,7 @@ from urllib.parse import parse_qs, unquote, urlsplit, urlunsplit
 import requests
 from mcp.server import MCPServer
 from mcp.server.lowlevel import NotificationOptions
+from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 from mcp.server.mcpserver.resources import FileResource
 from mcp.server.subscriptions import ToolsListChanged
 from starlette.responses import FileResponse, PlainTextResponse
@@ -163,7 +164,7 @@ _METADATA_OBJECTS_CACHE: dict[str, dict[str, Any]] = {}
 
 TOOL_PROFILE_GROUPS: dict[str, set[str]] = {
     "sessions": {
-        "sessions_list", "session_status", "start_session", "stop_session", "export_eventlog",
+        "sessions_list", "session_status", "start_session", "stop_session",
         "credentials_check", "credentials_save", "credentials_remove", "credentials_list", "credentials_titles",
     },
     "windows": {"active_window", "windows_list", "activate_window", "goto_start_page", "goto_previous_window", "goto_next_window"},
@@ -1592,22 +1593,33 @@ async def _global_orphan_reaper_loop(interval_seconds: float = 60.0) -> None:
         await asyncio.sleep(interval_seconds)
 
 
+_FAILED_START_DISCONNECT_TIMEOUT = 5.0
+_STOP_DISCONNECT_TIMEOUT = float(os.getenv("ONEC_MCP_STOP_DISCONNECT_TIMEOUT", "15"))
+
+
 async def _cleanup_failed_start_session(sess: SessionState, reason: str) -> None:
     logging.info("Cleaning failed start_session %s: %s", sess.session_id, reason)
-    try:
-        await sess.bridge.call("disconnect_test_client", {})
-    except Exception:
-        pass
+    # The manager may still be busy with the failed attach (1C retries the
+    # test-client connection for minutes); everything is killed below anyway,
+    # so do not let a polite disconnect delay the error report.
+    with suppress(Exception):
+        await sess.bridge.call("disconnect_test_client", {}, timeout=_FAILED_START_DISCONNECT_TIMEOUT)
     runtime.kill_process(sess.test_client_process, "test-client")
     sess.test_client_process = None
-    for rt, manager_label, server_label in (
-        (sess.runtime, "test-manager", "ibsrv"),
-        (sess.client_runtime, "test-manager-client", "ibsrv-client"),
-        (sess.file_client_runtime, "test-manager-file-client", "ibsrv-file-client"),
+    for rt, manager_label, server_label, shared_key in (
+        (sess.runtime, "test-manager", "ibsrv", ""),
+        (sess.client_runtime, "test-manager-client", "ibsrv-client", sess.shared_client_key),
+        (sess.file_client_runtime, "test-manager-file-client", "ibsrv-file-client", sess.shared_file_key),
     ):
         if rt is not None:
             runtime.kill_process(rt.manager_process, manager_label)
-            runtime.kill_process(rt.server_process, server_label)
+            if shared_key:
+                # Shared autonomous servers may serve other sessions: drop only our ref.
+                _release_shared_file_server(shared_key, sess.session_id)
+            else:
+                runtime.kill_process(rt.server_process, server_label)
+    sess.shared_client_key = ""
+    sess.shared_file_key = ""
     try:
         await sess.bridge.stop()
     except Exception:
@@ -3393,7 +3405,7 @@ def _compact_start_test_client_result(result: Any, *, include_timings: bool = Fa
     if isinstance(maximized, dict):
         compact_maximized = {
             key: _copy_compact_object(maximized[key])
-            for key in ("maximized", "method", "errors")
+            for key in ("maximized", "method", "errors", "skipped")
             if key in maximized and maximized.get(key) not in (None, "", [], {})
         }
         if maximized.get("window") not in (None, "", [], {}):
@@ -3734,6 +3746,27 @@ def _configure_tool_logging(log_path: str | Path) -> None:
 
 
 _TOOL_CALL_WRAPPER_INSTALLED = False
+_TOOL_ERROR_MAX_CHARS = int(os.getenv("ONEC_MCP_TOOL_ERROR_MAX_CHARS", "20000"))
+
+
+def _visible_tool_error(name: str, exc: UnexpectedToolError) -> ToolError:
+    """Turn an SDK-masked tool crash into a ToolError that carries the real cause.
+
+    The MCP SDK hides the text of any exception other than ToolError and
+    returns only ``Error executing tool <name>``.  Answer42 tools raise plain
+    RuntimeError/ValueError/BridgeError with 1C diagnostics (ibsrv log tails,
+    ErrorWindow text), which the caller needs to see.
+    """
+    cause: BaseException = exc
+    while isinstance(cause, UnexpectedToolError) and cause.__cause__ is not None:
+        cause = cause.__cause__
+    if cause is exc:
+        return ToolError(str(exc))
+    logging.getLogger(__name__).error("Tool %s failed", name, exc_info=cause)
+    detail = str(cause).strip() or repr(cause)
+    if len(detail) > _TOOL_ERROR_MAX_CHARS:
+        detail = detail[:_TOOL_ERROR_MAX_CHARS] + "\n<...truncated>"
+    return ToolError(f"Error executing tool {name}: {type(cause).__name__}: {detail}")
 
 
 def _install_tool_call_logger() -> None:
@@ -3767,6 +3800,10 @@ def _install_tool_call_logger() -> None:
             result = await original(*args, **kwargs)
             _log_tool_call(session_id, name, params, result, None, time.monotonic() - start)
             return result
+        except UnexpectedToolError as exc:
+            visible = _visible_tool_error(name, exc)
+            _log_tool_call(session_id, name, params, None, str(visible), time.monotonic() - start)
+            raise visible from exc.__cause__
         except Exception as exc:
             _log_tool_call(session_id, name, params, None, str(exc), time.monotonic() - start)
             raise
@@ -5023,7 +5060,8 @@ async def _stop_session_impl(session_id: str = DEFAULT_SESSION, clean_data: bool
         return {"stopped": False, "reason": f"session {session_id!r} not found"}
     stopped: list[str] = []
     try:
-        await sess.bridge.call("disconnect_test_client", {})
+        # A hung manager must not delay teardown: all processes are killed below.
+        await sess.bridge.call("disconnect_test_client", {}, timeout=_STOP_DISCONNECT_TIMEOUT)
         stopped.append("test-client")
     except Exception:
         pass
@@ -5151,34 +5189,6 @@ def launch_manager(
         "pid": manager_proc.pid, "argv": argv,
         "websocket_url": sess.bridge.url, "ws_url": ws_url, "log_dir": str(log_dir),
     }
-
-
-@mcp.tool()
-def export_eventlog(
-    platform_dir: Annotated[str, "1C platform dir override"] = "",
-    eventlog_dir: Annotated[str, "Event log directory"] = "",
-    out_path: Annotated[str, "Output file path"] = "",
-    from_time: Annotated[str, "Start timestamp"] = "",
-    to_time: Annotated[str, "End timestamp"] = "",
-    fmt: Annotated[str, "Export format: json or xml"] = "json",
-    *,
-    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
-) -> dict[str, Any]:
-    """Export the 1C event log."""
-    sess = _session(session_id)
-    ibcmd = str(Path(platform_dir) / "ibcmd") if platform_dir else sess.ibcmd
-    if sess.runtime is not None and not eventlog_dir:
-        eventlog_path = sess.runtime.server.data_dir / "log-data"
-        log_dir = sess.runtime.log_dir
-    else:
-        eventlog_path = Path(eventlog_dir or str(Path.home() / ".1cv8/1C/1cv8/standalone-server/log-data"))
-        log_dir = sess.log_dir
-    if not out_path:
-        out = log_dir / f"eventlog_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{fmt}"
-    else:
-        out = Path(out_path)
-    exported = runtime.export_eventlog(ibcmd, eventlog_path, out, from_time or None, to_time or None, fmt)
-    return {"path": str(exported), "format": fmt, "eventlog_dir": str(eventlog_path)}
 
 
 def _credential_store_disabled_error() -> RuntimeError:
@@ -5456,12 +5466,11 @@ def _decode_log_bytes(data: bytes) -> str:
                 return data.decode("utf-16-be")
             except UnicodeDecodeError:
                 pass
-    for encoding in ("utf-8-sig", "cp1251"):
-        try:
-            return data.decode(encoding)
-        except UnicodeDecodeError:
-            pass
-    return data.decode("utf-8", errors="replace")
+    try:
+        return data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        pass
+    return runtime.decode_8bit_cyrillic(data)
 
 
 def _tail_text_file(path: Path | str, *, max_lines: int = 80, max_chars: int = 20000) -> str:
@@ -5538,13 +5547,34 @@ def _client_runtime_for_eventlog(sess: SessionState, target_connection_mode: str
     return None
 
 
+def _client_ibsrv_state(rt: runtime.ManagerRuntime | None) -> str:
+    """Describe the autonomous server that serves the tested infobase (file mode)."""
+    if rt is None or (rt.server_process is None and not rt.extra.get("shared_key")):
+        return ""
+    pid = getattr(rt.server_process, "pid", 0) or int(rt.extra.get("shared_pid") or 0)
+    alive = _pid_is_running(pid) if pid else False
+    listening = runtime.is_port_listening(rt.server.address, rt.server.port) if rt.server.port else False
+    state = f"pid={pid or '?'}; running={alive}; listening {rt.server.address}:{rt.server.port}={listening}"
+    if not alive or not listening:
+        state += (
+            " — автономный сервер тестируемой базы остановился. Частая причина: файловая база уже "
+            "открыта в другом процессе (Конфигуратор, веб-публикация Apache/IIS, другой клиент)."
+        )
+    return state
+
+
 def _client_failure_diagnostics(sess: SessionState, error: Exception, target_connection_mode: str) -> RuntimeError:
     message = str(error)
     message = _append_file_tail(message, "Лог stdout/stderr клиента тестирования", sess.client_log_dir / "test_client_stdout.log")
     message = _append_file_tail(message, "Лог 1С /Out клиента тестирования", sess.client_log_dir / "test_client_1c_out.log")
     rt = _client_runtime_for_eventlog(sess, target_connection_mode)
-    diagnostics = _eventlog_errors_for_runtime(sess, rt, "client")
-    message = _append_eventlog_diagnostics(message, diagnostics, "Последние ошибки ЖР автономного сервера клиента тестирования")
+    if rt is not None and target_connection_mode == "file":
+        state = _client_ibsrv_state(rt)
+        if state:
+            message += f"\n\nАвтономный сервер тестируемой файловой базы: {state}"
+        message = _append_file_tail(message, "Лог ibsrv тестируемой файловой базы", rt.log_dir / "ibsrv.log", max_lines=20)
+    diagnostics = _eventlog_errors_for_runtime(sess, sess.runtime, "manager")
+    message = _append_eventlog_diagnostics(message, diagnostics, "Последние ошибки ЖР менеджера тестирования")
     return RuntimeError(message)
 
 
@@ -5713,7 +5743,12 @@ async def _connect_test_client_impl(
             manager=runtime.TestManagerSpec(onec_path=sess.onec_thin),
             server_process=shared_file.process,
             log_dir=shared_file.log_dir,
-            extra={"target_connection_mode": "file", "shared_key": shared_file.key, "shared_refcount": len(shared_file.owners)},
+            extra={
+                "target_connection_mode": "file",
+                "shared_key": shared_file.key,
+                "shared_pid": shared_file.pid,
+                "shared_refcount": len(shared_file.owners),
+            },
         )
         r_base = str(db_path)
         r_value = shared_file.base_url
@@ -10471,24 +10506,47 @@ def _capture_hidden_desktop_screenshot(
 ) -> tuple[dict[str, Any] | None, str, str]:
     """Capture a 1C window from an Answer42 hidden Windows desktop.
 
-    A hidden desktop is never composed on screen, so there is no "whole
-    display" bitmap: the fallback is the largest visible window there.
+    A hidden desktop is never composed on screen, so the picture is composed
+    from the visible top-level windows there.  ``window=True`` keeps the main
+    1C window and the other windows of the same process (floating forms opened
+    without an owner, dialogs); ``window=False`` keeps every visible window.
     """
+    windows = [
+        w for w in win_desktop.list_windows(desktop)
+        if w["width"] >= _SCREENSHOT_MIN_WINDOW_SIDE and w["height"] >= _SCREENSHOT_MIN_WINDOW_SIDE
+    ]
+    if not windows:
+        raise RuntimeError(f"Cannot capture screenshot: no visible windows on hidden desktop {desktop!r}")
     geometry = _active_external_1c_window_geometry(display=desktop) if window else None
     fallback = ""
     fallback_reason = ""
-    if geometry is None:
-        windows = [w for w in win_desktop.list_windows(desktop) if w["width"] >= 100 and w["height"] >= 100]
-        if not windows:
-            raise RuntimeError(f"Cannot capture screenshot: no visible windows on hidden desktop {desktop!r}")
-        largest = max(windows, key=lambda w: w["width"] * w["height"])
-        geometry = {key: largest[key] for key in ("left", "top", "width", "height", "title", "hwnd")}
-        geometry["desktop"] = desktop
-        if window:
+    selected = windows
+    if window:
+        main = next((w for w in windows if geometry and w["hwnd"] == int(geometry.get("hwnd") or 0)), None)
+        if main is None:
+            main = max(windows, key=lambda w: w["width"] * w["height"])
+            geometry = {key: main[key] for key in ("left", "top", "width", "height", "title", "hwnd")}
+            geometry["desktop"] = desktop
             fallback = "largest_window"
             fallback_reason = "1C window was not detected on the hidden desktop; captured the largest window instead"
-    win_desktop.capture_window_png(desktop, int(geometry["hwnd"]), int(geometry["width"]), int(geometry["height"]), output_path)
-    return (geometry if window else None), fallback, fallback_reason
+        selected = [w for w in windows if w["pid"] == main["pid"]]
+    canvas = _union_rect(selected)
+    win_desktop.capture_windows_png(desktop, selected, canvas, output_path)
+    if geometry is not None:
+        geometry = dict(geometry)
+        geometry["windows"] = [{"title": w["title"], "hwnd": w["hwnd"]} for w in selected]
+    return geometry, fallback, fallback_reason
+
+
+_SCREENSHOT_MIN_WINDOW_SIDE = 60
+
+
+def _union_rect(windows: list[dict[str, Any]]) -> dict[str, int]:
+    left = min(int(w["left"]) for w in windows)
+    top = min(int(w["top"]) for w in windows)
+    right = max(int(w["left"]) + int(w["width"]) for w in windows)
+    bottom = max(int(w["top"]) + int(w["height"]) for w in windows)
+    return {"left": left, "top": top, "width": right - left, "height": bottom - top}
 
 
 @mcp.tool()
