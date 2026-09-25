@@ -279,9 +279,9 @@ async def run_smoke(session: ClientSession, sid: str, suffix: str, screenshot_di
     activated = await call_ui_ok(session, "activate_window", {"index": 0, "session_id": sid})
     assert activated.get("activated") is True, activated
 
-    for tool in ("goto_start_page", "goto_next_window", "goto_previous_window"):
-        res = await session.call_tool(tool, {"session_id": sid})
-        print(f"OK_OR_EXPECTED_ERROR {tool}", flush=True)
+    for action in ("start_page", "next", "previous"):
+        res = await session.call_tool("goto_window", {"action": action, "session_id": sid})
+        print(f"OK_OR_EXPECTED_ERROR goto_window {action}", flush=True)
         if not res.is_error:
             _parse_tool_result(res)
 
@@ -295,8 +295,6 @@ async def run_smoke(session: ClientSession, sid: str, suffix: str, screenshot_di
     await call_ui_ok(session, "form_default_button", {"session_id": sid})
     await call_ui_ok(session, "window_command_interface", {"session_id": sid})
     await call_ui_ok(session, "field_info", {"field_name": "DefinitelyMissingField", "session_id": sid})
-    await call_ui_ok(session, "field_value_text", {"field_name": "DefinitelyMissingField", "session_id": sid})
-    await call_ui_ok(session, "field_tooltip", {"field_name": "DefinitelyMissingField", "session_id": sid})
     await call_ui_ok(session, "find_object", {"name": "DefinitelyMissing", "session_id": sid})
     await call_ui_expected_error(
         session,
@@ -323,7 +321,7 @@ async def run_smoke(session: ClientSession, sid: str, suffix: str, screenshot_di
     await call_ui_ok(session, "table_goto_row", {"name": "Список", "text": "Тестовый smoke", "session_id": sid})
     await call_ui_ok(session, "click_button", {"name": "ФормаИзменить", "session_id": sid})
     await call_ui_ok(session, "ui_tree", {"session_id": sid, "include_rag_types": True})
-    await call_ui_ok(session, "command_bar", {"session_id": sid})
+    await call_ui_ok(session, "object_command_panel", {"session_id": sid})
     await call_ui_ok(session, "current_element", {"session_id": sid})
     await call_ui_ok(session, "click_button", {"name": "ФормаЗаписатьИЗакрыть", "session_id": sid})
 
@@ -456,7 +454,7 @@ async def run_dynamic_reports(session: ClientSession, sid: str, suffix: str, scr
     await asyncio.sleep(2)
     await capture_screenshot(session, sid, str(screenshot_dir / "14-report-generated.png"))
     report_docs = await call_ui_ok(session, "tabular_documents", {"session_id": sid})
-    report_text = await call_ui_ok(session, "tabular_document_text", {"session_id": sid})
+    report_text = await call_ui_ok(session, "tabular_documents", {"include_text": True, "session_id": sid})
     diagnostics = report_docs.get("client_diagnostics", {}) if isinstance(report_docs, dict) else {}
     active_title = str(diagnostics.get("modal_title", ""))
     visible_report_result = (
@@ -482,7 +480,6 @@ async def run_coverage(session: ClientSession, sid: str, suffix: str, screenshot
     await call_ui_ok(session, "object_command_panel", {"name": "DefinitelyMissing", "session_id": sid})
     await call_ui_ok(session, "object_context_menu", {"name": "DefinitelyMissing", "session_id": sid})
     await call_ui_ok(session, "group_state", {"name": "DefinitelyMissingGroup", "session_id": sid})
-    await call_ui_ok(session, "group_current_page", {"name": "DefinitelyMissingGroup", "session_id": sid})
     await call_ui_ok(session, "decoration_links", {"name": "DefinitelyMissingDecoration", "session_id": sid})
     await call_ui_ok(session, "open_navigation_link", {"navigation_link": "e1cib/list/Catalog.ПС_Справочник1", "session_id": sid})
 
@@ -497,21 +494,21 @@ async def run_coverage(session: ClientSession, sid: str, suffix: str, screenshot
         ("table_set_field", {"table": "DefinitelyMissing", "field": "Код", "value": "1", "session_id": sid}, "Таблица не найдена"),
         ("table_edit_info", {"table": "DefinitelyMissing", "session_id": sid}, "Таблица не найдена"),
         ("table_selected_rows", {"name": "DefinitelyMissing", "session_id": sid}, "Таблица не найдена"),
-        ("table_select_all", {"name": "DefinitelyMissing", "session_id": sid}, "Таблица не найдена"),
-        ("table_clear_selection", {"name": "DefinitelyMissing", "session_id": sid}, "Таблица не найдена"),
+        ("table_selection", {"select": True, "name": "DefinitelyMissing", "session_id": sid}, "Таблица не найдена"),
+        ("table_selection", {"select": False, "name": "DefinitelyMissing", "session_id": sid}, "Таблица не найдена"),
         ("table_delete_row", {"name": "DefinitelyMissing", "session_id": sid}, "Таблица не найдена"),
         ("table_copy_row", {"name": "DefinitelyMissing", "session_id": sid}, "Таблица не найдена"),
         ("table_toggle_delete_mark", {"name": "DefinitelyMissing", "session_id": sid}, "Таблица не найдена"),
-        ("table_begin_edit", {"name": "DefinitelyMissing", "session_id": sid}, "Таблица не найдена"),
-        ("table_end_edit", {"name": "DefinitelyMissing", "session_id": sid}, "Таблица не найдена"),
-        ("table_editing_state", {"name": "DefinitelyMissing", "session_id": sid}, "Таблица не найдена"),
-        ("group_expand", {"name": "DefinitelyMissing", "session_id": sid}, "object_not_found"),
-        ("group_collapse", {"name": "DefinitelyMissing", "session_id": sid}, "object_not_found"),
+        ("table_edit", {"action": "begin", "name": "DefinitelyMissing", "session_id": sid}, "Таблица не найдена"),
+        ("table_edit", {"action": "end", "name": "DefinitelyMissing", "session_id": sid}, "Таблица не найдена"),
+        ("table_edit", {"action": "state", "name": "DefinitelyMissing", "session_id": sid}, "Таблица не найдена"),
+        ("group_set_expanded", {"expanded": True, "name": "DefinitelyMissing", "session_id": sid}, "object_not_found"),
+        ("group_set_expanded", {"expanded": False, "name": "DefinitelyMissing", "session_id": sid}, "object_not_found"),
         ("decoration_click", {"name": "DefinitelyMissing", "session_id": sid}, "object_not_found"),
         ("decoration_click_link", {"name": "DefinitelyMissing", "presentation": "x", "session_id": sid}, "object_not_found"),
         ("form_next_element", {"session_id": sid}, ""),
         ("form_previous_element", {"session_id": sid}, ""),
-        ("tabular_document_text", {"name": "DefinitelyMissing", "session_id": sid}, "Табличный документ не найден"),
+        ("tabular_documents", {"name": "DefinitelyMissing", "session_id": sid}, "Табличный документ не найден"),
     ]
     for tool, args, expected in negative_calls:
         res = await session.call_tool(tool, args)

@@ -365,3 +365,101 @@ def test_save_form_verifies_the_write():
     text = MODULE.read_text(encoding="utf-8-sig")
     assert "АктивноеОкно.Записать()" not in text  # no such method on a tested window
     assert '"form_still_modified"' in text
+
+
+# --- merged tools ----------------------------------------------------------
+
+_REMOVED_TOOLS = {
+    "goto_start_page", "goto_previous_window", "goto_next_window", "group_expand", "group_collapse",
+    "group_current_page", "table_select_all", "table_clear_selection", "table_begin_edit", "table_end_edit",
+    "table_editing_state", "field_dropdown_items", "field_dropdown_state", "field_value_text", "field_tooltip",
+    "credentials_titles", "command_bar", "tabular_document_text",
+}
+
+
+def test_merged_tools_replace_the_old_names():
+    names = set(_tools())
+    assert not (_REMOVED_TOOLS & names)
+    assert {"goto_window", "group_set_expanded", "table_selection", "table_edit", "field_dropdown"} <= names
+    profiled = set().union(*server.TOOL_PROFILE_GROUPS.values()) | server.TOOL_PROFILE_CORE
+    assert not (_REMOVED_TOOLS & profiled)
+
+
+def _record_bridge(monkeypatch, responses=None):
+    calls = []
+
+    async def fake(session_id, method, params, *, timeout=None):
+        calls.append((method, params))
+        return (responses or {}).get(method, {"found": True})
+
+    monkeypatch.setattr(server, "_bridge_call_recorded", fake)
+    return calls
+
+
+@pytest.mark.parametrize(
+    ("call", "method"),
+    [
+        (lambda: server.goto_window("start_page", session_id="u"), "goto_start_page"),
+        (lambda: server.goto_window("previous", session_id="u"), "goto_previous_window"),
+        (lambda: server.goto_window("next", session_id="u"), "goto_next_window"),
+        (lambda: server.group_set_expanded(True, name="Г", session_id="u"), "group_expand"),
+        (lambda: server.group_set_expanded(False, name="Г", session_id="u"), "group_collapse"),
+        (lambda: server.table_selection(True, name="Т", session_id="u"), "table_select_all"),
+        (lambda: server.table_selection(False, name="Т", session_id="u"), "table_clear_selection"),
+        (lambda: server.table_edit("begin", name="Т", session_id="u"), "table_begin_edit"),
+        (lambda: server.table_edit("end", name="Т", session_id="u"), "table_end_edit"),
+        (lambda: server.table_edit("state", name="Т", session_id="u"), "table_editing_state"),
+        (lambda: server.field_dropdown("Поле", session_id="u"), "field_dropdown_items"),
+        (lambda: server.field_dropdown("Поле", open=False, session_id="u"), "field_dropdown_state"),
+        (lambda: server.object_command_panel(session_id="u"), "command_bar"),
+        (lambda: server.object_command_panel(name="Список", session_id="u"), "object_command_panel"),
+        (lambda: server.tabular_documents(session_id="u"), "tabular_documents"),
+    ],
+)
+def test_merged_tools_route_to_the_bridge_commands(monkeypatch, call, method):
+    calls = _record_bridge(monkeypatch)
+    asyncio.run(call())
+    assert calls[0][0] == method
+
+
+def test_merged_tools_reject_unknown_actions():
+    with pytest.raises(ToolError, match="start_page, previous or next"):
+        asyncio.run(server.goto_window("sideways", session_id="u"))
+    with pytest.raises(ToolError, match="begin, end or state"):
+        asyncio.run(server.table_edit("pause", session_id="u"))
+
+
+def test_group_state_includes_current_page(monkeypatch):
+    calls = _record_bridge(monkeypatch, {
+        "group_state": {"found": True, "expanded": True},
+        "group_current_page": {"found": True, "page": {"type": "Тестируемая группа формы", "name": "СтраницаТовары"}},
+    })
+    result = asyncio.run(server.group_state(name="ГруппаСтраницы", session_id="u"))
+    assert [c[0] for c in calls] == ["group_state", "group_current_page"]
+    assert result["current_page"]["name"] == "СтраницаТовары"
+
+
+def test_field_info_includes_tooltip(monkeypatch):
+    _record_bridge(monkeypatch, {
+        "field_info": {"found": True, "data_text": "A42"},
+        "field_tooltip": {"found": True, "tooltip": "Начните с наименования"},
+    })
+    result = asyncio.run(server.field_info("Наименование", session_id="u"))
+    assert result["data_text"] == "A42" and result["tooltip"] == "Начните с наименования"
+
+
+def test_tabular_documents_reads_one_document_by_name(monkeypatch):
+    calls = _record_bridge(monkeypatch, {"tabular_document_text": {"found": True, "rows": 2, "cells": [["a"], ["b"]]}})
+    asyncio.run(server.tabular_documents(name="Результат", max_rows=5, session_id="u"))
+    method, params = calls[0]
+    assert method == "tabular_document_text"
+    assert params["name"] == "Результат" and params["max_rows"] == 5
+
+
+def test_field_dropdown_reports_missing_field_consistently(monkeypatch):
+    async def fake(session_id, method, params, *, timeout=None):
+        raise server.BridgeError("Поле не найдено: Нет")
+
+    monkeypatch.setattr(server, "_bridge_call_recorded", fake)
+    result = asyncio.run(server.field_dropdown("Нет", open=False, session_id="u"))
+    assert result["found"] is False and result["diagnostics"] == ["field_not_found"]

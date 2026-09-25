@@ -85,9 +85,7 @@ EXPECTED_NEW_TOOLS = {
     "set_file_dialog_result",
     "clear_file_dialog_result",
     "field_info",
-    "field_value_text",
-    "field_tooltip",
-    "field_dropdown_items",
+    "field_dropdown",
     "form_next_element",
     "form_previous_element",
     "form_state",
@@ -99,9 +97,7 @@ EXPECTED_NEW_TOOLS = {
     "command_interface_sections",
     "command_interface_commands",
     "command_interface_search",
-    "group_expand",
-    "group_collapse",
-    "group_current_page",
+    "group_set_expanded",
     "group_state",
     "decoration_links",
     "decoration_click_link",
@@ -112,14 +108,11 @@ EXPECTED_NEW_TOOLS = {
     "metadata_objects_catalog_cache_clear",
     "client_busy_status",
     "wait_client_idle",
-    "table_select_all",
-    "table_clear_selection",
+    "table_selection",
     "table_delete_row",
     "table_copy_row",
     "table_toggle_delete_mark",
-    "table_begin_edit",
-    "table_end_edit",
-    "table_editing_state",
+    "table_edit",
     "dynamic_list_metadata_available_fields",
     "dynamic_list_settings_available_fields",
     "dynamic_list_set_settings",
@@ -647,14 +640,14 @@ def test_selected_new_tool_schemas():
     assert tools["wait_object"].input_schema["properties"]["timeout"]["default"] == 15
     assert tools["set_file_dialog_result"].input_schema["required"] == ["paths"]
     assert tools["field_info"].input_schema["required"] == ["field_name"]
-    assert tools["field_dropdown_items"].input_schema["required"] == ["field_name"]
-    assert tools["field_dropdown_items"].input_schema["properties"]["timeout"]["default"] == 10
+    assert tools["field_dropdown"].input_schema["required"] == ["field_name"]
+    assert tools["field_dropdown"].input_schema["properties"]["timeout"]["default"] == 10
     assert tools["set_field_value"].input_schema["properties"]["create_if_missing"]["default"] is False
     assert tools["table_set_field"].input_schema["properties"]["create_if_missing"]["default"] is False
     assert tools["table_set_row_values"].input_schema["properties"]["create_if_missing"]["default"] is False
     assert tools["set_form_fields"].input_schema["properties"]["create_if_missing"]["default"] is False
-    assert "max_depth" not in tools["field_dropdown_items"].input_schema["properties"]
-    assert "search_depth" not in tools["field_dropdown_items"].input_schema["properties"]
+    assert "max_depth" not in tools["field_dropdown"].input_schema["properties"]
+    assert "search_depth" not in tools["field_dropdown"].input_schema["properties"]
     assert "max_depth" not in tools["toggle_field"].input_schema["properties"]
     assert "max_depth" not in tools["click_button"].input_schema["properties"]
     assert tools["click_button"].input_schema["properties"]["watchdog_timeout"]["default"] == 120
@@ -664,7 +657,7 @@ def test_selected_new_tool_schemas():
     assert tools["command_interface_search"].input_schema["required"] == ["query"]
     assert tools["command_interface_search"].input_schema["properties"]["max_results"]["default"] == 20
     assert tools["command_interface_search"].input_schema["properties"]["include_timings"]["default"] is False
-    assert tools["command_bar"].input_schema["properties"]["include_timings"]["default"] is False
+    assert tools["object_command_panel"].input_schema["properties"]["include_timings"]["default"] is False
     assert "session_id" in tools["configuration_name_version_from_subsystems"].input_schema["properties"]
     assert "session_id" in tools["installed_extensions_from_catalog"].input_schema["properties"]
     assert tools["metadata_objects_from_catalog"].input_schema["properties"]["query"]["default"] == ""
@@ -760,8 +753,9 @@ def test_command_diagnostic_timings_are_opt_in(monkeypatch):
 
     monkeypatch.setattr(server, "_bridge_call_recorded", fake_bridge_call)
 
-    without_timings = asyncio.run(server.command_bar(session_id="unit"))
-    with_timings = asyncio.run(server.command_bar(include_timings=True, session_id="unit"))
+    # object_command_panel without an object reads the active form's command bar.
+    without_timings = asyncio.run(server.object_command_panel(session_id="unit"))
+    with_timings = asyncio.run(server.object_command_panel(include_timings=True, session_id="unit"))
     search_without_timings = asyncio.run(server.command_interface_search("Номенклатура", session_id="unit"))
     search_with_timings = asyncio.run(server.command_interface_search("Номенклатура", include_timings=True, session_id="unit"))
 
