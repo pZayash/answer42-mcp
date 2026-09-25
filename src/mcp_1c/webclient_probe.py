@@ -36,6 +36,7 @@ _BOOTSTRAP_RE = re.compile(
     r'var BASE = "([^"]+)";.*?var LANG = "([^"]+)";.*?var VERSION = "([^"]+)";',
     re.DOTALL,
 )
+_JAVASCRIPT_UNDEFINED_RE = re.compile(r"\bundefined\b")
 # Moscow has used a fixed UTC+3 offset without DST since 2014.
 _MOSCOW_FIXED_TZ = timezone(timedelta(hours=3), "MSK")
 
@@ -69,7 +70,12 @@ class _Bootstrap:
 
 def _json_body(response: requests.Response) -> dict[str, Any]:
     try:
-        value = json.loads(response.content.decode("utf-8-sig"))
+        text = response.content.decode("utf-8-sig")
+        # Some 1C startInfo payloads are JavaScript object literals rather
+        # than strict JSON: optional values are rendered as `undefined`.
+        # It is safe to map that standalone literal to JSON null before
+        # decoding; identifiers inside quoted strings are unaffected.
+        value = json.loads(_JAVASCRIPT_UNDEFINED_RE.sub("null", text))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise WebRuntimeProbeError("1C web publication returned an invalid JSON response") from exc
     if not isinstance(value, dict):
