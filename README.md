@@ -59,7 +59,7 @@ Useful modes:
 - `ui_tree(parent_name=...)` serializes only the subtree under a known parent element, useful for large/complex forms.
 - `ui_tree(name=.../title=.../type=...)` returns a flat `objects` list instead of a nested tree; on current managers filtering is performed on the 1C side; simple exact `name`/`type` queries may use the platform fast path before falling back to flat traversal.
 - `profile="diagnostic"` includes command panels without enabling expensive data reads.
-- `profile="data"` enables node data presentations; prefer targeted `field_value_text`, `table_rows`, `tabular_document_text`, or `tabular_document_save` unless you really need data for many nodes.
+- `profile="data"` enables node data presentations; prefer targeted `field_info`, `table_rows`, `tabular_documents(name=...)`, or `tabular_document_save` unless you really need data for many nodes.
 - `profile="full"` gives the closest historical verbose result.
 - `fields="minimal|navigation|diagnostic|data|full"` (or a comma-separated custom field list) controls node payload without truncating the tree.
 - `command_panels="include|exclude|only"` controls command-panel serialization explicitly; `only` returns a deduplicated flat list.

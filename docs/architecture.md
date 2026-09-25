@@ -82,14 +82,14 @@ class SessionState:
 Группы tools:
 
 - жизненный цикл: `start_session`, `stop_session`, `session_status`, `credentials_check`;
-- автоматизация UI: `active_window`, `windows_list`, `activate_window`, `goto_start_page`, `goto_previous_window`, `goto_next_window`, `ui_tree`, `find_object`, `focus_object`, `open_navigation_link`, `click_button`, `set_field_value`, `save_form`, `close_form`, `screenshot`;
+- автоматизация UI: `active_window`, `windows_list`, `activate_window`, `goto_window`, `ui_tree`, `find_object`, `focus_object`, `open_navigation_link`, `click_button`, `set_field_value`, `save_form`, `close_form`, `screenshot`;
 - таблицы: `table_rows`, `table_find_row`, `table_goto_row`, `table_current_row`, `table_set_field`, `table_choose_field_from_list`, `table_move_row`;
 - динамические списки: `dynamic_list_metadata_available_fields`, `dynamic_list_settings_available_fields`, `dynamic_list_set_settings`, `dynamic_list_current_settings`, `dynamic_list_find`, `dynamic_list_sort_by_column`, `dynamic_list_output`, `dynamic_list_open_settings`, `dynamic_list_clear_settings`, `form_open_settings`;
 
 `dynamic_list_set_settings` открывает стандартную форму **Настройка списка** и изменяет пользовательские настройки именно в ней. Строки отбора/сортировки добавляются через таблицу **Доступные поля** и кнопку **Выбрать**, а параметры добавленных строк затем заполняются через table-editor таблиц настроек: для отборов — колонки `Вид сравнения` и `Значение`, для сортировки — колонка `Направление сортировки`. Tool не использует post-close/list-level fallback для `orders`: если направление не удалось записать в форме настроек, вызов должен вернуть ошибку элемента, а не маскировать её сортировкой самого динамического списка.
 
 `dynamic_list_sort_by_column` — отдельный быстрый tool для сортировки уже открытого динамического списка по видимой колонке через API списка. Он не является fallback-веткой `dynamic_list_set_settings`.
-- табличные документы: `tabular_documents`, `tabular_document_text`, `tabular_document_save`;
+- табличные документы: `tabular_documents` (список или ячейки одного документа по `name`/`title`), `tabular_document_save`;
 - доказательная запись: `recording_start`, `recording_capture`, `recording_stop`;
 - RAG: `rag_source_add`, `rag_sources_add_from_directory`, `rag_source_roots_list`, `rag_sources_list`, `rag_available_configurations`, `rag_snapshot_create`, `rag_snapshots_list`, `rag_index_build`, `rag_lookup_object`, `rag_query`, `rag_session_autoconfigure`.
 
@@ -252,8 +252,8 @@ large remote infobases.
 `ui_tree` is intended for UI structure diagnostics, not bulk data extraction.
 The default `profile="navigation"` returns visible UI structure with compact fields,
 `include_data=false`, `include_rag_types=false`, and command panels excluded. The tree
-has no depth limit. Use targeted tools such as `field_value_text`, `table_rows`,
-`tabular_document_text`, or `tabular_document_save` when values/report data are
+has no depth limit. Use targeted tools such as `field_info`, `table_rows`,
+`tabular_documents(name=...)`, or `tabular_document_save` when values/report data are
 needed.
 
 Supported presentation controls:

@@ -168,31 +168,31 @@ _METADATA_OBJECTS_CACHE: dict[str, dict[str, Any]] = {}
 TOOL_PROFILE_GROUPS: dict[str, set[str]] = {
     "sessions": {
         "sessions_list", "session_status", "start_session", "stop_session",
-        "credentials_check", "credentials_save", "credentials_remove", "credentials_list", "credentials_titles",
+        "credentials_check", "credentials_save", "credentials_remove", "credentials_list",
     },
-    "windows": {"active_window", "windows_list", "activate_window", "goto_start_page", "goto_previous_window", "goto_next_window"},
+    "windows": {"active_window", "windows_list", "activate_window", "goto_window"},
     "forms": {
         "wait_object", "wait_form", "wait_window", "user_messages", "close_user_messages_panel", "current_error_info",
         "client_busy_status", "wait_client_idle",
-        "set_file_dialog_result", "clear_file_dialog_result", "field_info", "field_value_text", "field_tooltip",
-        "field_dropdown_items", "form_next_element", "form_previous_element", "form_state", "form_default_button",
+        "set_file_dialog_result", "clear_file_dialog_result", "field_info",
+        "field_dropdown", "form_next_element", "form_previous_element", "form_state", "form_default_button",
         "wait_form_closed", "object_command_panel", "object_context_menu", "window_command_interface",
-        "command_interface_sections", "command_interface_commands", "command_interface_search", "group_expand", "group_collapse",
-        "group_current_page", "group_activate_page", "group_state", "decoration_links", "decoration_click_link", "decoration_click",
+        "command_interface_sections", "command_interface_commands", "command_interface_search", "group_set_expanded",
+        "group_activate_page", "group_state", "decoration_links", "decoration_click_link", "decoration_click",
         "ui_tree", "ui_tree_resource_search", "ui_tree_resource_get_node", "ui_tree_resource_children", "ui_tree_diff",
         "ui_tree_resource_action",
-        "command_bar", "click_button", "find_object", "search_objects", "get_object", "focus_object",
-        "open_navigation_link", "current_element", "field_dropdown_state", "field_dropdown_close", "toggle_field",
+        "click_button", "find_object", "search_objects", "get_object", "focus_object",
+        "open_navigation_link", "current_element", "field_dropdown_close", "toggle_field",
         "set_field_value", "activate_field", "choose_field_from_list", "choose_field_first_row", "choose_current_row",
         "set_form_fields", "save_form", "close_form", "form_open_settings",
     },
     "tables": {
         "table_current_row", "table_selected_rows", "table_cell_text", "table_rows", "table_find_row", "table_goto_row",
         "table_move_row", "table_add_row", "table_set_field", "table_set_row_values", "table_choose_field_from_list",
-        "table_edit_info", "table_select_all", "table_clear_selection", "table_delete_row", "table_copy_row",
-        "table_toggle_delete_mark", "table_begin_edit", "table_end_edit", "table_editing_state",
+        "table_edit_info", "table_selection", "table_delete_row", "table_copy_row",
+        "table_toggle_delete_mark", "table_edit",
     },
-    "tabular": {"tabular_documents", "tabular_document_text", "tabular_document_save", "tabular_document_state_display"},
+    "tabular": {"tabular_documents", "tabular_document_save", "tabular_document_state_display"},
     "dynamic": {
         "dynamic_list_metadata_available_fields", "dynamic_list_settings_available_fields", "dynamic_list_set_settings",
         "dynamic_list_current_settings", "dynamic_list_sort_by_column", "dynamic_list_output", "dynamic_list_open_settings",
@@ -207,16 +207,16 @@ TOOL_PROFILE_GROUPS: dict[str, set[str]] = {
     "recording": {"recording_start", "recording_capture", "recording_stop", "screenshot"},
 }
 TOOL_PROFILE_CORE: set[str] = TOOL_PROFILE_GROUPS["sessions"] | {
-    "active_window", "windows_list", "activate_window", "goto_start_page", "goto_previous_window", "goto_next_window",
+    "active_window", "windows_list", "activate_window", "goto_window",
     "wait_object", "wait_form", "wait_window", "user_messages", "close_user_messages_panel", "current_error_info",
     "client_busy_status", "wait_client_idle",
-    "field_info", "field_value_text", "field_dropdown_items", "field_dropdown_state", "field_dropdown_close",
+    "field_info", "field_dropdown", "field_dropdown_close",
     "toggle_field", "set_field_value", "activate_field", "choose_field_from_list", "choose_field_first_row", "choose_current_row",
     "form_state", "form_default_button", "wait_form_closed", "click_button", "find_object", "search_objects", "get_object",
     "focus_object", "open_navigation_link", "current_element", "table_current_row", "table_selected_rows", "table_cell_text",
     "table_rows", "table_find_row", "table_goto_row", "table_move_row", "table_add_row", "table_set_field", "table_set_row_values",
-    "table_choose_field_from_list", "table_edit_info", "table_begin_edit", "table_end_edit", "table_editing_state",
-    "tabular_documents", "tabular_document_text", "tabular_document_save", "screenshot",
+    "table_choose_field_from_list", "table_edit_info", "table_edit",
+    "tabular_documents", "tabular_document_save", "screenshot",
     "ui_tree",
 }
 TOOL_PROFILE_ALIASES: dict[str, set[str]] = {
@@ -2195,8 +2195,6 @@ def _copy_compact_object(value: Any) -> Any:
     return value
 
 
-
-
 def _ui_tree_type_family(raw_type: Any) -> str:
     normalized = _ui_node_type_key(raw_type)
     if not normalized:
@@ -2515,7 +2513,6 @@ def _collect_command_panel_nodes(node: Any, inside: bool = False) -> list[dict[s
     for child in node.get("children") or []:
         result.extend(_collect_command_panel_nodes(child, current_inside))
     return result
-
 
 
 def _transform_command_panels(node: Any, mode: str) -> Any:
@@ -3430,8 +3427,6 @@ def _rag_fields_for_object(object_full_name: str, snapshot: str | int | None = N
     return list(dedup.values())
 
 
-
-
 def _strip_bridge_timings(result: Any) -> Any:
     if not isinstance(result, dict) or "_timings" not in result:
         return result
@@ -3911,8 +3906,8 @@ _DIAGNOSTICS_DROPPED_KEYS = {"events", "user_message_texts"}
 # Tools that report *which* window/form they found or switched to; the full
 # subtree of that object is ui_tree's job and cost up to ~40k tokens per call.
 _SUBTREE_SUMMARY_TOOLS = {
-    "windows_list", "active_window", "activate_window", "goto_start_page", "goto_previous_window",
-    "goto_next_window", "wait_form", "wait_object", "wait_window",
+    "windows_list", "active_window", "activate_window", "goto_window",
+    "wait_form", "wait_object", "wait_window",
 }
 _SUMMARY_KEYS_WITHOUT_CHILDREN = {"window", "before", "active_window"}
 
@@ -5649,15 +5644,6 @@ def credentials_list() -> list[dict[str, object]]:
         return []
     return _credentials_store().list_entries(account_id=_current_account_id())
 
-
-@mcp.tool()
-def credentials_titles() -> list[dict[str, object]]:
-    """List saved credential titles/aliases that can be used as start_session base_url."""
-    if not _CREDENTIAL_STORE_ENABLED:
-        return []
-    return _credentials_store().titles(account_id=_current_account_id())
-
-
 _PLACEHOLDER_PASSWORD_RE = re.compile(r"^\*{3,}$")
 _AUTH_FAILURE_MARKERS = (
     "пользователь иб не идентифицирован",
@@ -6361,44 +6347,6 @@ async def activate_window(
         {"index": index, "title": title, "name": name},
     )
 
-
-@mcp.tool()
-async def goto_start_page(*,
-    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
-) -> Any:
-    """Navigate the main test-client window to the start page."""
-    return await _bridge_call_recorded(
-        session_id,
-        "goto_start_page",
-        {},
-    )
-
-
-@mcp.tool()
-async def goto_previous_window(*,
-    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
-) -> Any:
-    """Navigate the main test-client window to the previous open window."""
-    return await _bridge_call_recorded(
-        session_id,
-        "goto_previous_window",
-        {},
-    )
-
-
-@mcp.tool()
-async def goto_next_window(*,
-    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
-) -> Any:
-    """Navigate the main test-client window to the next open window."""
-    return await _bridge_call_recorded(
-        session_id,
-        "goto_next_window",
-        {},
-    )
-
-
-
 @mcp.tool()
 async def wait_object(
     name: Annotated[str, "Object technical name"] = "",
@@ -6528,64 +6476,6 @@ async def clear_file_dialog_result(*,
     """Clear queued file selection dialog results."""
     return await _bridge_call_recorded(session_id, "clear_file_dialog_result", {})
 
-
-@mcp.tool()
-async def field_info(
-    field_name: Annotated[str, "Field name, or title when search_by_title=true"],
-    search_by_title: Annotated[bool, "Search by visible title instead of technical name"] = False,
-    *,
-    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
-) -> Any:
-    """Return diagnostics for a form field: visibility, availability, readonly, kind, title."""
-    return await _bridge_call_recorded(session_id, "field_info", {"field_name": field_name, "search_by_title": search_by_title})
-
-
-@mcp.tool()
-async def field_value_text(
-    field_name: Annotated[str, "Field name, or title when search_by_title=true"],
-    search_by_title: Annotated[bool, "Search by visible title instead of technical name"] = False,
-    *,
-    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
-) -> Any:
-    """Return field data presentation text via ПолучитьПредставлениеДанных()."""
-    return await _bridge_call_recorded(session_id, "field_value_text", {"field_name": field_name, "search_by_title": search_by_title})
-
-
-@mcp.tool()
-async def field_tooltip(
-    field_name: Annotated[str, "Field name, or title when search_by_title=true"],
-    search_by_title: Annotated[bool, "Search by visible title instead of technical name"] = False,
-    *,
-    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
-) -> Any:
-    """Return field tooltip text."""
-    return await _bridge_call_recorded(session_id, "field_tooltip", {"field_name": field_name, "search_by_title": search_by_title})
-
-
-@mcp.tool()
-async def field_dropdown_items(
-    field_name: Annotated[str, "Field name, or title when search_by_title=true"],
-    search_by_title: Annotated[bool, "Search by visible title instead of technical name"] = False,
-    timeout: Annotated[int, "Dropdown formation timeout in seconds"] = 10,
-    *,
-    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
-) -> Any:
-    """Open a form field dropdown and return visible choice items when exposed by the 1C test-client API.
-
-    This is a convenience action for the common "open dropdown and read choices" scenario.
-    For non-mutating diagnostics of an already-open dropdown use field_dropdown_state.
-    """
-    return await _bridge_call_recorded(
-        session_id,
-        "field_dropdown_items",
-        {
-            "field_name": field_name,
-            "search_by_title": search_by_title,
-            "timeout": timeout,
-        },
-    )
-
-
 @mcp.tool()
 async def form_next_element(*,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
@@ -6626,19 +6516,6 @@ async def wait_form_closed(
 ) -> Any:
     """Wait until the active form closes."""
     return await _bridge_call_recorded(session_id, "wait_form_closed", {"timeout": timeout})
-
-
-@mcp.tool()
-async def object_command_panel(
-    name: Annotated[str, "Object technical name"] = "",
-    title: Annotated[str, "Object title substring"] = "",
-    type: Annotated[str, "1C test object type"] = "",
-    *,
-    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
-) -> Any:
-    """Return command panel for a found UI object, when supported."""
-    return await _bridge_call_recorded(session_id, "object_command_panel", {"name": name, "title": title, "type": type})
-
 
 @mcp.tool()
 async def object_context_menu(
@@ -6706,35 +6583,192 @@ async def command_interface_search(
     return result if include_timings else _strip_bridge_timings(result)
 
 
-@mcp.tool()
-async def group_expand(name: Annotated[str, "Group technical name"] = "", title: Annotated[str, "Group title substring"] = "", *, session_id: Annotated[str, "Session id"] = DEFAULT_SESSION) -> Any:
-    """Expand a collapsible form group."""
-    return await _bridge_call_recorded(session_id, "group_expand", {"name": name, "title": title})
+# --- merged tools --------------------------------------------------------
+# Near-identical tools were merged to shrink the tool list that every MCP
+# client loads; the underlying 1C bridge commands are unchanged.
+
+_GOTO_WINDOW_METHODS = {
+    "start_page": "goto_start_page", "start": "goto_start_page", "home": "goto_start_page",
+    "previous": "goto_previous_window", "prev": "goto_previous_window", "back": "goto_previous_window",
+    "next": "goto_next_window", "forward": "goto_next_window",
+}
 
 
 @mcp.tool()
-async def group_collapse(name: Annotated[str, "Group technical name"] = "", title: Annotated[str, "Group title substring"] = "", *, session_id: Annotated[str, "Session id"] = DEFAULT_SESSION) -> Any:
-    """Collapse a collapsible form group."""
-    return await _bridge_call_recorded(session_id, "group_collapse", {"name": name, "title": title})
+async def goto_window(
+    action: Annotated[str, "start_page | previous | next"],
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Navigate the main test-client window to the start page or the previous/next open window."""
+    method = _GOTO_WINDOW_METHODS.get(str(action or "").strip().lower())
+    if method is None:
+        raise ToolError(f"Unknown goto_window action {action!r}: expected start_page, previous or next")
+    return await _bridge_call_recorded(session_id, method, {})
 
 
 @mcp.tool()
-async def group_current_page(name: Annotated[str, "Group technical name"] = "", title: Annotated[str, "Group title substring"] = "", *, session_id: Annotated[str, "Session id"] = DEFAULT_SESSION) -> Any:
-    """Return current page of a page-group form element."""
-    return await _bridge_call_recorded(session_id, "group_current_page", {"name": name, "title": title})
+async def group_set_expanded(
+    expanded: Annotated[bool, "true = expand, false = collapse"],
+    name: Annotated[str, "Group technical name"] = "",
+    title: Annotated[str, "Group title substring"] = "",
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Expand or collapse a collapsible form group."""
+    method = "group_expand" if expanded else "group_collapse"
+    return await _bridge_call_recorded(session_id, method, {"name": name, "title": title})
+
+
+@mcp.tool()
+async def group_state(
+    name: Annotated[str, "Group technical name"] = "",
+    title: Annotated[str, "Group title substring"] = "",
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Return a form group's expanded/visible/available state and, for page groups, its current page."""
+    params = {"name": name, "title": title}
+    result = await _bridge_call_recorded(session_id, "group_state", params)
+    if isinstance(result, dict) and result.get("found"):
+        with suppress(Exception):
+            page = await _bridge_call_recorded(session_id, "group_current_page", params)
+            if isinstance(page, dict) and page.get("page"):
+                result["current_page"] = page["page"]
+    return result
+
+
+@mcp.tool()
+async def table_selection(
+    select: Annotated[bool, "true = select all rows, false = clear the selection"] = True,
+    name: Annotated[str, "Table technical name"] = "",
+    title: Annotated[str, "Table title substring"] = "",
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Select all rows of a form table or clear its selection."""
+    method = "table_select_all" if select else "table_clear_selection"
+    return await _bridge_call_recorded(session_id, method, {"name": name, "title": title})
+
+
+_TABLE_EDIT_METHODS = {"begin": "table_begin_edit", "end": "table_end_edit", "state": "table_editing_state"}
+
+
+@mcp.tool()
+async def table_edit(
+    action: Annotated[str, "begin = start editing the current row, end = finish editing, state = report edit mode"],
+    name: Annotated[str, "Table technical name"] = "",
+    title: Annotated[str, "Table title substring"] = "",
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Begin or end editing the current row of a form table, or report whether it is in edit mode."""
+    method = _TABLE_EDIT_METHODS.get(str(action or "").strip().lower())
+    if method is None:
+        raise ToolError(f"Unknown table_edit action {action!r}: expected begin, end or state")
+    params = {"name": name, "title": title}
+    if method == "table_begin_edit":
+        try:
+            return await _bridge_call_recorded(session_id, method, params)
+        except BridgeError as bridge_exc:
+            return _table_tool_bridge_error_result(method, name, title, bridge_exc)
+    return await _bridge_call_recorded(session_id, method, params)
+
+
+@mcp.tool()
+async def field_dropdown(
+    field_name: Annotated[str, "Field name, or title when search_by_title=true"],
+    search_by_title: Annotated[bool, "Search by visible title instead of technical name"] = False,
+    open: Annotated[bool, "Open the dropdown first (default); false only reads an already open one"] = True,
+    timeout: Annotated[int, "Dropdown formation timeout in seconds"] = 10,
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Return a field's dropdown choice items; opens the dropdown unless open=false."""
+    method = "field_dropdown_items" if open else "field_dropdown_state"
+    try:
+        return await _bridge_call_recorded(
+            session_id, method, {"field_name": field_name, "search_by_title": search_by_title, "timeout": timeout},
+        )
+    except BridgeError as missing_field_error:
+        # The read-only branch raises for a missing field; report it the same
+        # way as the opening branch does. Every other bridge error propagates.
+        if "Поле не найдено" not in str(missing_field_error):
+            raise
+        return {"found": False, "name": field_name, "opened": False, "items": [], "diagnostics": ["field_not_found"]}
+
+
+@mcp.tool()
+async def field_info(
+    field_name: Annotated[str, "Field name, or title when search_by_title=true"],
+    search_by_title: Annotated[bool, "Search by visible title instead of technical name"] = False,
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Return a form field's kind, title, value text (data_text), tooltip and visible/available/read-only state."""
+    params = {"field_name": field_name, "search_by_title": search_by_title}
+    result = await _bridge_call_recorded(session_id, "field_info", params)
+    if isinstance(result, dict) and result.get("found"):
+        with suppress(Exception):
+            tooltip = await _bridge_call_recorded(session_id, "field_tooltip", params)
+            if isinstance(tooltip, dict) and tooltip.get("tooltip"):
+                result["tooltip"] = tooltip["tooltip"]
+    return result
+
+
+@mcp.tool()
+async def object_command_panel(
+    name: Annotated[str, "Object technical name; empty = the active form's command bar"] = "",
+    title: Annotated[str, "Object title substring"] = "",
+    type: Annotated[str, "1C test object type"] = "",
+    include_timings: Annotated[bool, "Include diagnostic timing breakdown (_timings)"] = False,
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Return the command panel of a UI object, or of the active form when no object is given.
+
+    For application navigation commands use command_interface_search/commands.
+    """
+    if not (name or title or type):
+        result = await _bridge_call_recorded(session_id, "command_bar", {})
+        return result if include_timings else _strip_bridge_timings(result)
+    return await _bridge_call_recorded(session_id, "object_command_panel", {"name": name, "title": title, "type": type})
+
+
+@mcp.tool()
+async def tabular_documents(
+    name: Annotated[str, "Tabular document field name; set name or title to read that document's cells"] = "",
+    title: Annotated[str, "Tabular document field visible title"] = "",
+    include_text: Annotated[bool, "Without name/title: also return cells of every document"] = False,
+    row_start: Annotated[int, "First row to read (1-based)"] = 1,
+    row_end: Annotated[int, "Last row to read; 0 = row_start + max_rows - 1"] = 0,
+    column_start: Annotated[int, "First column to read (1-based)"] = 1,
+    column_end: Annotated[int, "Last column to read; 0 = column_start + max_columns - 1"] = 0,
+    max_rows: Annotated[int, "Maximum rows to read when row_end=0; 0 = all rows"] = 50,
+    max_columns: Annotated[int, "Maximum columns to read when column_end=0; 0 = all columns"] = 20,
+    compact: Annotated[bool | None, "With name/title: TSV text instead of nested cells; default follows ONEC_MCP_RESULT_VERBOSITY"] = None,
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """List tabular document fields with dimensions, or read a cells range of one of them (name/title).
+
+    Intended for small/partial reads (headers, totals, spot checks); for large
+    reports use tabular_document_save and analyze the saved file.
+    """
+    ranges = {
+        "row_start": row_start, "row_end": row_end, "column_start": column_start,
+        "column_end": column_end, "max_rows": max_rows, "max_columns": max_columns,
+    }
+    if name or title:
+        result = await _bridge_call_recorded(session_id, "tabular_document_text", {"name": name, "title": title, **ranges})
+        return _compact_tabular_text_result(result, include_raw=not _compact_enabled(compact))
+    return await _bridge_call_recorded(session_id, "tabular_documents", {"include_text": include_text, **ranges})
 
 
 @mcp.tool()
 async def group_activate_page(name: Annotated[str, "Page-group technical name"] = "", title: Annotated[str, "Page-group title substring"] = "", page_name: Annotated[str, "Target page technical name"] = "", page_title: Annotated[str, "Target page title"] = "", *, session_id: Annotated[str, "Session id"] = DEFAULT_SESSION) -> Any:
     """Activate/switch to another page in a page-group form element."""
     return await _bridge_call_recorded(session_id, "group_activate_page", {"name": name, "title": title, "page_name": page_name, "page_title": page_title})
-
-
-@mcp.tool()
-async def group_state(name: Annotated[str, "Group technical name"] = "", title: Annotated[str, "Group title substring"] = "", *, session_id: Annotated[str, "Session id"] = DEFAULT_SESSION) -> Any:
-    """Return form group expanded/visible/available state."""
-    return await _bridge_call_recorded(session_id, "group_state", {"name": name, "title": title})
-
 
 @mcp.tool()
 async def decoration_links(name: Annotated[str, "Decoration technical name"] = "", title: Annotated[str, "Decoration title substring"] = "", *, session_id: Annotated[str, "Session id"] = DEFAULT_SESSION) -> Any:
@@ -6759,7 +6793,7 @@ async def ui_tree(
     include_rag_types: Annotated[bool | str, "Enrich UI elements with best-effort types from the RAG index. Use true/false to force; auto/default enables it for diagnostic, data and full profiles when session RAG is enabled"] = "auto",
     include_hidden: Annotated[bool, "Include invisible form elements/pages; visible/available/read_only flags are returned for serialized nodes"] = False,
     compact: Annotated[bool | None, "Return compact node fields; default follows ONEC_MCP_RESULT_VERBOSITY"] = None,
-    include_data: Annotated[bool, "Include data presentations from UI nodes; expensive on large forms, prefer field_value_text/table_rows/tabular_document_text for values"] = False,
+    include_data: Annotated[bool, "Include data presentations from UI nodes; expensive on large forms, prefer field_info/table_rows/tabular_document_text for values"] = False,
     include_command_panels: Annotated[bool | None, "Include command-panel subtrees; overrides profile/command_panels when specified"] = None,
     command_panels: Annotated[str, "Command-panel mode: auto/profile default, include, exclude, or only"] = "auto",
     profile: Annotated[str, "Output profile: navigation (default), diagnostic, data, full, no_command_panels, or command_panels"] = "navigation",
@@ -6784,7 +6818,7 @@ command panels. `parent_name` limits it to a subtree; `name`/`title`/`type`
 return a flat `objects` list (for one control prefer find_object). Large
 results are saved as a resource (`delivery=auto`); inspect them with
 ui_tree_resource_search/get_node/children or ui_tree_diff. For data use
-field_value_text, table_rows or tabular_document_text rather than
+field_info, table_rows or tabular_documents rather than
 `include_data=true` on large forms.
     """
     stage_timings: dict[str, float] = {}
@@ -7227,27 +7261,10 @@ async def ui_tree_resource_action(
     if action_key == "activate_field":
         return await activate_field(field_name=node_name or node_title, search_by_title=not bool(node_name), session_id=session_id)
     if action_key == "field_value_text":
-        return await field_value_text(field_name=node_name or node_title, search_by_title=not bool(node_name), session_id=session_id)
+        return await _bridge_call_recorded(session_id, "field_value_text", {"field_name": node_name or node_title, "search_by_title": not bool(node_name)})
     if action_key == "field_info":
         return await field_info(field_name=node_name or node_title, search_by_title=not bool(node_name), session_id=session_id)
     raise ValueError(f"Unsupported ui_tree_resource_action action: {action!r}. Expected focus, click_button, activate_field, field_value_text, or field_info.")
-
-@mcp.tool()
-async def command_bar(
-    include_timings: Annotated[bool, "Include diagnostic timing breakdown in the returned _timings field"] = False,
-    *,
-    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
-) -> Any:
-    """Low-level diagnostic: return active window/form command-bar data when available.
-
-    Prefer command_interface_sections/commands/search for application navigation commands,
-    and object_command_panel/object_context_menu for commands of a specific UI object.
-    """
-    result = await _bridge_call_recorded(session_id, "command_bar", {})
-    return result if include_timings else _strip_bridge_timings(result)
-
-
-
 
 def _ui_match_text(actual: Any, expected: str, *, substring: bool = False) -> bool:
     expected_norm = str(expected or "").strip().casefold()
@@ -7454,7 +7471,7 @@ def universal_report_workflow() -> str:
   варианта отчета и пользовательских настроек. Сначала прочитай живую форму через
   `ui_tree(profile="navigation")` и/или `search_objects(title=...)`.
 - Скриншот служит evidence и диагностикой, но не источником табличных данных.
-  Проверяй результат через `tabular_document_text` либо сохраненный файл.
+  Проверяй результат через `tabular_documents` либо сохраненный файл.
 
 ## Workflow
 
@@ -7560,7 +7577,7 @@ def event_log_workflow() -> str:
 
 - `Вывести список...` применяй для табличного представления текущей выборки;
   проверяй результат структурными средствами `tabular_documents` и
-  `tabular_document_text`, а большую выборку сохраняй через `tabular_document_save`.
+  `tabular_documents`, а большую выборку сохраняй через `tabular_document_save`.
 - `Выгрузить в файл...` предназначена для передачи в техподдержку. Это может
   включать чувствительные данные: сначала потребуй явное подтверждение объёма и
   получателя, затем подготовь узкий отбор. Проверь путь, формат и `saved=true`;
@@ -7661,23 +7678,6 @@ async def current_element(*,
     """Return the current active form element."""
     return await _bridge_call_recorded(session_id, "current_element", {})
 
-
-@mcp.tool()
-async def field_dropdown_state(
-    field_name: Annotated[str, "Field technical name or title"],
-    search_by_title: Annotated[bool, "Search field by visible title"] = False,
-    timeout: Annotated[int, "Wait timeout for dropdown formation"] = 60,
-    *,
-    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
-) -> Any:
-    """Return whether a field dropdown is open and its visible choice items."""
-    return await _bridge_call_recorded(
-        session_id,
-        "field_dropdown_state",
-        {"field_name": field_name, "search_by_title": search_by_title, "timeout": timeout},
-    )
-
-
 @mcp.tool()
 async def field_dropdown_close(
     field_name: Annotated[str, "Field technical name or title"],
@@ -7725,52 +7725,6 @@ async def table_cell_text(
 ) -> Any:
     """Return cell text from a tested table via GetCellText()."""
     return await _bridge_call_recorded(session_id, "table_cell_text", {"name": name, "title": title, "cell": cell})
-
-
-@mcp.tool()
-async def tabular_documents(
-    include_text: Annotated[bool, "Include tabular document cells"] = False,
-    row_start: Annotated[int, "First row to read when include_text=true (1-based)"] = 1,
-    row_end: Annotated[int, "Last row to read when include_text=true; 0 = row_start + max_rows - 1"] = 0,
-    column_start: Annotated[int, "First column to read when include_text=true (1-based)"] = 1,
-    column_end: Annotated[int, "Last column to read when include_text=true; 0 = column_start + max_columns - 1"] = 0,
-    max_rows: Annotated[int, "Maximum rows to read when row_end=0; 0 = all rows"] = 50,
-    max_columns: Annotated[int, "Maximum columns to read when column_end=0; 0 = all columns"] = 20,
-    *,
-    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
-) -> Any:
-    """List tabular document fields with dimensions; optionally include a cells range.
-
-    include_text is intended for small/partial ranges. For large tabular
-    documents, save/export the report to a file and analyze that file instead.
-    """
-    return await _bridge_call_recorded(session_id, "tabular_documents", {"include_text": include_text, "row_start": row_start, "row_end": row_end, "column_start": column_start, "column_end": column_end, "max_rows": max_rows, "max_columns": max_columns})
-
-
-@mcp.tool()
-async def tabular_document_text(
-    name: Annotated[str, "Tabular document field technical name"] = "",
-    title: Annotated[str, "Tabular document field visible title"] = "",
-    row_start: Annotated[int, "First row to read (1-based)"] = 1,
-    row_end: Annotated[int, "Last row to read; 0 = row_start + max_rows - 1"] = 0,
-    column_start: Annotated[int, "First column to read (1-based)"] = 1,
-    column_end: Annotated[int, "Last column to read; 0 = column_start + max_columns - 1"] = 0,
-    max_rows: Annotated[int, "Maximum rows to read when row_end=0; 0 = all rows"] = 50,
-    max_columns: Annotated[int, "Maximum columns to read when column_end=0; 0 = all columns"] = 20,
-    compact: Annotated[bool | None, "Return TSV text instead of nested cells; default follows ONEC_MCP_RESULT_VERBOSITY"] = None,
-    *,
-    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
-) -> Any:
-    """Return dimensions and a cells range of a tabular document field in the active window.
-
-    Use this for small tables or partial reads (headers, totals, spot checks). For
-    large reports/tabular documents, prefer tabular_document_save/report export
-    and analyze the saved PDF/XLSX/TXT/HTML file instead of reading UI cells one
-    by one.
-    """
-    result = await _bridge_call_recorded(session_id, "tabular_document_text", {"name": name, "title": title, "row_start": row_start, "row_end": row_end, "column_start": column_start, "column_end": column_end, "max_rows": max_rows, "max_columns": max_columns})
-    return _compact_tabular_text_result(result, include_raw=not _compact_enabled(compact))
-
 
 @mcp.tool()
 async def tabular_document_save(
@@ -8026,7 +7980,6 @@ def _looks_like_plain_text(data: bytes) -> bool:
 
 def _looks_like_mxl(data: bytes) -> bool:
     return data.startswith(b"MOXCEL") or data.lstrip(b"\xef\xbb\xbf").startswith(b"{8,")
-
 
 
 @mcp.tool()
@@ -8966,8 +8919,6 @@ async def _close_universal_report_message_box_if_present(
         await asyncio.sleep(1)
 
 
-
-
 async def _add_universal_report_selected_field(session_id: str, field: str, warnings: list[str]) -> bool:
     try:
         await _bridge_call_recorded(session_id, "group_activate_page", {
@@ -9373,7 +9324,6 @@ async def _metadata_catalog_rows_from_output(session_id: str, max_rows: int) -> 
         return _metadata_catalog_rows_from_tabular_cells(cells), warnings
     except Exception as exc:
         return [], [f"dynamic_list_output metadata read failed: {exc}"]
-
 
 
 def _metadata_catalog_rows_from_xlsx(path: Path) -> list[dict[str, str]]:
@@ -10522,29 +10472,6 @@ async def table_edit_info(
     """Return diagnostics for currently edited table row and its child fields."""
     return await _bridge_call_recorded(session_id, "table_edit_info", {"table": table})
 
-
-@mcp.tool()
-async def table_select_all(
-    name: Annotated[str, "Table technical name"] = "",
-    title: Annotated[str, "Table title substring"] = "",
-    *,
-    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
-) -> Any:
-    """Select all rows in a form table."""
-    return await _bridge_call_recorded(session_id, "table_select_all", {"name": name, "title": title})
-
-
-@mcp.tool()
-async def table_clear_selection(
-    name: Annotated[str, "Table technical name"] = "",
-    title: Annotated[str, "Table title substring"] = "",
-    *,
-    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
-) -> Any:
-    """Clear all row selection in a form table."""
-    return await _bridge_call_recorded(session_id, "table_clear_selection", {"name": name, "title": title})
-
-
 @mcp.tool()
 async def table_delete_row(
     name: Annotated[str, "Table technical name"] = "",
@@ -10576,43 +10503,6 @@ async def table_toggle_delete_mark(
 ) -> Any:
     """Toggle the delete mark on the current row."""
     return await _bridge_call_recorded(session_id, "table_toggle_delete_mark", {"name": name, "title": title})
-
-
-@mcp.tool()
-async def table_begin_edit(
-    name: Annotated[str, "Table technical name"] = "",
-    title: Annotated[str, "Table title substring"] = "",
-    *,
-    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
-) -> Any:
-    """Begin editing the current row in a form table."""
-    try:
-        return await _bridge_call_recorded(session_id, "table_begin_edit", {"name": name, "title": title})
-    except BridgeError as bridge_exc:
-        return _table_tool_bridge_error_result("table_begin_edit", name, title, bridge_exc)
-
-
-@mcp.tool()
-async def table_end_edit(
-    name: Annotated[str, "Table technical name"] = "",
-    title: Annotated[str, "Table title substring"] = "",
-    *,
-    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
-) -> Any:
-    """End editing the current row in a form table."""
-    return await _bridge_call_recorded(session_id, "table_end_edit", {"name": name, "title": title})
-
-
-@mcp.tool()
-async def table_editing_state(
-    name: Annotated[str, "Table technical name"] = "",
-    title: Annotated[str, "Table title substring"] = "",
-    *,
-    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
-) -> Any:
-    """Return whether a form table is currently in edit mode."""
-    return await _bridge_call_recorded(session_id, "table_editing_state", {"name": name, "title": title})
-
 
 @mcp.tool()
 async def dynamic_list_metadata_available_fields(
@@ -10781,7 +10671,6 @@ async def form_open_settings(
 ) -> Any:
     """Open the current form customization dialog via 'Изменить форму'."""
     return await _bridge_call_recorded(session_id, "form_open_settings", {"button": button})
-
 
 
 @mcp.tool()
@@ -11008,7 +10897,7 @@ def screenshot(
     """Save a screenshot of the active 1C window (with its floating form windows) and return the path.
 
 Over StreamableHTTP the result also has a one-hour download URL. For evidence
-and UI diagnostics only: read data with table_rows, tabular_document_text or
+and UI diagnostics only: read data with table_rows, tabular_documents or
 dynamic_list_output instead.
     """
     output_path = Path(path)
