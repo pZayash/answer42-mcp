@@ -173,9 +173,11 @@ answer42
 
 Как подключить группы:
 
-- **на ходу** — инструментом `tool_groups(action="enable", groups="lists,commands")`; клиент получает `tools/list_changed` и перечитывает список (stdio и stateful HTTP);
+- **на ходу** — инструментом `tool_groups(action="enable", groups="lists,commands")`; клиент получает `tools/list_changed` и перечитывает список. Выбор запоминается за клиентом: в stdio — за процессом, в stateful HTTP — за `Mcp-Session-Id`, у клиентов без сессии (протокол MCP 2026-07-28, stateless HTTP) — за `?client=<имя>` / `X-Answer42-Client`, а если его нет — за учётной записью токена;
 - **для клиента HTTP-сервера** — параметром адреса: `http://127.0.0.1:8742/mcp?tools=lists,commands` (или заголовком `X-Answer42-Tools`);
 - **для сервера целиком** — `--tool-profile` / `ONEC_MCP_TOOL_PROFILE` (например `core,lists` или `full`). Старые имена профилей (`ui`, `dynamic`, `tabular`, `sessions`, `windows`) продолжают работать.
+
+**Старый режим (статический список).** `--tool-groups off` или `ONEC_MCP_TOOL_GROUPS=off` выключает группы: клиент сразу видит весь список профиля (по умолчанию `full`), инструмента `tool_groups` нет, RAG-инструменты не скрываются. Отдельному клиенту полный список можно дать и без выключения групп — `?tools=full`.
 
 ## Безопасное хранение логинов и паролей
 

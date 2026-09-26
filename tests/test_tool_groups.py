@@ -100,10 +100,27 @@ def test_rag_tools_appear_only_while_rag_is_active():
     assert "rag_query" not in server._visible_tool_names(ctx)
 
 
-def test_stateless_http_cannot_remember_groups():
-    ctx = _context(_Session(), _Request())  # no mcp-session-id header
-    with pytest.raises(ToolError, match=r"\?tools=lists"):
-        _call_groups(ctx, action="enable", groups="lists")
+def test_modern_protocol_keeps_groups_per_client_id_or_account(monkeypatch):
+    """MCP 2026-07-28 and stateless HTTP have no session: key by ?client= or by the token's account."""
+    monkeypatch.setattr(server, "_current_account_id", lambda: "acct-1")
+    notified = []
+
+    async def fake_publish(reason="manual"):
+        notified.append(reason)
+
+    monkeypatch.setattr(server, "_publish_tools_list_changed", fake_publish)
+    first = _context(_Session(), _Request(query={"client": "claude-a"}))
+    before = server._visible_tool_names(first)
+    result = _call_groups(first, action="enable", groups="lists")
+    assert result["scope"] == "client"
+    assert "dynamic_list_output" in server._visible_tool_names(_context(_Session(), _Request(query={"client": "claude-a"})))
+    assert "dynamic_list_output" not in server._visible_tool_names(_context(_Session(), _Request(query={"client": "claude-b"})))
+    asyncio.run(server._notify_tool_list_changed_if_needed(first, before))
+    assert notified  # delivered through the subscriptions/listen bus
+
+    anonymous = _context(_Session(), _Request())
+    assert _call_groups(anonymous, action="enable", groups="commands")["scope"] == "account"
+    assert "command_interface_search" in server._visible_tool_names(_context(_Session(), _Request()))
 
 
 def test_stateful_http_session_remembers_groups():
@@ -172,3 +189,35 @@ def test_stdio_groups_persist_across_requests():
     """stdio serves one client per process; each request has a fresh session object."""
     _call_groups(_context(_Session()), action="enable", groups="recording")
     assert "recording_start" in server._visible_tool_names(_context(_Session()))
+
+
+def test_static_mode_lists_the_profile_without_gating(monkeypatch):
+    """--tool-groups off: the previous static list; rag not gated, no tool_groups."""
+    monkeypatch.setattr(server, "_DYNAMIC_TOOL_GROUPS", False)
+    monkeypatch.setattr(server, "_DEFAULT_TOOL_GROUPS", set(tool_groups.ALL_GROUPS))
+    visible = server._visible_tool_names(_context(_Session()))
+    assert "rag_query" in visible and "dynamic_list_output" in visible
+    assert "tool_groups" not in visible
+    with pytest.raises(ToolError, match="switched off"):
+        _call_groups(_context(_Session()), action="list")
+
+
+def test_tool_groups_switch_and_default_profile_follow_the_mode(monkeypatch):
+    captured = {}
+
+    def fake_configure(profile):
+        captured["profile"] = profile
+        raise SystemExit(0)
+
+    monkeypatch.setattr(server, "_DYNAMIC_TOOL_GROUPS", True)
+    monkeypatch.setattr(server, "_configure_default_tool_profile", fake_configure)
+    monkeypatch.delenv("ONEC_MCP_TOOL_PROFILE", raising=False)
+    for argv, expected_mode, expected_profile in (
+        (["--tool-groups", "off"], False, "full"),
+        ([], True, "core"),
+        (["--tool-groups", "off", "--tool-profile", "core,lists"], False, "core,lists"),
+    ):
+        with pytest.raises(SystemExit):
+            server.main(argv)
+        assert server._DYNAMIC_TOOL_GROUPS is expected_mode
+        assert captured["profile"] == expected_profile
