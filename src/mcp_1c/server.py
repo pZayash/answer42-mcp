@@ -33,9 +33,18 @@ from mcp.server.lowlevel import NotificationOptions
 from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 from mcp.server.mcpserver.resources import FileResource
 from mcp.server.subscriptions import ToolsListChanged
+from mcp_types import ListToolsResult, PaginatedRequestParams
 from starlette.responses import FileResponse, PlainTextResponse
 
-from . import __version__, os_support, release_helper, runtime, skill_installer, win_desktop
+from . import (
+    __version__,
+    os_support,
+    release_helper,
+    runtime,
+    skill_installer,
+    tool_groups,
+    win_desktop,
+)
 from . import platform as _platform
 from .auth import build_auth_settings, build_token_verifier, load_static_token_config
 from .auth import current_account_id as _current_account_id
@@ -165,66 +174,9 @@ _SHARED_FILE_SERVERS_FILE = os_support.runtime_path("ONEC_MCP_SHARED_FILE_SERVER
 _SHARED_FILE_SERVERS_LOCK = os_support.runtime_path("ONEC_MCP_SHARED_FILE_SERVERS_LOCK", "shared-file-servers.lock")
 _METADATA_OBJECTS_CACHE: dict[str, dict[str, Any]] = {}
 
-TOOL_PROFILE_GROUPS: dict[str, set[str]] = {
-    "sessions": {
-        "sessions_list", "session_status", "start_session", "stop_session",
-        "credentials_check", "credentials_save", "credentials_remove", "credentials_list",
-    },
-    "windows": {"active_window", "windows_list", "activate_window", "goto_window"},
-    "forms": {
-        "wait_object", "wait_form", "wait_window", "user_messages", "close_user_messages_panel", "current_error_info",
-        "client_busy_status", "wait_client_idle",
-        "set_file_dialog_result", "clear_file_dialog_result", "field_info",
-        "field_dropdown", "form_next_element", "form_previous_element", "form_state", "form_default_button",
-        "wait_form_closed", "object_command_panel", "object_context_menu", "window_command_interface",
-        "command_interface_sections", "command_interface_commands", "command_interface_search", "group_set_expanded",
-        "group_activate_page", "group_state", "decoration_links", "decoration_click_link", "decoration_click",
-        "ui_tree", "ui_tree_resource_search", "ui_tree_resource_get_node", "ui_tree_resource_children", "ui_tree_diff",
-        "ui_tree_resource_action",
-        "click_button", "find_object", "search_objects", "get_object", "focus_object",
-        "open_navigation_link", "current_element", "field_dropdown_close", "toggle_field",
-        "set_field_value", "activate_field", "choose_field_from_list", "choose_field_first_row", "choose_current_row",
-        "set_form_fields", "save_form", "close_form", "form_open_settings",
-    },
-    "tables": {
-        "table_current_row", "table_selected_rows", "table_cell_text", "table_rows", "table_find_row", "table_goto_row",
-        "table_move_row", "table_add_row", "table_set_field", "table_set_row_values", "table_choose_field_from_list",
-        "table_edit_info", "table_selection", "table_delete_row", "table_copy_row",
-        "table_toggle_delete_mark", "table_edit",
-    },
-    "tabular": {"tabular_documents", "tabular_document_save", "tabular_document_state_display"},
-    "dynamic": {
-        "dynamic_list_metadata_available_fields", "dynamic_list_settings_available_fields", "dynamic_list_set_settings",
-        "dynamic_list_current_settings", "dynamic_list_sort_by_column", "dynamic_list_output", "dynamic_list_open_settings",
-        "dynamic_list_find", "dynamic_list_clear_settings",
-    },
-    "rag": {
-        "rag_source_add", "rag_sources_add_from_directory", "rag_source_roots_list", "rag_available_configurations",
-        "rag_session_autoconfigure", "rag_sources_list", "rag_snapshot_create", "rag_snapshots_list", "rag_index_build",
-        "rag_lookup_object", "rag_query", "metadata_objects_from_catalog", "metadata_objects_catalog_cache_clear",
-        "configuration_name_version_from_subsystems", "installed_extensions_from_catalog",
-    },
-    "recording": {"recording_start", "recording_capture", "recording_stop", "screenshot"},
-}
-TOOL_PROFILE_CORE: set[str] = TOOL_PROFILE_GROUPS["sessions"] | {
-    "active_window", "windows_list", "activate_window", "goto_window",
-    "wait_object", "wait_form", "wait_window", "user_messages", "close_user_messages_panel", "current_error_info",
-    "client_busy_status", "wait_client_idle",
-    "field_info", "field_dropdown", "field_dropdown_close",
-    "toggle_field", "set_field_value", "activate_field", "choose_field_from_list", "choose_field_first_row", "choose_current_row",
-    "form_state", "form_default_button", "wait_form_closed", "click_button", "find_object", "search_objects", "get_object",
-    "focus_object", "open_navigation_link", "current_element", "table_current_row", "table_selected_rows", "table_cell_text",
-    "table_rows", "table_find_row", "table_goto_row", "table_move_row", "table_add_row", "table_set_field", "table_set_row_values",
-    "table_choose_field_from_list", "table_edit_info", "table_edit",
-    "tabular_documents", "tabular_document_save", "screenshot",
-    "ui_tree",
-}
-TOOL_PROFILE_ALIASES: dict[str, set[str]] = {
-    "core": TOOL_PROFILE_CORE,
-    "ui": TOOL_PROFILE_GROUPS["sessions"] | TOOL_PROFILE_GROUPS["windows"] | TOOL_PROFILE_GROUPS["forms"] | TOOL_PROFILE_GROUPS["tables"] | TOOL_PROFILE_GROUPS["tabular"] | TOOL_PROFILE_GROUPS["recording"],
-    "all": set(),
-    "full": set(),
-}
+# Tool groups live in tool_groups.py; these names are kept for callers/tests.
+TOOL_PROFILE_GROUPS: dict[str, set[str]] = {name: set(tools) for name, tools in tool_groups.GROUPS.items()}
+TOOL_PROFILE_CORE: set[str] = set(tool_groups.GROUPS[tool_groups.CORE])
 
 
 @contextmanager
@@ -4081,6 +4033,172 @@ def _visible_tool_error(name: str, exc: UnexpectedToolError) -> ToolError:
     return ToolError(f"Error executing tool {name}: {type(cause).__name__}: {detail}")
 
 
+# --- per-client tool visibility --------------------------------------------
+# All tools stay registered; tools/list only shows the groups visible to the
+# requesting client (see tool_groups.py).  Visible = server profile (or the
+# client's ?tools= URL parameter) + groups enabled by that MCP session + rag
+# while RAG is active.  MCP sessions are the stdio connection or one stateful
+# StreamableHTTP session (Mcp-Session-Id); stateless HTTP has no session to
+# remember groups in, so there only ?tools= applies.
+
+_DEFAULT_TOOL_GROUPS: set[str] = tool_groups.parse_profile(tool_groups.DEFAULT_PROFILE)
+_PROCESS_TOOL_GROUPS: set[str] = set()  # stdio (one client per process) and direct calls
+_HTTP_SESSION_TOOL_GROUPS: dict[str, set[str]] = {}
+_HTTP_SESSION_TOOL_GROUPS_LIMIT = 1000
+_CURRENT_MCP_REQUEST: contextvars.ContextVar[Any] = contextvars.ContextVar("answer42_mcp_request", default=None)
+_TOOLS_QUERY_PARAMETER = "tools"
+_TOOLS_HEADER = "x-answer42-tools"
+
+
+def _requested_tool_groups(request_context: Any) -> set[str]:
+    request = getattr(request_context, "request", None)
+    if request is not None:
+        value = ""
+        with suppress(Exception):
+            value = request.query_params.get(_TOOLS_QUERY_PARAMETER) or request.headers.get(_TOOLS_HEADER) or ""
+        if value:
+            try:
+                return tool_groups.parse_profile(value)
+            except ValueError as exc:
+                logging.warning("Ignoring tools=%r from client: %s", value, exc)
+    return set(_DEFAULT_TOOL_GROUPS)
+
+
+def _mcp_session_id(request_context: Any) -> str:
+    request = getattr(request_context, "request", None)
+    if request is None:
+        return ""
+    with suppress(Exception):
+        return str(request.headers.get("mcp-session-id") or "")
+    return ""
+
+
+def _enabled_tool_groups(request_context: Any) -> set[str]:
+    # The SDK builds a new session object for every request, so it cannot be the
+    # key: stateful StreamableHTTP is keyed by the Mcp-Session-Id header, stdio
+    # (one client per process) by the process itself.
+    http_session_id = _mcp_session_id(request_context)
+    if http_session_id:
+        groups = _HTTP_SESSION_TOOL_GROUPS.pop(http_session_id, None)
+        if groups is None:
+            groups = set()
+            while len(_HTTP_SESSION_TOOL_GROUPS) >= _HTTP_SESSION_TOOL_GROUPS_LIMIT:
+                _HTTP_SESSION_TOOL_GROUPS.pop(next(iter(_HTTP_SESSION_TOOL_GROUPS)))
+        _HTTP_SESSION_TOOL_GROUPS[http_session_id] = groups  # most recently used last
+        return groups
+    if getattr(request_context, "request", None) is not None:
+        return set()  # stateless HTTP: nothing to remember the groups in
+    # stdio: one client per server process.
+    return _PROCESS_TOOL_GROUPS
+
+
+def _rag_active() -> bool:
+    return bool(_RAG_ENABLED) and any(getattr(sess, "rag_enabled", False) for sess in _SESSIONS.values())
+
+
+def _visible_tool_groups(request_context: Any) -> set[str]:
+    groups = _requested_tool_groups(request_context) | _enabled_tool_groups(request_context)
+    groups.discard(tool_groups.RAG)
+    if _rag_active():
+        groups.add(tool_groups.RAG)
+    return groups
+
+
+def _visible_tool_names(request_context: Any) -> set[str]:
+    visible = tool_groups.tools_for_groups(_visible_tool_groups(request_context))
+    return {
+        name for name in mcp._tool_manager._tools
+        if name in visible or tool_groups.group_of(name) is None  # e.g. dev_eval
+    }
+
+
+def _is_stateless_http(request_context: Any) -> bool:
+    return getattr(request_context, "request", None) is not None and not _mcp_session_id(request_context)
+
+
+def _auto_enable_tool_groups(request_context: Any, tool_name: str, result: Any) -> None:
+    """Show the tools a result points to: a ui_tree saved as a resource needs ui_snapshots."""
+    if tool_name != "ui_tree":
+        return
+    text = "".join(str(getattr(block, "text", "")) for block in getattr(result, "content", None) or [])
+    if '"resource_uri"' in text:
+        _enabled_tool_groups(request_context).add("ui_snapshots")
+
+
+async def _notify_tool_list_changed_if_needed(request_context: Any, visible_before: set[str]) -> None:
+    session = getattr(request_context, "session", None)
+    if session is None or _visible_tool_names(request_context) == visible_before:
+        return
+    try:
+        await session.send_tool_list_changed()
+    except Exception as exc:
+        logging.debug("tools/list_changed was not delivered: %s", exc)
+
+
+async def _handle_list_tools_for_client(ctx: Any, params: Any) -> ListToolsResult:
+    visible = _visible_tool_names(ctx)
+    return ListToolsResult(tools=[tool for tool in await mcp.list_tools() if tool.name in visible])
+
+
+def _tool_groups_description() -> str:
+    lines = [(
+        "List or enable/disable groups of Answer42 tools. Only 'core' is on by default; enable a group "
+        "when the task needs it and the client will reload its tool list. Groups:"
+    )]
+    lines += [f"- {name}: {text}" for name, text in tool_groups.DESCRIPTIONS.items() if name != tool_groups.CORE]
+    return "\n".join(lines)
+
+
+async def manage_tool_groups(
+    action: Annotated[str, "list | enable | disable"] = "list",
+    groups: Annotated[str, "Comma-separated group names for enable/disable, e.g. lists,commands"] = "",
+) -> dict[str, Any]:
+    request_context = _CURRENT_MCP_REQUEST.get()
+    action_key = str(action or "list").strip().lower()
+    if action_key not in {"list", "enable", "disable"}:
+        raise ToolError(f"Unknown action {action!r}: expected list, enable or disable")
+    if action_key != "list":
+        try:
+            names = tool_groups.parse_profile(groups) - {tool_groups.CORE}
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
+        if not names:
+            raise ToolError("Pass the groups to change, e.g. groups='lists,commands'")
+        if action_key == "enable" and tool_groups.RAG in names and not _rag_active():
+            raise ToolError(
+                "RAG is not active, so its tools stay hidden. Start a session with "
+                "start_session(rag_enabled=true) (or summary_rag_config=...); the rag tools then appear automatically."
+            )
+        if _is_stateless_http(request_context):
+            raise ToolError(
+                "This StreamableHTTP server is stateless and cannot remember groups per client: "
+                "add ?tools=" + ",".join(sorted(names)) + " to the MCP server URL instead."
+            )
+        enabled = _enabled_tool_groups(request_context)
+        if action_key == "enable":
+            enabled.update(names)
+        else:
+            enabled.difference_update(names)
+    visible = _visible_tool_groups(request_context)
+    return {
+        "groups": [
+            {
+                "name": name,
+                "description": tool_groups.DESCRIPTIONS.get(name, ""),
+                "tools": len(tool_groups.GROUPS[name]),
+                "visible": name in visible,
+                **({"available": _rag_active()} if name == tool_groups.RAG else {}),
+            }
+            for name in tool_groups.GROUPS
+        ],
+        "visible_tools": len(_visible_tool_names(request_context)),
+    }
+
+
+mcp.add_tool(manage_tool_groups, name="tool_groups", description=_tool_groups_description())
+mcp._lowlevel_server.add_request_handler("tools/list", PaginatedRequestParams, _handle_list_tools_for_client)
+
+
 def _install_tool_call_logger() -> None:
     """Wrap mcp.call_tool so every MCP tool invocation is logged."""
     global _TOOL_CALL_WRAPPER_INSTALLED
@@ -4107,13 +4225,18 @@ def _install_tool_call_logger() -> None:
         session_id = DEFAULT_SESSION
         if isinstance(params, dict):
             session_id = params.get("session_id", DEFAULT_SESSION)
+        context = args[2] if len(args) >= 3 else kwargs.get("context")
+        request_context = getattr(context, "_request_context", None)
+        visible_before = _visible_tool_names(request_context) if request_context is not None else None
         start = time.monotonic()
         call_token = _MCP_TOOL_CALL_ACTIVE.set(True)
+        request_token = _CURRENT_MCP_REQUEST.set(request_context)
         omitted_token = _SESSION_ID_OMITTED.set(
             not (isinstance(params, dict) and str(params.get("session_id") or "").strip())
         )
         try:
             result = _compact_tool_result(await original(*args, **kwargs), name, params)
+            _auto_enable_tool_groups(request_context, name, result)
             _log_tool_call(session_id, name, params, result, None, time.monotonic() - start)
             return result
         except UnexpectedToolError as exc:
@@ -4125,7 +4248,12 @@ def _install_tool_call_logger() -> None:
             raise
         finally:
             _SESSION_ID_OMITTED.reset(omitted_token)
+            _CURRENT_MCP_REQUEST.reset(request_token)
             _MCP_TOOL_CALL_ACTIVE.reset(call_token)
+            if visible_before is not None:
+                # A call can change what this client may see: tool_groups, RAG
+                # activated by start_session, a ui_tree saved as a resource.
+                await _notify_tool_list_changed_if_needed(request_context, visible_before)
 
     mcp.call_tool = _logged_call_tool
     _TOOL_CALL_WRAPPER_INSTALLED = True
@@ -11128,37 +11256,19 @@ def _register_dev_tools(enabled: bool) -> None:
 
 
 def _tool_names_for_profile(profile: str) -> set[str] | None:
-    parts = [part.strip().lower() for part in re.split(r"[,;\s]+", profile or "") if part.strip()]
-    if not parts or any(part in {"all", "full"} for part in parts):
+    """Tool names of a profile; None means every group (full/all)."""
+    groups = tool_groups.parse_profile(profile)
+    if groups >= tool_groups.ALL_GROUPS:
         return None
-    selected: set[str] = set()
-    unknown: list[str] = []
-    for part in parts:
-        names = TOOL_PROFILE_ALIASES.get(part) or TOOL_PROFILE_GROUPS.get(part)
-        if names is None:
-            unknown.append(part)
-            continue
-        selected.update(names)
-    if unknown:
-        known = sorted({*TOOL_PROFILE_GROUPS, *TOOL_PROFILE_ALIASES})
-        raise ValueError(f"unknown tool profile(s): {', '.join(unknown)}; known profiles: {', '.join(known)}")
-    return selected
+    return tool_groups.tools_for_groups(groups)
 
 
-def _apply_tool_profile(profile: str) -> dict[str, Any]:
-    allowed = _tool_names_for_profile(profile)
-    if allowed is None:
-        return {"profile": profile or "full", "mode": "full", "removed": []}
-    existing = set(mcp._tool_manager._tools.keys())
-    removed: list[str] = []
-    for name in sorted(existing - allowed):
-        try:
-            mcp.remove_tool(name)
-            removed.append(name)
-        except Exception:
-            pass
-    remaining = sorted(set(mcp._tool_manager._tools.keys()))
-    return {"profile": profile, "mode": "filtered", "remaining_count": len(remaining), "removed_count": len(removed), "removed": removed}
+def _configure_default_tool_profile(profile: str) -> dict[str, Any]:
+    """Set the groups a client sees by default; tools stay registered so they can be enabled later."""
+    global _DEFAULT_TOOL_GROUPS
+    _DEFAULT_TOOL_GROUPS = tool_groups.parse_profile(profile or tool_groups.DEFAULT_PROFILE)
+    visible = _visible_tool_names(None)
+    return {"profile": profile, "groups": sorted(_DEFAULT_TOOL_GROUPS), "visible_count": len(visible)}
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -11233,8 +11343,10 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument(
         "--tool-profile",
-        default=os.getenv("ONEC_MCP_TOOL_PROFILE", "full"),
-        help="comma-separated tool profile groups: core, ui, sessions, windows, forms, tables, tabular, dynamic, rag, recording, full, all",
+        default=os.getenv("ONEC_MCP_TOOL_PROFILE", tool_groups.DEFAULT_PROFILE),
+        help="tool groups a client sees by default (core is always on): core, forms, tables, lists, commands, "
+        "ui_snapshots, metadata, rag, recording, credentials, or ui/full. Clients can override it with ?tools= "
+        "in the URL or enable groups with the tool_groups tool; rag appears only while RAG is active.",
     )
     parser.add_argument(
         "--tool-log",
@@ -11284,6 +11396,13 @@ def main(argv: list[str] | None = None) -> None:
         default=os.getenv("ONEC_MCP_HTTP_STATELESS", "1").strip().lower() in {"1", "true", "yes", "on"},
         help="use stateless StreamableHTTP mode (default); disable for resumable sessions",
     )
+    parser.add_argument(
+        "--http-stateful",
+        action="store_false",
+        dest="http_stateless",
+        help="stateful StreamableHTTP (Mcp-Session-Id): per-client tool groups and tools/list_changed "
+        "notifications; same as ONEC_MCP_HTTP_STATELESS=0",
+    )
     args = parser.parse_args(argv)
 
     _configure_tool_logging(args.tool_log)
@@ -11297,9 +11416,9 @@ def main(argv: list[str] | None = None) -> None:
         _register_startup_rag_source_dirs(args.rag_source_dir or [], args.rag_source_prefix, not args.rag_source_no_recursive, args.rag_source_max_depth)
     else:
         logging.info("Built-in Answer42 RAG is disabled")
-    profile_result = _apply_tool_profile(args.tool_profile)
+    profile_result = _configure_default_tool_profile(args.tool_profile)
     _polish_tool_schemas()
-    logging.info("Tool profile: %s (mode=%s, remaining=%d, removed=%d)", profile_result["profile"], profile_result["mode"], profile_result.get("remaining_count", 0), profile_result.get("removed_count", 0))
+    logging.info("Tool profile: %s (groups=%s, visible=%d)", profile_result["profile"], ",".join(profile_result["groups"]), profile_result["visible_count"])
     _enable_tools_list_changed_capability()
     _start_autoreload_watcher(args.dev, args.dev_restart_timeout)
     if args.session_scope:
