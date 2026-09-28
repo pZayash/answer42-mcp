@@ -33,9 +33,18 @@ from mcp.server.lowlevel import NotificationOptions
 from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 from mcp.server.mcpserver.resources import FileResource
 from mcp.server.subscriptions import ToolsListChanged
+from mcp_types import ListToolsResult, PaginatedRequestParams
 from starlette.responses import FileResponse, PlainTextResponse
 
-from . import __version__, os_support, release_helper, runtime, skill_installer, win_desktop
+from . import (
+    __version__,
+    os_support,
+    release_helper,
+    runtime,
+    skill_installer,
+    tool_groups,
+    win_desktop,
+)
 from . import platform as _platform
 from .auth import build_auth_settings, build_token_verifier, load_static_token_config
 from .auth import current_account_id as _current_account_id
@@ -79,6 +88,11 @@ _SCOPE_LOCK_HANDLE: Any | None = None
 GLOBAL_REGISTRY_FILE = os_support.runtime_path("ONEC_MCP_GLOBAL_SESSION_REGISTRY", "global-sessions.json")
 GLOBAL_REGISTRY_LOCK = os_support.runtime_path("ONEC_MCP_GLOBAL_SESSION_REGISTRY_LOCK", "global-sessions.lock")
 GLOBAL_ORPHAN_TTL_SECONDS = int(os.getenv("ONEC_MCP_ORPHAN_TTL_SECONDS", "1800"))
+# Session data folders (<data dir>/sessions/<id>) not used by any live session are
+# deleted after this many hours; 0 keeps them (heavy caches are still trimmed).
+SESSION_DATA_TTL_HOURS = float(os.getenv("ONEC_MCP_SESSION_DATA_TTL_HOURS", "24"))
+SESSION_DATA_SWEEP_INTERVAL_SECONDS = 3600.0
+_SESSION_DATA_GRACE_HOURS = 1.0
 AUTORELOAD_PID_FILE = os_support.runtime_path("ONEC_MCP_AUTORELOAD_PID_FILE", "answer42-autoreload.pid")
 AUTORELOAD_LOG_FILE = os_support.runtime_path("ONEC_MCP_AUTORELOAD_LOG_FILE", "answer42-autoreload.log")
 RAG_BINDINGS_FILE = os_support.runtime_path("ONEC_MCP_RAG_BINDINGS", "rag-bindings.json")
@@ -165,66 +179,9 @@ _SHARED_FILE_SERVERS_FILE = os_support.runtime_path("ONEC_MCP_SHARED_FILE_SERVER
 _SHARED_FILE_SERVERS_LOCK = os_support.runtime_path("ONEC_MCP_SHARED_FILE_SERVERS_LOCK", "shared-file-servers.lock")
 _METADATA_OBJECTS_CACHE: dict[str, dict[str, Any]] = {}
 
-TOOL_PROFILE_GROUPS: dict[str, set[str]] = {
-    "sessions": {
-        "sessions_list", "session_status", "start_session", "stop_session",
-        "credentials_check", "credentials_save", "credentials_remove", "credentials_list",
-    },
-    "windows": {"active_window", "windows_list", "activate_window", "goto_window"},
-    "forms": {
-        "wait_object", "wait_form", "wait_window", "user_messages", "close_user_messages_panel", "current_error_info",
-        "client_busy_status", "wait_client_idle",
-        "set_file_dialog_result", "clear_file_dialog_result", "field_info",
-        "field_dropdown", "form_next_element", "form_previous_element", "form_state", "form_default_button",
-        "wait_form_closed", "object_command_panel", "object_context_menu", "window_command_interface",
-        "command_interface_sections", "command_interface_commands", "command_interface_search", "group_set_expanded",
-        "group_activate_page", "group_state", "decoration_links", "decoration_click_link", "decoration_click",
-        "ui_tree", "ui_tree_resource_search", "ui_tree_resource_get_node", "ui_tree_resource_children", "ui_tree_diff",
-        "ui_tree_resource_action",
-        "click_button", "find_object", "search_objects", "get_object", "focus_object",
-        "open_navigation_link", "current_element", "field_dropdown_close", "toggle_field",
-        "set_field_value", "activate_field", "choose_field_from_list", "choose_field_first_row", "choose_current_row",
-        "set_form_fields", "save_form", "close_form", "form_open_settings",
-    },
-    "tables": {
-        "table_current_row", "table_selected_rows", "table_cell_text", "table_rows", "table_find_row", "table_goto_row",
-        "table_move_row", "table_add_row", "table_set_field", "table_set_row_values", "table_choose_field_from_list",
-        "table_edit_info", "table_selection", "table_delete_row", "table_copy_row",
-        "table_toggle_delete_mark", "table_edit",
-    },
-    "tabular": {"tabular_documents", "tabular_document_save", "tabular_document_state_display"},
-    "dynamic": {
-        "dynamic_list_metadata_available_fields", "dynamic_list_settings_available_fields", "dynamic_list_set_settings",
-        "dynamic_list_current_settings", "dynamic_list_sort_by_column", "dynamic_list_output", "dynamic_list_open_settings",
-        "dynamic_list_find", "dynamic_list_clear_settings",
-    },
-    "rag": {
-        "rag_source_add", "rag_sources_add_from_directory", "rag_source_roots_list", "rag_available_configurations",
-        "rag_session_autoconfigure", "rag_sources_list", "rag_snapshot_create", "rag_snapshots_list", "rag_index_build",
-        "rag_lookup_object", "rag_query", "metadata_objects_from_catalog", "metadata_objects_catalog_cache_clear",
-        "configuration_name_version_from_subsystems", "installed_extensions_from_catalog",
-    },
-    "recording": {"recording_start", "recording_capture", "recording_stop", "screenshot"},
-}
-TOOL_PROFILE_CORE: set[str] = TOOL_PROFILE_GROUPS["sessions"] | {
-    "active_window", "windows_list", "activate_window", "goto_window",
-    "wait_object", "wait_form", "wait_window", "user_messages", "close_user_messages_panel", "current_error_info",
-    "client_busy_status", "wait_client_idle",
-    "field_info", "field_dropdown", "field_dropdown_close",
-    "toggle_field", "set_field_value", "activate_field", "choose_field_from_list", "choose_field_first_row", "choose_current_row",
-    "form_state", "form_default_button", "wait_form_closed", "click_button", "find_object", "search_objects", "get_object",
-    "focus_object", "open_navigation_link", "current_element", "table_current_row", "table_selected_rows", "table_cell_text",
-    "table_rows", "table_find_row", "table_goto_row", "table_move_row", "table_add_row", "table_set_field", "table_set_row_values",
-    "table_choose_field_from_list", "table_edit_info", "table_edit",
-    "tabular_documents", "tabular_document_save", "screenshot",
-    "ui_tree",
-}
-TOOL_PROFILE_ALIASES: dict[str, set[str]] = {
-    "core": TOOL_PROFILE_CORE,
-    "ui": TOOL_PROFILE_GROUPS["sessions"] | TOOL_PROFILE_GROUPS["windows"] | TOOL_PROFILE_GROUPS["forms"] | TOOL_PROFILE_GROUPS["tables"] | TOOL_PROFILE_GROUPS["tabular"] | TOOL_PROFILE_GROUPS["recording"],
-    "all": set(),
-    "full": set(),
-}
+# Tool groups live in tool_groups.py; these names are kept for callers/tests.
+TOOL_PROFILE_GROUPS: dict[str, set[str]] = {name: set(tools) for name, tools in tool_groups.GROUPS.items()}
+TOOL_PROFILE_CORE: set[str] = set(tool_groups.GROUPS[tool_groups.CORE])
 
 
 @contextmanager
@@ -1609,7 +1566,71 @@ async def _recover_scoped_sessions_if_needed(stale_lock_existed: bool) -> None:
     _persist_sessions()
 
 
+# Regenerated by the standalone server on every start; session-data alone is
+# ~640 MB per session and made abandoned session folders pile up to many GB.
+_IBSRV_CACHE_SUBDIRS = ("session-data", "temp", "perf-data")
+
+
+def _trim_session_data_dir(data_dir: Path) -> None:
+    """Drop the standalone-server caches of a stopped session, keeping the reusable manager infobase and logs."""
+    for ibsrv_dir in data_dir.glob("ibsrv-data*"):
+        for name in _IBSRV_CACHE_SUBDIRS:
+            cache = ibsrv_dir / name
+            if cache.is_dir():
+                shutil.rmtree(cache, ignore_errors=True)
+
+
+def _session_data_dirs_in_use() -> set[str]:
+    in_use = {os.path.normcase(str(sess.data_dir.resolve())) for sess in _SESSIONS.values()}
+    with os_support.file_lock(GLOBAL_REGISTRY_LOCK):
+        records = list(_load_global_registry_unlocked().get("sessions", {}).values())
+    for rec in records:
+        # Orphaned records may still own running 1C processes until the reaper kills them.
+        if rec.get("data_dir"):
+            in_use.add(os.path.normcase(str(Path(rec["data_dir"]).resolve())))
+    return in_use
+
+
+def _last_modified(path: Path) -> float:
+    latest = path.stat().st_mtime
+    for child in path.rglob("*"):
+        with suppress(OSError):
+            latest = max(latest, child.stat().st_mtime)
+    return latest
+
+
+def _sweep_session_data_dirs(ttl_hours: float | None = None) -> dict[str, Any]:
+    """Delete session folders unused for ttl_hours and trim caches of the other unused ones."""
+    ttl_hours = SESSION_DATA_TTL_HOURS if ttl_hours is None else ttl_hours
+    root = os_support.default_data_dir() / "sessions"
+    removed: list[str] = []
+    trimmed: list[str] = []
+    if not root.is_dir():
+        return {"removed": removed, "trimmed": trimmed}
+    in_use = _session_data_dirs_in_use()
+    now = time.time()
+    for data_dir in sorted(p for p in root.iterdir() if p.is_dir()):
+        if os.path.normcase(str(data_dir.resolve())) in in_use:
+            continue
+        try:
+            age_hours = (now - _last_modified(data_dir)) / 3600
+        except OSError:
+            continue
+        if age_hours < _SESSION_DATA_GRACE_HOURS:
+            continue  # may be a session another process is starting right now
+        if ttl_hours > 0 and age_hours >= ttl_hours:
+            shutil.rmtree(data_dir, ignore_errors=True)
+            removed.append(data_dir.name)
+        elif any((d / name).is_dir() for d in data_dir.glob("ibsrv-data*") for name in _IBSRV_CACHE_SUBDIRS):
+            _trim_session_data_dir(data_dir)
+            trimmed.append(data_dir.name)
+    if removed or trimmed:
+        logging.info("Answer42 session data sweep: removed %s, trimmed %s", removed, trimmed)
+    return {"removed": removed, "trimmed": trimmed}
+
+
 async def _global_orphan_reaper_loop(interval_seconds: float = 60.0) -> None:
+    last_sweep = 0.0
     while True:
         try:
             _reap_global_orphan_sessions()
@@ -1617,6 +1638,12 @@ async def _global_orphan_reaper_loop(interval_seconds: float = 60.0) -> None:
             raise
         except Exception as exc:
             logging.warning("Answer42 global orphan reaper failed: %s", exc)
+        if time.monotonic() - last_sweep >= SESSION_DATA_SWEEP_INTERVAL_SECONDS or not last_sweep:
+            last_sweep = time.monotonic()
+            try:
+                await asyncio.to_thread(_sweep_session_data_dirs)
+            except Exception as exc:
+                logging.warning("Answer42 session data sweep failed: %s", exc)
         await asyncio.sleep(interval_seconds)
 
 
@@ -4081,6 +4108,203 @@ def _visible_tool_error(name: str, exc: UnexpectedToolError) -> ToolError:
     return ToolError(f"Error executing tool {name}: {type(cause).__name__}: {detail}")
 
 
+# --- per-client tool visibility --------------------------------------------
+# All tools stay registered; tools/list only shows the groups visible to the
+# requesting client (see tool_groups.py).  Visible = server profile (or the
+# client's ?tools= URL parameter) + groups enabled by that MCP session + rag
+# while RAG is active.  MCP sessions are the stdio connection or one stateful
+# StreamableHTTP session (Mcp-Session-Id); stateless HTTP has no session to
+# remember groups in, so there only ?tools= applies.
+
+_DEFAULT_TOOL_GROUPS: set[str] = tool_groups.parse_profile(tool_groups.DEFAULT_PROFILE)
+_PROCESS_TOOL_GROUPS: set[str] = set()  # stdio (one client per process) and direct calls
+_HTTP_SESSION_TOOL_GROUPS: dict[str, set[str]] = {}
+_HTTP_SESSION_TOOL_GROUPS_LIMIT = 1000
+_CURRENT_MCP_REQUEST: contextvars.ContextVar[Any] = contextvars.ContextVar("answer42_mcp_request", default=None)
+_TOOLS_QUERY_PARAMETER = "tools"
+# --tool-groups off / ONEC_MCP_TOOL_GROUPS=off restores the static tool list.
+_DYNAMIC_TOOL_GROUPS = True
+_TOOLS_HEADER = "x-answer42-tools"
+_CLIENT_QUERY_PARAMETER = "client"
+_CLIENT_HEADER = "x-answer42-client"
+
+
+def _requested_tool_groups(request_context: Any) -> set[str]:
+    request = getattr(request_context, "request", None)
+    if request is not None:
+        value = ""
+        with suppress(Exception):
+            value = request.query_params.get(_TOOLS_QUERY_PARAMETER) or request.headers.get(_TOOLS_HEADER) or ""
+        if value:
+            try:
+                return tool_groups.parse_profile(value)
+            except ValueError as exc:
+                logging.warning("Ignoring tools=%r from client: %s", value, exc)
+    return set(_DEFAULT_TOOL_GROUPS)
+
+
+def _mcp_session_id(request_context: Any) -> str:
+    request = getattr(request_context, "request", None)
+    if request is None:
+        return ""
+    with suppress(Exception):
+        return str(request.headers.get("mcp-session-id") or "")
+    return ""
+
+
+def _tool_group_state_key(request_context: Any) -> str:
+    """Who the enabled groups belong to.
+
+    The SDK builds a new session object for every request, so it cannot be the
+    key. Legacy stateful StreamableHTTP: the Mcp-Session-Id header. The modern
+    protocol (2026-07-28) and stateless HTTP have no session: an explicit client
+    id (?client=... / X-Answer42-Client), else the authenticated account (token).
+    stdio serves one client per process: "" = the process.
+    """
+    request = getattr(request_context, "request", None)
+    if request is None:
+        return ""
+    http_session_id = _mcp_session_id(request_context)
+    if http_session_id:
+        return "session:" + http_session_id
+    client = ""
+    with suppress(Exception):
+        client = request.query_params.get(_CLIENT_QUERY_PARAMETER) or request.headers.get(_CLIENT_HEADER) or ""
+    if client:
+        return "client:" + client
+    return "account:" + _current_account_id()
+
+
+def _enabled_tool_groups(request_context: Any) -> set[str]:
+    key = _tool_group_state_key(request_context)
+    if not key:
+        return _PROCESS_TOOL_GROUPS
+    groups = _HTTP_SESSION_TOOL_GROUPS.pop(key, None)
+    if groups is None:
+        groups = set()
+        while len(_HTTP_SESSION_TOOL_GROUPS) >= _HTTP_SESSION_TOOL_GROUPS_LIMIT:
+            _HTTP_SESSION_TOOL_GROUPS.pop(next(iter(_HTTP_SESSION_TOOL_GROUPS)))
+    _HTTP_SESSION_TOOL_GROUPS[key] = groups  # most recently used last
+    return groups
+
+
+def _rag_active() -> bool:
+    return bool(_RAG_ENABLED) and any(getattr(sess, "rag_enabled", False) for sess in _SESSIONS.values())
+
+
+def _visible_tool_groups(request_context: Any) -> set[str]:
+    groups = _requested_tool_groups(request_context) | _enabled_tool_groups(request_context)
+    groups.discard(tool_groups.RAG)
+    if _rag_active():
+        groups.add(tool_groups.RAG)
+    return groups
+
+
+def _visible_tool_names(request_context: Any) -> set[str]:
+    if not _DYNAMIC_TOOL_GROUPS:
+        # Static (pre-0.5.13) mode: the profile alone decides, rag is not gated
+        # and there is no tool_groups tool.
+        static = tool_groups.tools_for_groups(_requested_tool_groups(request_context))
+        return {
+            name for name in mcp._tool_manager._tools
+            if name != "tool_groups" and (name in static or tool_groups.group_of(name) is None)
+        }
+    visible = tool_groups.tools_for_groups(_visible_tool_groups(request_context))
+    return {
+        name for name in mcp._tool_manager._tools
+        if name in visible or tool_groups.group_of(name) is None  # e.g. dev_eval
+    }
+
+
+def _auto_enable_tool_groups(request_context: Any, tool_name: str, result: Any) -> None:
+    """Show the tools a result points to: a ui_tree saved as a resource needs ui_snapshots."""
+    if tool_name != "ui_tree":
+        return
+    text = "".join(str(getattr(block, "text", "")) for block in getattr(result, "content", None) or [])
+    if '"resource_uri"' in text:
+        _enabled_tool_groups(request_context).add("ui_snapshots")
+
+
+async def _notify_tool_list_changed_if_needed(request_context: Any, visible_before: set[str]) -> None:
+    if _visible_tool_names(request_context) == visible_before:
+        return
+    if _mcp_session_id(request_context) or getattr(request_context, "request", None) is None:
+        # Legacy stateful HTTP session or stdio: notify this client directly.
+        session = getattr(request_context, "session", None)
+        if session is not None:
+            try:
+                await session.send_tool_list_changed()
+            except Exception as exc:
+                logging.debug("tools/list_changed was not delivered: %s", exc)
+        return
+    # Modern protocol / stateless HTTP: there is no per-client channel; the event
+    # goes to every subscriptions/listen stream and clients whose list did not
+    # change simply re-read the same list.
+    await _publish_tools_list_changed("tool groups changed")
+
+
+async def _handle_list_tools_for_client(ctx: Any, params: Any) -> ListToolsResult:
+    visible = _visible_tool_names(ctx)
+    return ListToolsResult(tools=[tool for tool in await mcp.list_tools() if tool.name in visible])
+
+
+def _tool_groups_description() -> str:
+    lines = [(
+        "List or enable/disable groups of Answer42 tools. Only 'core' is on by default; enable a group "
+        "when the task needs it and the client will reload its tool list. Groups:"
+    )]
+    lines += [f"- {name}: {text}" for name, text in tool_groups.DESCRIPTIONS.items() if name != tool_groups.CORE]
+    return "\n".join(lines)
+
+
+async def manage_tool_groups(
+    action: Annotated[str, "list | enable | disable"] = "list",
+    groups: Annotated[str, "Comma-separated group names for enable/disable, e.g. lists,commands"] = "",
+) -> dict[str, Any]:
+    request_context = _CURRENT_MCP_REQUEST.get()
+    if not _DYNAMIC_TOOL_GROUPS:
+        raise ToolError("Tool groups are switched off on this server (--tool-groups off); all profile tools are listed.")
+    action_key = str(action or "list").strip().lower()
+    if action_key not in {"list", "enable", "disable"}:
+        raise ToolError(f"Unknown action {action!r}: expected list, enable or disable")
+    if action_key != "list":
+        try:
+            names = tool_groups.parse_profile(groups) - {tool_groups.CORE}
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
+        if not names:
+            raise ToolError("Pass the groups to change, e.g. groups='lists,commands'")
+        if action_key == "enable" and tool_groups.RAG in names and not _rag_active():
+            raise ToolError(
+                "RAG is not active, so its tools stay hidden. Start a session with "
+                "start_session(rag_enabled=true) (or summary_rag_config=...); the rag tools then appear automatically."
+            )
+        enabled = _enabled_tool_groups(request_context)
+        if action_key == "enable":
+            enabled.update(names)
+        else:
+            enabled.difference_update(names)
+    visible = _visible_tool_groups(request_context)
+    return {
+        "groups": [
+            {
+                "name": name,
+                "description": tool_groups.DESCRIPTIONS.get(name, ""),
+                "tools": len(tool_groups.GROUPS[name]),
+                "visible": name in visible,
+                **({"available": _rag_active()} if name == tool_groups.RAG else {}),
+            }
+            for name in tool_groups.GROUPS
+        ],
+        "visible_tools": len(_visible_tool_names(request_context)),
+        "scope": (_tool_group_state_key(request_context).split(":", 1)[0] or "process"),
+    }
+
+
+mcp.add_tool(manage_tool_groups, name="tool_groups", description=_tool_groups_description())
+mcp._lowlevel_server.add_request_handler("tools/list", PaginatedRequestParams, _handle_list_tools_for_client)
+
+
 def _install_tool_call_logger() -> None:
     """Wrap mcp.call_tool so every MCP tool invocation is logged."""
     global _TOOL_CALL_WRAPPER_INSTALLED
@@ -4107,13 +4331,18 @@ def _install_tool_call_logger() -> None:
         session_id = DEFAULT_SESSION
         if isinstance(params, dict):
             session_id = params.get("session_id", DEFAULT_SESSION)
+        context = args[2] if len(args) >= 3 else kwargs.get("context")
+        request_context = getattr(context, "_request_context", None)
+        visible_before = _visible_tool_names(request_context) if request_context is not None else None
         start = time.monotonic()
         call_token = _MCP_TOOL_CALL_ACTIVE.set(True)
+        request_token = _CURRENT_MCP_REQUEST.set(request_context)
         omitted_token = _SESSION_ID_OMITTED.set(
             not (isinstance(params, dict) and str(params.get("session_id") or "").strip())
         )
         try:
             result = _compact_tool_result(await original(*args, **kwargs), name, params)
+            _auto_enable_tool_groups(request_context, name, result)
             _log_tool_call(session_id, name, params, result, None, time.monotonic() - start)
             return result
         except UnexpectedToolError as exc:
@@ -4125,7 +4354,12 @@ def _install_tool_call_logger() -> None:
             raise
         finally:
             _SESSION_ID_OMITTED.reset(omitted_token)
+            _CURRENT_MCP_REQUEST.reset(request_token)
             _MCP_TOOL_CALL_ACTIVE.reset(call_token)
+            if visible_before is not None:
+                # A call can change what this client may see: tool_groups, RAG
+                # activated by start_session, a ui_tree saved as a resource.
+                await _notify_tool_list_changed_if_needed(request_context, visible_before)
 
     mcp.call_tool = _logged_call_tool
     _TOOL_CALL_WRAPPER_INSTALLED = True
@@ -5455,6 +5689,9 @@ async def _stop_session_impl(session_id: str = DEFAULT_SESSION, clean_data: bool
     if clean_data and sess.data_dir.exists():
         shutil.rmtree(sess.data_dir, ignore_errors=True)
         stopped.append("data_dir")
+    elif sess.data_dir.exists():
+        _trim_session_data_dir(sess.data_dir)
+        stopped.append("data_dir_caches")
     _persist_sessions()
     return {"stopped": True, "session_id": session_id, "components": stopped}
 
@@ -10616,11 +10853,15 @@ async def dynamic_list_output(
     include_text: Annotated[bool, "Read tabular document cells after output; disable when only document metadata/dimensions are needed"] = True,
     max_rows: Annotated[int, "Maximum rows to read when include_text=true"] = 50,
     max_columns: Annotated[int, "Maximum columns to read when include_text=true"] = 20,
+    include_timings: Annotated[bool, "Include diagnostic timing breakdown (timings)"] = False,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
     """Press dynamic list 'Вывести список' button and return detected tabular document(s), optionally including text."""
-    return await _bridge_call_recorded(session_id, "dynamic_list_output", {"button": button, "wait_seconds": wait_seconds, "include_text": include_text, "max_rows": max_rows, "max_columns": max_columns})
+    result = await _bridge_call_recorded(session_id, "dynamic_list_output", {"button": button, "wait_seconds": wait_seconds, "include_text": include_text, "max_rows": max_rows, "max_columns": max_columns})
+    if not include_timings and isinstance(result, dict) and "timings" in result:
+        result = {key: value for key, value in result.items() if key != "timings"}
+    return result
 
 
 @mcp.tool()
@@ -11036,9 +11277,13 @@ async def _run_http(args: argparse.Namespace) -> None:
     )
     server = uvicorn.Server(config_uvicorn)
     tools_changed_task = _schedule_startup_tools_changed_notifications()
+    reaper_task = asyncio.create_task(_global_orphan_reaper_loop())
     try:
         await server.serve()
     finally:
+        reaper_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await reaper_task
         _SCREENSHOT_URLS.clear()
         _SCREENSHOT_URL_BASE = ""
         if tools_changed_task is not None:
@@ -11128,41 +11373,23 @@ def _register_dev_tools(enabled: bool) -> None:
 
 
 def _tool_names_for_profile(profile: str) -> set[str] | None:
-    parts = [part.strip().lower() for part in re.split(r"[,;\s]+", profile or "") if part.strip()]
-    if not parts or any(part in {"all", "full"} for part in parts):
+    """Tool names of a profile; None means every group (full/all)."""
+    groups = tool_groups.parse_profile(profile)
+    if groups >= tool_groups.ALL_GROUPS:
         return None
-    selected: set[str] = set()
-    unknown: list[str] = []
-    for part in parts:
-        names = TOOL_PROFILE_ALIASES.get(part) or TOOL_PROFILE_GROUPS.get(part)
-        if names is None:
-            unknown.append(part)
-            continue
-        selected.update(names)
-    if unknown:
-        known = sorted({*TOOL_PROFILE_GROUPS, *TOOL_PROFILE_ALIASES})
-        raise ValueError(f"unknown tool profile(s): {', '.join(unknown)}; known profiles: {', '.join(known)}")
-    return selected
+    return tool_groups.tools_for_groups(groups)
 
 
-def _apply_tool_profile(profile: str) -> dict[str, Any]:
-    allowed = _tool_names_for_profile(profile)
-    if allowed is None:
-        return {"profile": profile or "full", "mode": "full", "removed": []}
-    existing = set(mcp._tool_manager._tools.keys())
-    removed: list[str] = []
-    for name in sorted(existing - allowed):
-        try:
-            mcp.remove_tool(name)
-            removed.append(name)
-        except Exception:
-            pass
-    remaining = sorted(set(mcp._tool_manager._tools.keys()))
-    return {"profile": profile, "mode": "filtered", "remaining_count": len(remaining), "removed_count": len(removed), "removed": removed}
+def _configure_default_tool_profile(profile: str) -> dict[str, Any]:
+    """Set the groups a client sees by default; tools stay registered so they can be enabled later."""
+    global _DEFAULT_TOOL_GROUPS
+    _DEFAULT_TOOL_GROUPS = tool_groups.parse_profile(profile or tool_groups.DEFAULT_PROFILE)
+    visible = _visible_tool_names(None)
+    return {"profile": profile, "groups": sorted(_DEFAULT_TOOL_GROUPS), "visible_count": len(visible)}
 
 
 def main(argv: list[str] | None = None) -> None:
-    global _RAG_ENABLED, _CREDENTIAL_STORE_ENABLED, _DEV_TOOLS_ENABLED, _REQUIRE_EXPLICIT_SESSION_ID
+    global _RAG_ENABLED, _CREDENTIAL_STORE_ENABLED, _DEV_TOOLS_ENABLED, _REQUIRE_EXPLICIT_SESSION_ID, _DYNAMIC_TOOL_GROUPS
 
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] in {"install-skills", "skills-install"}:
@@ -11233,8 +11460,18 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument(
         "--tool-profile",
-        default=os.getenv("ONEC_MCP_TOOL_PROFILE", "full"),
-        help="comma-separated tool profile groups: core, ui, sessions, windows, forms, tables, tabular, dynamic, rag, recording, full, all",
+        default=os.getenv("ONEC_MCP_TOOL_PROFILE") or None,
+        help="tool groups a client sees by default (core is always on): core, forms, tables, lists, commands, "
+        "ui_snapshots, metadata, rag, recording, credentials, or ui/full. Clients can override it with ?tools= "
+        "in the URL or enable groups with the tool_groups tool; rag appears only while RAG is active. "
+        "Default: core, or full with --tool-groups off.",
+    )
+    parser.add_argument(
+        "--tool-groups",
+        choices=("on", "off"),
+        default="off" if os.getenv("ONEC_MCP_TOOL_GROUPS", "on").strip().lower() in {"0", "off", "false", "no"} else "on",
+        help="on (default): per-client tool groups with tool_groups and tools/list_changed, rag shown only while "
+        "RAG is active. off: the previous static tool list defined by --tool-profile (env: ONEC_MCP_TOOL_GROUPS).",
     )
     parser.add_argument(
         "--tool-log",
@@ -11284,6 +11521,13 @@ def main(argv: list[str] | None = None) -> None:
         default=os.getenv("ONEC_MCP_HTTP_STATELESS", "1").strip().lower() in {"1", "true", "yes", "on"},
         help="use stateless StreamableHTTP mode (default); disable for resumable sessions",
     )
+    parser.add_argument(
+        "--http-stateful",
+        action="store_false",
+        dest="http_stateless",
+        help="stateful StreamableHTTP (Mcp-Session-Id): per-client tool groups and tools/list_changed "
+        "notifications; same as ONEC_MCP_HTTP_STATELESS=0",
+    )
     args = parser.parse_args(argv)
 
     _configure_tool_logging(args.tool_log)
@@ -11297,9 +11541,11 @@ def main(argv: list[str] | None = None) -> None:
         _register_startup_rag_source_dirs(args.rag_source_dir or [], args.rag_source_prefix, not args.rag_source_no_recursive, args.rag_source_max_depth)
     else:
         logging.info("Built-in Answer42 RAG is disabled")
-    profile_result = _apply_tool_profile(args.tool_profile)
+    _DYNAMIC_TOOL_GROUPS = args.tool_groups == "on"
+    tool_profile = args.tool_profile or (tool_groups.DEFAULT_PROFILE if _DYNAMIC_TOOL_GROUPS else "full")
+    profile_result = _configure_default_tool_profile(tool_profile)
     _polish_tool_schemas()
-    logging.info("Tool profile: %s (mode=%s, remaining=%d, removed=%d)", profile_result["profile"], profile_result["mode"], profile_result.get("remaining_count", 0), profile_result.get("removed_count", 0))
+    logging.info("Tool profile: %s (groups=%s, visible=%d)", profile_result["profile"], ",".join(profile_result["groups"]), profile_result["visible_count"])
     _enable_tools_list_changed_capability()
     _start_autoreload_watcher(args.dev, args.dev_restart_timeout)
     if args.session_scope:

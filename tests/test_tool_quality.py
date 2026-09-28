@@ -463,3 +463,9 @@ def test_field_dropdown_reports_missing_field_consistently(monkeypatch):
     monkeypatch.setattr(server, "_bridge_call_recorded", fake)
     result = asyncio.run(server.field_dropdown("Нет", open=False, session_id="u"))
     assert result["found"] is False and result["diagnostics"] == ["field_not_found"]
+
+
+def test_dynamic_list_output_hides_timings_unless_asked(monkeypatch):
+    _record_bridge(monkeypatch, {"dynamic_list_output": {"found": True, "timings": {"total_ms": 1}}})
+    assert "timings" not in asyncio.run(server.dynamic_list_output())
+    assert asyncio.run(server.dynamic_list_output(include_timings=True))["timings"] == {"total_ms": 1}
