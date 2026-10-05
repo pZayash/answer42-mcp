@@ -115,7 +115,7 @@ def _find_x11_1c_window(title_contains: str = "", display: str | None = None) ->
         if capture_width < 300 or capture_height < 150:
             continue
         priority = min(capture_width * capture_height // 10000, 50)
-        if "1С:Предприятие" in title:
+        if "1С:Предприятие" in title or "1C:Enterprise" in title:
             priority += 50
         if title and title not in {"1cv8c", "1cv8", "Конфигурация"}:
             priority += 100
@@ -230,7 +230,7 @@ def _find_x11_1c_window_with_xlib(title_contains: str, env: dict[str, str]) -> d
             priority = min(capture_width * capture_height // 10000, 50)
             if onec_class:
                 priority += 75
-            if "1С:Предприятие" in title:
+            if "1С:Предприятие" in title or "1C:Enterprise" in title:
                 priority += 50
             if title and title not in {"1cv8c", "1cv8", "Конфигурация"}:
                 priority += 100
@@ -429,7 +429,7 @@ def _find_windows_1c_window(title_contains: str = "", desktop: str = "") -> dict
             if width < 300 or height < 150:
                 return True
             priority = min(width * height // 10000, 50)
-            if "1С:Предприятие" in title:
+            if "1С:Предприятие" in title or "1C:Enterprise" in title:
                 priority += 50
             if title and title not in {"1cv8c", "1cv8", "Конфигурация"}:
                 priority += 100
@@ -455,7 +455,7 @@ def _find_windows_1c_window(title_contains: str = "", desktop: str = "") -> dict
 
 def _window_priority(title: str, width: int, height: int) -> int:
     priority = min(width * height // 10000, 50)
-    if "1С:Предприятие" in title:
+    if "1С:Предприятие" in title or "1C:Enterprise" in title:
         priority += 50
     if title and title not in {"1cv8c", "1cv8", "Конфигурация"}:
         priority += 100

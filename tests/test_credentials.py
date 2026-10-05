@@ -357,3 +357,62 @@ def test_credentials_save_migrates_legacy_to_v2(tmp_path):
     assert saved["accounts"]["default"]["entries"] == [
         {"url": "https://new.example/ib", "username": "new", "password": "new-pass", "verified": False}
     ]
+
+
+def test_store_rereads_file_changed_by_another_process(tmp_path):
+    path = tmp_path / "credentials.json"
+    server_store = CredentialsStore(path)
+    assert server_store.lookup("https://example.com/base") is None
+
+    CredentialsStore(path).upsert("https://example.com/base", "u", "p")
+
+    assert server_store.lookup("https://example.com/base") == {"username": "u", "password": "p"}
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["accounts"]["default"]["entries"][0]["password"] = "changed-password"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert server_store.lookup("https://example.com/base") == {"username": "u", "password": "changed-password"}
+
+
+def test_credentials_cli_adds_lists_and_removes_without_echoing_secrets(tmp_path, monkeypatch, capsys):
+    import io
+
+    from mcp_1c import credentials_cli
+
+    path = tmp_path / "credentials.json"
+    monkeypatch.setattr("sys.stdin", io.StringIO("s3cret-value\n"))
+    assert credentials_cli.main([
+        "--file", str(path), "add", "--url", "https://example.com/base/", "--username", "admin",
+        "--title", "dev", "--alias", "d1", "--password-stdin",
+    ]) == 0
+    added = capsys.readouterr().out
+    assert "Added credentials for https://example.com/base (account default)" in added
+    assert "s3cret-value" not in added
+
+    assert CredentialsStore(path).lookup("dev") == {"username": "admin", "password": "s3cret-value"}
+
+    assert credentials_cli.main(["--file", str(path), "list"]) == 0
+    listed = capsys.readouterr().out
+    assert '"title": "dev"' in listed
+    assert "s3cret-value" not in listed and "admin" not in listed
+
+    assert credentials_cli.main(["--file", str(path), "remove", "--url", "https://example.com/base"]) == 0
+    assert CredentialsStore(path).lookup("dev") is None
+    assert credentials_cli.main(["--file", str(path), "remove", "--url", "https://example.com/base"]) == 1
+
+
+def test_credentials_cli_uses_token_hash_account_like_http_server(tmp_path, monkeypatch, capsys):
+    import io
+
+    from mcp_1c import credentials_cli
+    from mcp_1c.auth import _hash_token
+
+    path = tmp_path / "credentials.json"
+    monkeypatch.setattr("sys.stdin", io.StringIO("p\n"))
+    assert credentials_cli.main(["--file", str(path), "--token", "tok", "add", "--url", "u1", "--username", "x", "--password-stdin"]) == 0
+    capsys.readouterr()
+
+    store = CredentialsStore(path)
+    assert store.lookup("u1", account_id=_hash_token("tok")) == {"username": "x", "password": "p"}
+    assert store.lookup("u1") is None

@@ -227,6 +227,16 @@ export ONEC_MCP_CREDENTIALS_FILE=/secure/path/credentials.json
 
 Правила матчинга внутри аккаунта: сначала точное совпадение `url`, затем wildcard (`*`, `?`) через `fnmatch`; первое совпадение побеждает. Пароли не логируются и не возвращаются наружу.
 
+Без агента запись добавляется из командной строки. Пароль запрашивается интерактивно (или читается из первой строки stdin с `--password-stdin`) и в аргументы команды не попадает:
+
+```bash
+answer42 credentials add --url "<TARGET_INFOBASE_URL>" --username "<USERNAME>" [--title dev-01] [--alias dev01]
+answer42 credentials list
+answer42 credentials remove --url "<TARGET_INFOBASE_URL>"
+```
+
+Аккаунт по умолчанию — `ONEC_MCP_ACCOUNT_ID` или `default`; для HTTP-режима без явного `account_id` передайте `--token <Bearer-токен>` (аккаунт вычисляется так же, как на сервере) или `--account`. Файл — `ONEC_MCP_CREDENTIALS_FILE` или `--file`. Запущенный сервер перечитывает файл при следующем обращении к кредам, если файл изменился, перезапуск не нужен.
+
 Для сохранения или обновления записи можно использовать MCP-tool:
 
 ```text

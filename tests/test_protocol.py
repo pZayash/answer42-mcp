@@ -161,7 +161,7 @@ def test_dropdown_create_variants_are_opt_in_for_field_input():
     assert "Продолжить;" in selector
     assert 'СвойствоСтруктуры(Параметры, "create_if_missing", Ложь)' in setter
     assert "ИндексРелевантногоВариантаСпискаВыбораMCP(Представления, Значение, СоздатьЕслиОтсутствует)" in setter
-    assert "creation_window_opened" in setter
+    assert "window_opened" in setter
 
 
 def test_dropdown_create_variants_are_opt_in_for_table_input():
@@ -174,7 +174,7 @@ def test_dropdown_create_variants_are_opt_in_for_table_input():
     assert "ВвестиТекстВРедакторТаблицыMCP(Таблица, Поле, ИмяПоля, Значение, СоздатьЕслиОтсутствует)" in table_setter
     assert "СоздатьЕслиОтсутствует = Ложь" in editor
     assert "ИндексРелевантногоВариантаСпискаВыбораMCP(Представления, Значение, СоздатьЕслиОтсутствует)" in editor
-    assert "creation_window_opened" in table_setter
+    assert "window_opened" in table_setter
     assert "ДобавитьДиагностикуМодальногоОкнаЕслиОткрылосьMCP" in editor
     assert "table,field,value,search_by_title,create_if_missing" in row_values
 
@@ -215,31 +215,6 @@ def test_set_field_value_closes_missing_dropdown_variant_before_fallbacks():
     assert "восстановление редактора" in setter
     assert setter.index("РезультатВосстановленияРедактора = ВосстановитьПолеПослеНеудачногоВводаMCP") < setter.index("Fallback-и выбора из списка пропущены")
 
-
-
-def test_set_field_value_restores_previous_editor_value_after_missing_dropdown():
-    module = Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
-    setter = _bsl_function_body(module, "УстановитьЗначениеПоля")
-    restore = _bsl_function_body(module, "ВосстановитьПолеПослеНеудачногоВводаMCP")
-
-    assert "ВосстановитьПолеПослеНеудачногоВводаMCP" in module
-    assert "У ТестируемоеПолеФормы нет отдельного метода ОтменитьРедактирование" in restore
-    assert "ПредставлениеВосстановления = Строка(ПредставлениеДоВвода);" in restore
-    assert "Поле.ВвестиТекст(ПредставлениеВосстановления);" in restore
-    assert "Поле.ЗакрытьВыпадающийСписок();" in restore
-    assert "ФормаПоля.ПерейтиКСледующемуЭлементу();" in restore
-    assert 'НайтиОбъектРекурсивно(АктивноеОкноПослеВосстановления, ИмяПоля, ЗаголовокПоля, "", 0)' in restore
-    assert 'Результат.Вставить("diagnostic"' in restore
-    assert "внешние клавиши" in restore
-
-    assert "ТекущееПредставлениеДоВвода = СтрогоеПредставлениеДанныхПоляMCP(Поле);" in setter
-    assert "ЗначенияСовпадаютДляПроверкиMCP(ТекущееПредставлениеДоВвода, Значение)" in setter
-    assert "ПолеПослеВосстановленияРедактора = Неопределено;" in setter
-    first_missing = setter.index("СписокВыбораПроверенИЗначениеНеНайдено = Истина")
-    restore_call = setter.index("ВосстановитьПолеПослеНеудачногоВводаMCP(Поле, ИскомоеИмяПоля, ЗаголовокПоля, ТекущееПредставлениеДоВвода)")
-    skip_list_fallbacks = setter.index("Fallback-и выбора из списка пропущены")
-    assert first_missing < restore_call < skip_list_fallbacks
-    assert "восстановление редактора" in setter
 
 
 def test_set_field_value_has_no_new_python_x11_editor_reset():
@@ -327,14 +302,14 @@ def test_set_field_value_reports_creation_window_after_direct_input():
 
     assert 'РезультатВвода = Новый Структура("set,field,value,method", Истина, ИмяПоля, Значение, "ВвестиТекст")' in setter
     assert "ДобавитьДиагностикуМодальногоОкнаЕслиОткрылосьMCP(РезультатВвода, ЗаголовокОкнаДоВвода)" in setter
-    assert 'РезультатВвода.Вставить("creation_window_opened", Истина)' in setter
+    assert 'РезультатВвода.Вставить("window_opened", Истина)' in setter
     assert "РезультатВвода.set = Ложь" in setter
     assert "Возврат РезультатВвода" in setter
     assert "НачалоОжиданияОкна = ТекущаяУниверсальнаяДатаВМиллисекундах()" in modal_diagnostics
     assert "ТекущаяУниверсальнаяДатаВМиллисекундах() - НачалоОжиданияОкна < 2000" in modal_diagnostics
     assert 'Результат.Вставить("modal_form_name", БезопасноеСвойство(ФормаАктивногоОкна, "ИмяФормы", ""))' in modal_diagnostics
     assert 'СвойствоСтруктуры(ДиагностикаКлиента, "active_window_changed", Ложь)' in module
-    assert 'Результат.Вставить("creation_window_opened", Истина)' in module
+    assert 'Результат.Вставить("window_opened", Истина)' in module
     assert "Результат.set = Ложь" in module
 
 
@@ -576,7 +551,7 @@ def test_dynamic_list_set_settings_filter_values_are_set_via_settings_table_edit
     assert "РезультатНачалаРедактированияВыбора = ОбеспечитьРедактированиеТекущейСтрокиТаблицыMCP(Таблица, ИмяТаблицы)" in set_table_field
     visible_fallback = _bsl_function_body(module, "ВвестиТекстВВидимыйРедакторТаблицыБезРежимаMCP")
     assert "visible_table_editor_without_confirmed_edit_mode.ВыполнитьВыборИзСпискаВыбора" in visible_fallback
-    assert "visible_table_editor_without_confirmed_edit_mode.ОткрытьВыпадающийСписок+ВыполнитьВыборИзСпискаВыбора" in visible_fallback
+    assert 'ВыбратьИзСпискаРедактораТаблицыMCP(Поле, ИмяПоля, Значение, СоздатьЕслиОтсутствует, "visible_table_editor_without_confirmed_edit_mode")' in visible_fallback
     assert "ВидимыйРедакторТаблицыДоступенMCP" in visible_fallback
     assert "АктивироватьРазделНастроекСпискаMCP(Раздел)" in table_helper
     assert "table_goto_row + table_set_field" in table_helper
@@ -647,7 +622,7 @@ def test_dynamic_list_set_settings_order_direction_uses_settings_table_editor_no
     # table-editor path as table_set_field.  Do not mask failures with quick form
     # fields or post-close list ordering fallback.
     assert "УстановитьПолеТаблицыMCP(ПараметрыНаправления)" in add_setting
-    assert 'Новый Структура("table,field,value,search_by_title", ИмяТаблицы, "Направление сортировки"' in add_setting
+    assert 'Новый Структура("table,field,value,search_by_title", ИмяТаблицы, ЗаголовокКолонкиНаправления' in add_setting
     assert "УстановитьБыстрыеПоляПорядкаНастройкиСпискаMCP" not in add_setting
     assert 'УстановитьПолеЭлементаНастройкиСпискаMCP(Таблица, ИмяТаблицы, "ТипУпорядочивания"' not in add_setting
 

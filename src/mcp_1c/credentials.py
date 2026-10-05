@@ -63,6 +63,7 @@ class CredentialsStore:
         self._path = Path(path or DEFAULT_CREDENTIALS_PATH)
         self._version = 2
         self._accounts: dict[str, dict[str, list[dict[str, object]]]] = {}
+        self._file_signature: tuple[int, int] | None = None
         self._load()
 
     # ------------------------------------------------------------------
@@ -283,19 +284,34 @@ class CredentialsStore:
 
     def list_accounts(self) -> list[str]:
         """Return all account ids present in the store."""
+        self._reload_if_changed()
         return sorted(self._accounts.keys())
 
     # ------------------------------------------------------------------
     # internal
     # ------------------------------------------------------------------
 
+    def _current_file_signature(self) -> tuple[int, int] | None:
+        try:
+            stat = self._path.stat()
+        except OSError:
+            return None
+        return (stat.st_mtime_ns, stat.st_size)
+
+    def _reload_if_changed(self) -> None:
+        """Pick up edits made outside this process (CLI, editor) before using the data."""
+        if self._current_file_signature() != self._file_signature:
+            self._load()
+
     def _ensure_account(self, account_id: str) -> list[dict[str, object]]:
+        self._reload_if_changed()
         account_id = _normalize_account(account_id)
         if account_id not in self._accounts:
             self._accounts[account_id] = {"entries": []}
         return self._accounts[account_id]["entries"]
 
     def _account_entries(self, account_id: str | None) -> list[dict[str, object]]:
+        self._reload_if_changed()
         account_id = _normalize_account(account_id)
         return self._accounts.get(account_id, {}).get("entries", [])
 
@@ -341,11 +357,13 @@ class CredentialsStore:
         tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False),
                        encoding="utf-8")
         tmp.replace(self._path)
+        self._file_signature = self._current_file_signature()
         total = sum(len(a.get("entries", [])) for a in self._accounts.values())
         LOGGER.info("Saved %d credential entries across %d accounts to %s",
                     total, len(self._accounts), self._path)
 
     def _load(self) -> None:
+        self._file_signature = self._current_file_signature()
         if not self._path.exists():
             LOGGER.debug("Credentials file not found: %s", self._path)
             self._accounts = {"default": {"entries": []}}
