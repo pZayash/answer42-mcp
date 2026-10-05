@@ -1809,23 +1809,60 @@ _NUMERIC_VALUE_RE = re.compile(r"^-?\d+(?:\.\d+)?$")
 _EMPTY_PRESENTATION_CHARS = set("0.:-/")
 
 
+def _number_candidates(value: Any) -> list[float]:
+    """Numbers a field presentation may stand for.
+
+    "82,020" is 82020 in an English UI (comma groups digits) but 82.02 in a
+    Russian one, so both readings are offered; the caller compares an exact
+    expected number against them.
+    """
+    text = str(value or "").replace(" ", "").replace(" ", "").replace("'", "").strip()
+    candidates: list[float] = []
+    for variant in (text.replace(",", ""), text.replace(".", "").replace(",", "."), text.replace(",", ".")):
+        try:
+            number = float(variant)
+        except ValueError:
+            continue
+        if number not in candidates:
+            candidates.append(number)
+    return candidates
+
+
+def _date_without_time(value: Any) -> tuple[int, int, int] | None:
+    parts = re.split(r"[./]", str(value or "").strip().split(" ", 1)[0])
+    if len(parts) != 3 or not all(part.isdigit() for part in parts):
+        return None
+    return int(parts[0]), int(parts[1]), int(parts[2])
+
+
 def _values_match_for_verification(actual: Any, expected: Any) -> bool:
+    if actual is None:
+        # The manager could not read the field at all: that is "unknown", not
+        # "empty", so it must never confirm a value (including a cleared one).
+        return False
     actual_text = _normalized_text_for_value_check(actual)
     expected_text = _normalized_text_for_value_check(expected)
     if actual_text == expected_text:
         return True
     if not expected_text:
-        # Cleared number/date fields display "0" or " .  .    ", not "".
+        # Cleared number/date fields display "0" or " .  .    ", not "";
+        # cleared reference cells display a placeholder such as "<custom>".
+        if len(actual_text) > 2 and actual_text.startswith("<") and actual_text.endswith(">"):
+            return True
         return set(actual_text) <= _EMPTY_PRESENTATION_CHARS
     if _NUMERIC_VALUE_RE.match(expected_text):
         # "10" must not verify against a stale "100": compare numbers exactly.
-        try:
-            return float(actual_text) == float(expected_text)
-        except ValueError:
-            return False
+        expected_number = float(expected_text)
+        return any(candidate == expected_number for candidate in _number_candidates(actual))
+    expected_date = _date_without_time(expected)
+    if expected_date is not None and " " not in str(expected).strip():
+        # "09/30/2026" is the same day as "9/30/2026 12:00:00 AM".
+        return _date_without_time(actual) == expected_date
     # References and dates display more than was typed ("Ромашка" ->
-    # "Ромашка ООО", "01.01.2026" -> "01.01.2026 0:00:00").
-    return bool(actual_text and (actual_text in expected_text or expected_text in actual_text))
+    # "Ромашка ООО", "01.01.2026" -> "01.01.2026 0:00:00"). Only this direction
+    # is accepted: a shorter actual value ("HARD-1" for the expected
+    # "HARD-1 CHANGED") means the input did not happen.
+    return bool(actual_text and expected_text in actual_text)
 
 
 def _normalize_creation_window_result(result: Any, *, create_if_missing: bool) -> Any:
@@ -1839,17 +1876,17 @@ def _normalize_creation_window_result(result: Any, *, create_if_missing: bool) -
     """
     if not create_if_missing or not isinstance(result, dict):
         return result
-    if result.get("creation_window_opened"):
+    if result.get("window_opened"):
         return result
     diagnostics = result.get("client_diagnostics")
     if not isinstance(diagnostics, dict):
         return result
     title = str(diagnostics.get("active_window_title") or diagnostics.get("modal_title") or "")
-    if not bool(diagnostics.get("active_window_changed")) or "(создание" not in title.casefold():
+    if not bool(diagnostics.get("active_window_changed")) or not any(marker in title.casefold() for marker in ("(создание", "(create)")):
         return result
     normalized = dict(result)
     normalized["set"] = False
-    normalized["creation_window_opened"] = True
+    normalized["window_opened"] = True
     normalized["modal_title"] = title
     form_name = diagnostics.get("active_form_name") or diagnostics.get("modal_form_name") or ""
     if form_name:
@@ -7446,6 +7483,16 @@ async def ui_tree_diff(
     def node_signature(node: dict[str, Any]) -> dict[str, Any]:
         return {k: node.get(k) for k in ("type", "name", "title", "visible", "available", "read_only", "value", "presentation", "data_path") if k in node}
 
+    def sample(node: dict[str, Any]) -> Any:
+        # Every node is reported on its own: nested children are indexed separately, so
+        # embedding a container's whole subtree would blow up the response regardless of limit.
+        flat = {key: value for key, value in node.items() if key != "children"}
+        compact = _apply_ui_fields(_compact_ui_node(flat), field_names)
+        children = node.get("children")
+        if isinstance(children, list) and children and isinstance(compact, dict):
+            compact["children_count"] = len(children)
+        return compact
+
     added_keys = [key for key in after_idx if key not in before_idx]
     removed_keys = [key for key in before_idx if key not in after_idx]
     common_changed = [key for key in after_idx.keys() & before_idx.keys() if node_signature(before_idx[key]) != node_signature(after_idx[key])]
@@ -7455,10 +7502,10 @@ async def ui_tree_diff(
         "before_snapshot_id": before.get("snapshot_id") or before_snapshot_id,
         "after_snapshot_id": after.get("snapshot_id") or after_snapshot_id,
         "counts": {"before": len(before_idx), "after": len(after_idx), "added": len(added_keys), "removed": len(removed_keys), "changed": len(common_changed)},
-        "added": _apply_ui_fields([_compact_ui_node(after_idx[key]) for key in added_keys[:max_items]], field_names),
-        "removed": _apply_ui_fields([_compact_ui_node(before_idx[key]) for key in removed_keys[:max_items]], field_names),
+        "added": [sample(after_idx[key]) for key in added_keys[:max_items]],
+        "removed": [sample(before_idx[key]) for key in removed_keys[:max_items]],
         "changed": [
-            {"index_path": key, "before": _apply_ui_fields(_compact_ui_node(before_idx[key]), field_names), "after": _apply_ui_fields(_compact_ui_node(after_idx[key]), field_names)}
+            {"index_path": key, "before": sample(before_idx[key]), "after": sample(after_idx[key])}
             for key in common_changed[:max_items]
         ],
         "limit": max_items,
@@ -7685,8 +7732,34 @@ async def open_navigation_link(navigation_link: Annotated[str, "Explicit 1C navi
     try:
         return await _bridge_call_recorded(session_id, "open_navigation_link", {"navigation_link": navigation_link})
     except Exception as exc:
+        if not _is_navigation_link_resolution_failure(str(exc)):
+            # Application-level refusal (e.g. a business-rule error window): suggestions would
+            # open extra windows over the error window and hide the real cause.
+            raise
         suggestions = await _navigation_link_suggestions(session_id, navigation_link)
         raise RuntimeError(str(exc) + _format_navigation_suggestions(suggestions)) from exc
+
+
+def _is_navigation_link_resolution_failure(message: str) -> bool:
+    # The bridge prefixes every failure with "Не удалось перейти по навигационной ссылке <link>:";
+    # only the text after that prefix says whether the platform could not resolve the link.
+    text = str(message or "")
+    _, separator, reason = text.partition(": ")
+    reason = reason if separator else text
+    # Drop the appended hint and the BSL stack trace: they always mention navigation links.
+    for tail in ("\nПроверьте имя метаданных", "\n{Обработка."):
+        reason = reason.split(tail, 1)[0]
+    lowered = reason.lower()
+    markers = (
+        "не удалось перейти по навигационной ссылке",
+        "failed to navigate",
+        "navigation link",
+        "не найден",
+        "not found",
+        "unknown",
+        "неизвестн",
+    )
+    return any(marker in lowered for marker in markers)
 
 
 @mcp.prompt(
@@ -8261,7 +8334,10 @@ async def set_field_value(
             verified["post_verify_error"] = str(exc)
             return verified
         verified_value = verification.get("value_text") if isinstance(verification, dict) else ""
-        if not _values_match_for_verification(verified_value, value):
+        # A choice-list item ("Reserve at warehouse (all)") may put a shorter
+        # presentation into the field; the manager reports it as verified_value.
+        expected_value = result.get("verified_value") if result.get("list_item_text") else value
+        if not _values_match_for_verification(verified_value, expected_value):
             verified = dict(result)
             verified["set"] = False
             verified["post_verified"] = False
@@ -8316,7 +8392,12 @@ async def choose_current_row(
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
-    """Choose the current row in the active selection/list form."""
+    """Choose the current row in the active selection/list form.
+
+    In hierarchical lists choosing a group row enters the group instead of selecting it:
+    the result then has `entered_group: true`, `selected: false` and a hint; read
+    `table_rows` and call again with an item inside the group.
+    """
     return await _bridge_call_recorded(session_id, "choose_current_row", {"name": name, "expected_text": expected_text})
 
 
@@ -8362,13 +8443,44 @@ def _table_row_pairs(row: Any) -> dict[str, str]:
     return result
 
 
+# Column headers of the English interface, as shown by 1C:ERP 2.5 on platform 8.5,
+# mapped to the Russian headers this module uses as row keys.
+_ENGLISH_UI_HEADERS: dict[str, str] = {
+    "Metadata object ID": "Идентификатор объекта метаданных",
+    "Name": "Имя",
+    "Synonym": "Синоним",
+    "Full name": "Полное имя",
+    "Full synonym": "Полный синоним",
+    "No data": "Без данных",
+    "Reference": "Ссылка",
+    "Subsystem name": "Имя подсистемы",
+    "Version": "Версия",
+    "This is main configuration": "Это основная конфигурация",
+    "Deferred handlers registered": "Выполнена регистрация отложенных обработчиков",
+    "Metadata details": "Описание метаданных",
+    "Sequence\nnumber": "Порядковый\nномер",
+    "Date of last\nuse": "Дата последнего\nиспользования",
+}
+_ENGLISH_UI_HEADERS_FOLDED = {
+    re.sub(r"\s+", "", key).casefold(): value for key, value in _ENGLISH_UI_HEADERS.items()
+}
+
+
+def _russian_ui_header(header: str) -> str:
+    """Return the Russian header for an English one; other headers are returned unchanged."""
+    text = str(header or "").strip()
+    return _ENGLISH_UI_HEADERS_FOLDED.get(re.sub(r"\s+", "", text).casefold(), text)
+
+
 def _row_value(row: dict[str, str], *keys: str) -> str:
+    if any(_russian_ui_header(key) != key for key in row):
+        row = {_russian_ui_header(key): value for key, value in row.items()}
     for key in keys:
         if key in row:
             return row[key]
-    wanted = {re.sub(r"\\s+", "", key).casefold() for key in keys}
+    wanted = {re.sub(r"\s+", "", key).casefold() for key in keys}
     for key, value in row.items():
-        if re.sub(r"\\s+", "", key).casefold() in wanted:
+        if re.sub(r"\s+", "", key).casefold() in wanted:
             return value
     return ""
 
@@ -9146,7 +9258,7 @@ async def _close_universal_report_message_box_if_present(
                     return False
                 await asyncio.sleep(2)
                 continue
-        if "Универсальный отчет" in title or form_name == "ОбщаяФорма.ФормаОтчета":
+        if any(marker in title for marker in ("Универсальный отчет", "Universal report")) or form_name == "ОбщаяФорма.ФормаОтчета":
             return False
         # Some start-page/advertising forms can be active immediately before the
         # navigation completes.  Wait a little instead of touching quick settings
@@ -9274,7 +9386,7 @@ async def _active_universal_report_window(session_id: str, warnings: list[str], 
                 last = active
                 title = str(active.get("title") or "")
                 form_name = str(active.get("form_name") or "")
-                if "Универсальный отчет" in title or form_name == "ОбщаяФорма.ФормаОтчета":
+                if any(marker in title for marker in ("Универсальный отчет", "Universal report")) or form_name == "ОбщаяФорма.ФормаОтчета":
                     return active
         except Exception as exc:
             warnings.append(f"Universal report active-window wait probe failed: {exc}")
@@ -9298,20 +9410,27 @@ async def _ensure_universal_report_metadata_source(session_id: str, warnings: li
     )
     type_ok = await _set_universal_report_quick_setting_by_titles(
         session_id,
-        ["Тип объекта", "Тип данных", "Раздел"],
+        ["Тип объекта", "Тип данных", "Раздел", "Object type"],
         "Справочники",
         warnings,
     )
     source_ok = await _set_universal_report_quick_setting_by_titles(
         session_id,
-        ["Объект", "Справочник", "Имя объекта"],
+        ["Объект", "Справочник", "Имя объекта", "Object name"],
         "Идентификаторы объектов метаданных",
         warnings,
     )
     if not source_ok:
         source_ok = await _set_universal_report_quick_setting_by_titles(
             session_id,
-            ["Объект", "Справочник", "Имя объекта"],
+            ["Object name"],
+            "Metadata object IDs",
+            warnings,
+        )
+    if not source_ok:
+        source_ok = await _set_universal_report_quick_setting_by_titles(
+            session_id,
+            ["Объект", "Справочник", "Имя объекта", "Object name"],
             "ИдентификаторыОбъектовМетаданных",
             warnings,
         )
@@ -9527,7 +9646,7 @@ async def _metadata_rows_from_universal_report(
             await _close_self_opened_form(
                 session_id,
                 warnings,
-                title_markers=("Универсальный отчет", "Идентификаторы объектов метаданных"),
+                title_markers=("Универсальный отчет", "Идентификаторы объектов метаданных", "Universal report", "Metadata object IDs"),
                 form_names=("ОбщаяФорма.ФормаОтчета",),
                 description="Universal report metadata source",
             )
@@ -9680,18 +9799,18 @@ def _tabular_cells_from_binary_mxl_literals(text: str) -> list[list[str]]:
     header_idx = -1
     for index in range(len(values) - 2):
         if (
-            values[index] == "Имя подсистемы"
-            and values[index + 1] == "Версия"
-            and values[index + 2] == "Это основная конфигурация"
+            _russian_ui_header(values[index]) == "Имя подсистемы"
+            and _russian_ui_header(values[index + 1]) == "Версия"
+            and _russian_ui_header(values[index + 2]) == "Это основная конфигурация"
         ):
             header_idx = index
             break
     if header_idx < 0:
         return []
-    header = values[header_idx : header_idx + 3]
+    header = [_russian_ui_header(value) for value in values[header_idx : header_idx + 3]]
     next_idx = header_idx + 3
-    if next_idx < len(values) and values[next_idx] == "Выполнена регистрация отложенных обработчиков":
-        header.append(values[next_idx])
+    if next_idx < len(values) and _russian_ui_header(values[next_idx]) == "Выполнена регистрация отложенных обработчиков":
+        header.append(_russian_ui_header(values[next_idx]))
         next_idx += 1
     columns = len(header)
     cells = [header]
@@ -9730,7 +9849,7 @@ def _metadata_catalog_rows_from_mxl(path: Path) -> list[dict[str, str]]:
         return []
     header_idx = -1
     for index in range(len(values) - 5):
-        header_window = [value.casefold() for value in values[index : index + 6]]
+        header_window = [_russian_ui_header(value).casefold() for value in values[index : index + 6]]
         if header_window[:5] == [
             "идентификатор объекта метаданных",
             "имя",
@@ -9780,7 +9899,7 @@ def _metadata_catalog_rows_from_mxl(path: Path) -> list[dict[str, str]]:
     index = header_idx + 6
     while index + 5 < len(values):
         no_data = values[index + 5].strip()
-        if no_data.casefold() not in {"да", "нет"}:
+        if no_data.casefold() not in {"да", "нет", "yes", "no"}:
             index += 1
             continue
         raw_full_name = values[index + 3].strip()
@@ -9825,7 +9944,7 @@ def _metadata_catalog_rows_from_tabular_cells(cells: list[list[Any]]) -> list[di
         "пометкаудаления",
     }
     for i, row in enumerate(cells[:200]):
-        normalized = [str(cell).strip() for cell in row]
+        normalized = [_russian_ui_header(str(cell).strip()) for cell in row]
         if any(cell.casefold() in known_headers for cell in normalized):
             header_idx = i
             headers = normalized
@@ -9924,7 +10043,7 @@ async def _metadata_rows_from_target_catalog_list(
             await _close_self_opened_form(
                 session_id,
                 warnings,
-                title_markers=("Идентификаторы объектов метаданных",),
+                title_markers=("Идентификаторы объектов метаданных", "Metadata object IDs"),
                 form_names=("Справочник.ИдентификаторыОбъектовМетаданных.ФормаСписка",),
                 description="metadata identifiers catalog list",
             )
@@ -10351,7 +10470,7 @@ async def configuration_name_version_from_subsystems(
             await _close_self_opened_form(
                 session_id,
                 warnings,
-                title_markers=("Версии подсистем",),
+                title_markers=("Версии подсистем", "Subsystem versions"),
                 form_names=("РегистрСведений.ВерсииПодсистем.ФормаСписка",),
                 description="subsystem versions list",
             )
@@ -10409,7 +10528,7 @@ def _find_main_configuration_in_tabular_cells(cells: list[list[str]]) -> dict[st
     for i, row in enumerate(cells):
         local_name_col = local_version_col = local_main_cfg_col = -1
         for j, cell in enumerate(row):
-            cell_norm = str(cell).strip()
+            cell_norm = _russian_ui_header(str(cell).strip())
             if cell_norm == "Имя подсистемы":
                 local_name_col = j
             elif cell_norm == "Версия":
@@ -10516,7 +10635,7 @@ async def installed_extensions_from_catalog(
             await _close_self_opened_form(
                 session_id,
                 warnings,
-                title_markers=("Версии расширений",),
+                title_markers=("Версии расширений", "Extensions versions"),
                 form_names=("Справочник.ВерсииРасширений.ФормаСписка",),
                 description="extension versions list",
             )
@@ -11396,6 +11515,10 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(skill_installer.main(argv[1:]))
     if argv and argv[0] in {"release", "release-pypi"}:
         raise SystemExit(release_helper.main(argv[1:]))
+    if argv and argv[0] == "credentials":
+        from . import credentials_cli
+
+        raise SystemExit(credentials_cli.main(argv[1:]))
 
     parser = argparse.ArgumentParser(description="MCP server for 1C:Enterprise test manager")
     parser.add_argument("--version", action="version", version=f"answer42 {__version__}")

@@ -556,7 +556,7 @@ def test_set_field_value_normalizes_creation_window_from_post_step_diagnostics(m
     result = asyncio.run(server.set_field_value("Контрагент", "Новый контрагент", create_if_missing=True, session_id="unit"))
 
     assert result["set"] is False
-    assert result["creation_window_opened"] is True
+    assert result["window_opened"] is True
     assert result["modal_title"] == "Контрагент (создание)"
     assert result["modal_form_name"] == "Справочник.Контрагенты.Форма.ФормаЭлемента"
 
@@ -4177,3 +4177,63 @@ def test_web_runtime_probe_skips_non_web_target():
         "attempted": False,
         "status": "not_web_publication",
     }
+
+
+def test_open_navigation_link_refusal_skips_suggestions(monkeypatch):
+    from mcp_1c import server
+
+    async def fake_bridge_call(session_id, method, params, *, timeout=None):
+        raise RuntimeError("You can enter the document only based on another document or a contract with a customer.")
+
+    async def fail_suggestions(*args, **kwargs):
+        raise AssertionError("suggestions must not run for application refusals")
+
+    monkeypatch.setattr(server, "_bridge_call_recorded", fake_bridge_call)
+    monkeypatch.setattr(server, "_navigation_link_suggestions", fail_suggestions)
+
+    with pytest.raises(RuntimeError, match="only based on another document"):
+        asyncio.run(server.open_navigation_link("e1cib/data/Document.X?ref=1", session_id="unit"))
+
+
+def test_navigation_failure_classifier_ignores_bridge_prefix():
+    from mcp_1c import server
+
+    refusal = (
+        "Не удалось перейти по навигационной ссылке e1cib/data/Документ.X: 1C:Enterprise\n"
+        "You can enter the document only based on another document."
+    )
+    assert server._is_navigation_link_resolution_failure(refusal) is False
+    assert server._is_navigation_link_resolution_failure(
+        "Не удалось перейти по навигационной ссылке e1cib/list/X: Не удалось перейти по навигационной ссылке"
+    ) is True
+
+
+def test_navigation_failure_classifier_ignores_hint_and_stack_trace():
+    from mcp_1c import server
+
+    message = (
+        "Не удалось перейти по навигационной ссылке e1cib/data/Документ.X: 1C:Enterprise\n"
+        "You can enter the document only based on another document.\n"
+        "Проверьте имя метаданных через rag_lookup_object.\n"
+        "{Обработка.MCPTestManager.Форма.Форма.Форма(4264)}:ВызватьИсключение НавигационнаяСсылка"
+    )
+    assert server._is_navigation_link_resolution_failure(message) is False
+
+
+def test_ui_tree_diff_samples_are_flat_and_capped_by_limit(tmp_path, monkeypatch):
+    from mcp_1c import server
+
+    monkeypatch.setattr(server, "UI_TREE_SNAPSHOTS_DIR", tmp_path)
+    before = {"type": "Form", "name": "F", "children": []}
+    group = {"type": "Group", "name": "G", "children": [{"type": "Field", "name": f"Field{i}", "title": "x" * 200} for i in range(100)]}
+    after = {"type": "Form", "name": "F", "children": [group]}
+    a = server._store_ui_tree_snapshot(before, session_id="unit", request={"include_hidden": False})
+    b = server._store_ui_tree_snapshot(after, session_id="unit", request={"include_hidden": False})
+
+    diff = asyncio.run(server.ui_tree_diff(before_resource_uri=a["resource_uri"], after_resource_uri=b["resource_uri"], limit=5, session_id="missing-session"))
+
+    assert diff["counts"]["added"] == 101
+    assert len(diff["added"]) == 5
+    assert all("children" not in item for item in diff["added"])
+    assert diff["added"][0]["children_count"] == 100
+    assert len(json.dumps(diff, ensure_ascii=False)) < 5000

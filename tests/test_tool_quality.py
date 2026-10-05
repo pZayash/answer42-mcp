@@ -168,6 +168,13 @@ def test_error_text_diagnostics_are_compacted():
         ("Ромашка ООО", "Ромашка", True),  # reference presentation
         ("01.01.2026 0:00:00", "01.01.2026", True),
         ("Другое", "Ромашка", False),
+        ("HARD-A42S55", "HARD-A42S55 ИЗМЕНЕНО", False),  # shorter actual: input did not happen
+        ("Ромашка", "Ромашка ООО", False),
+        ("<custom>", "", True),  # cleared reference cell shows a placeholder
+        ("<Empty value>", "", True),
+        ("<custom>", "x", False),
+        (None, "", False),  # unreadable field is unknown, not empty
+        (None, "x", False),
     ],
 )
 def test_values_match_for_verification(actual, expected, match):
@@ -469,3 +476,42 @@ def test_dynamic_list_output_hides_timings_unless_asked(monkeypatch):
     _record_bridge(monkeypatch, {"dynamic_list_output": {"found": True, "timings": {"total_ms": 1}}})
     assert "timings" not in asyncio.run(server.dynamic_list_output())
     assert asyncio.run(server.dynamic_list_output(include_timings=True))["timings"] == {"total_ms": 1}
+
+
+@pytest.mark.parametrize(
+    ("actual", "expected", "match"),
+    [
+        ("1,000", "1000", True),
+        ("82,020", "82020.00", True),
+        ("1,000.50", "1000.5", True),
+        ("1 000,50", "1000.5", True),
+        ("12.000", "12", True),
+        ("82,020", "82021", False),
+        ("100", "10", False),
+        ("9/30/2026 12:00:00 AM", "09/30/2026", True),
+        ("30.09.2026 0:00:00", "30.09.2026", True),
+        ("9/30/2026 12:00:00 AM", "10/01/2026", False),
+    ],
+)
+def test_verification_understands_grouped_numbers_and_dates(actual, expected, match):
+    from mcp_1c.server import _values_match_for_verification
+
+    assert _values_match_for_verification(actual, expected) is match
+
+
+def test_english_ui_headers_resolve_to_russian_row_keys():
+    from mcp_1c.server import _row_value
+
+    row = {"Subsystem name": "УправлениеПредприятием", "Version": "2.5.27.79", "This is main configuration": "Yes"}
+    assert _row_value(row, "Имя подсистемы", "ИмяПодсистемы") == "УправлениеПредприятием"
+    assert _row_value(row, "Версия") == "2.5.27.79"
+    assert _row_value({"Sequence\nnumber": "1"}, "Порядковый номер", "Код", "Порядковый\nномер") == "1"
+    assert _row_value({"Порядковый номер": "2"}, "Порядковый\nномер") == "2"
+
+
+def test_creation_window_is_recognised_in_english_interface():
+    from mcp_1c.server import _normalize_creation_window_result
+
+    result = {"set": True, "client_diagnostics": {"active_window_changed": True, "active_window_title": "Sales order (create)", "active_form_name": "Документ.ЗаказКлиента.Форма.ФормаДокумента"}}
+    normalized = _normalize_creation_window_result(result, create_if_missing=True)
+    assert normalized["set"] is False and normalized["window_opened"] is True
