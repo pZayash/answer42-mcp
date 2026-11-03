@@ -10,7 +10,11 @@ API_RU = Path(__file__).resolve().parents[1] / "docs-site" / "api_ru.json"
 def test_api_reference_has_a_russian_translation_for_every_tool_and_parameter():
     """The documentation site shows tool docs in Russian: a new tool or parameter text needs docs-site/api_ru.json."""
     translations = json.loads(API_RU.read_text(encoding="utf-8"))
-    tools = asyncio.run(server.mcp.list_tools())
+    server._register_dev_tools(True)  # the site documents dev tools too
+    try:
+        tools = asyncio.run(server.mcp.list_tools())
+    finally:
+        server._register_dev_tools(False)
     missing_tools = sorted(t.name for t in tools if not translations["tools"].get(t.name, "").strip())
     texts = {
         schema.get("description", "")

@@ -91,7 +91,7 @@ class SessionState:
 
 `dynamic_list_sort_by_column` — отдельный быстрый tool для сортировки уже открытого динамического списка по видимой колонке через API списка. Он не является fallback-веткой `dynamic_list_set_settings`.
 - табличные документы: `tabular_documents` (список или ячейки одного документа по `name`/`title`), `tabular_document_save`;
-- HTML-поля: `html_field_content`, `html_field_click_link`, `html_field_input` (API тест-клиента) и живые страницы `html_pages`, `html_text`, `html_query`, `html_click`, `html_type`, `html_wait`, `html_eval`, `html_console` (через `mcp_1c.html_agent`);
+- HTML-поля: `html_field_content`, `html_field_click_link`, `html_field_input` (API тест-клиента) и живые страницы `html_pages`, `html_text`, `html_query`, `html_click`, `html_type`, `html_wait`, `html_console` (через `mcp_1c.html_agent`); `html_eval` (произвольный JavaScript) и `dev_eval` (произвольный BSL) регистрируются только с `--dev-tools` / `ONEC_MCP_DEV_TOOLS=1` (`DEV_TOOL_NAMES`, `_register_dev_tools`);
 - доказательная запись: `recording_start`, `recording_capture`, `recording_stop`;
 - RAG: `rag_source_add`, `rag_sources_add_from_directory`, `rag_source_roots_list`, `rag_sources_list`, `rag_available_configurations`, `rag_snapshot_create`, `rag_snapshots_list`, `rag_index_build`, `rag_lookup_object`, `rag_query`, `rag_session_autoconfigure`.
 

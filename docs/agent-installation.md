@@ -227,7 +227,7 @@ stop_session(session_id="smoke")
 - Работайте через first-class MCP tools Answer42, а не через X11/WinAPI-клики.
 - Не запускайте обычный клиент 1С вместо `/TESTMANAGER`, если пользователь явно не просил диагностику вне Answer42.
 - Для ссылочных полей предпочитайте стандартные формы выбора 1С.
-- Веб-страницы в HTML-полях (чаты, встроенные веб-приложения) читайте и меняйте инструментами группы `html` (`html_pages`, `html_text`, `html_query`, `html_click`, `html_type`, `html_wait`, `html_eval`, `html_console`); статический HTML поля — `html_field_content`.
+- Веб-страницы в HTML-полях (чаты, встроенные веб-приложения) читайте и меняйте инструментами группы `html` (`html_pages`, `html_text`, `html_query`, `html_click`, `html_type`, `html_wait`, `html_console`); статический HTML поля — `html_field_content`. Произвольный JavaScript (`html_eval`) доступен, только если пользователь запустил сервер с `--dev-tools`.
 - После действий проверяйте user messages, error info и фактическое состояние формы.
 - Не заявляйте выполнение UI-задачи без реального состояния, скриншота или PDF evidence.
 - Завершайте сессии через `stop_session`.
