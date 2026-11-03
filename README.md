@@ -6,11 +6,12 @@
 
 > **The Answer to Life, Universe, and 1C — UI Driver**
 
-Проект даёт AI-агенту три способности:
+Проект даёт AI-агенту четыре способности:
 
 1. **Интерактивное управление UI 1С** — открыть форму, кликнуть кнопку, активировать поле, заполнить значение, выбрать строку, провести сценарий через `/TESTMANAGER` + `/TESTCLIENT`.
-2. **Доказательная запись клиентского тестирования** — записывать аннотированные PDF-слайды с MCP method/request/response и скриншотами окна 1С.
-3. **RAG-индекс метаданных** — локальный SQLite/FTS индекс конфигураций 1С (EDT, XML-выгрузка Конфигуратора, base + extensions), включая подсказки для `ui_tree` и dynamic-list settings.
+2. **Живые веб-страницы в HTML-полях** — читать и менять DOM страниц, которые рисуются скриптами (чаты, SPA), и видеть ошибки их консоли, на Windows- и Linux-клиентах 1С.
+3. **Доказательная запись клиентского тестирования** — записывать аннотированные PDF-слайды с MCP method/request/response и скриншотами окна 1С.
+4. **RAG-индекс метаданных** — локальный SQLite/FTS индекс конфигураций 1С (EDT, XML-выгрузка Конфигуратора, base + extensions), включая подсказки для `ui_tree` и dynamic-list settings.
 
 ## Быстрый старт
 
@@ -50,50 +51,50 @@ start_session(
 
 Логин/пароль рекомендуется **не передавать явно**: `start_session` умеет брать их из локального credentials-файла по `base_url`. Параметры `username`/`password` остаются в API для разовых сценариев и обратной совместимости, но при передаче в MCP-вызове они видны вызывающему агенту в аргументах tool-call.
 
-## `ui_tree` profiles and output formats
+## Профили и форматы `ui_tree`
 
-`ui_tree` is optimized for form-structure diagnostics. The default `profile="navigation"` returns a compact visible UI tree without data presentations, RAG enrichment, or command-panel subtrees. The tree is not depth-limited.
+`ui_tree` оптимизирован для диагностики структуры формы. Профиль по умолчанию `profile="navigation"` возвращает компактное дерево видимых элементов без представлений данных, обогащения из RAG и поддеревьев командных панелей. Глубина дерева не ограничивается.
 
-Useful modes:
+Полезные режимы:
 
-- `ui_tree(parent_name=...)` serializes only the subtree under a known parent element, useful for large/complex forms.
-- `ui_tree(name=.../title=.../type=...)` returns a flat `objects` list instead of a nested tree; on current managers filtering is performed on the 1C side; simple exact `name`/`type` queries may use the platform fast path before falling back to flat traversal.
-- `profile="diagnostic"` includes command panels without enabling expensive data reads.
-- `profile="data"` enables node data presentations; prefer targeted `field_info`, `table_rows`, `tabular_documents(name=...)`, or `tabular_document_save` unless you really need data for many nodes.
-- `profile="full"` gives the closest historical verbose result.
-- `fields="minimal|navigation|diagnostic|data|full"` (or a comma-separated custom field list) controls node payload without truncating the tree.
-- `command_panels="include|exclude|only"` controls command-panel serialization explicitly; `only` returns a deduplicated flat list.
-- `group_mode="include|flatten|flatten_layout|exclude|exclude_empty|pages_only"` controls whether group nodes are kept, lifted, or omitted.
-- `format="json|outline|yaml|yml"` keeps JSON as the default structured result and offers readable text views for inspection. Invalid profile/group/command-panel/format values are rejected; every result includes `metrics` with timings/payload counters; `tree_summary.types_count` reports node counts by broad family (`buttons`, `fields`, `tables`, `groups`, etc.) and exact 1C test-client type.
+- `ui_tree(parent_name=...)` сериализует только поддерево известного родительского элемента — удобно для больших и сложных форм.
+- `ui_tree(name=.../title=.../type=...)` возвращает плоский список `objects` вместо дерева; на актуальных менеджерах фильтрация выполняется на стороне 1С, а простые точные запросы по `name`/`type` могут идти быстрым путём платформы до перехода к плоскому обходу.
+- `profile="diagnostic"` включает командные панели без дорогого чтения данных.
+- `profile="data"` включает представления данных узлов; если данные нужны не для многих узлов, лучше точечные `field_info`, `table_rows`, `tabular_documents(name=...)` или `tabular_document_save`.
+- `profile="full"` даёт результат, ближайший к прежнему подробному.
+- `fields="minimal|navigation|diagnostic|data|full"` (или свой список полей через запятую) управляет содержимым узлов без обрезки дерева.
+- `command_panels="include|exclude|only"` явно управляет сериализацией командных панелей; `only` возвращает плоский список без повторов.
+- `group_mode="include|flatten|flatten_layout|exclude|exclude_empty|pages_only"` определяет, сохраняются ли узлы групп, поднимаются ли их элементы на уровень выше или группы опускаются.
+- `format="json|outline|yaml|yml"`: JSON остаётся структурированным форматом по умолчанию, остальные — читаемые текстовые представления. Неверные значения профиля, группировки, командных панелей и формата отклоняются; каждый результат содержит `metrics` с замерами времени и размера, а `tree_summary.types_count` — число узлов по семействам (`buttons`, `fields`, `tables`, `groups` и т. д.) и по точному типу клиента тестирования 1С.
 
-### Large `ui_tree` snapshots as resources
+### Большие снимки `ui_tree` как ресурсы
 
-By default `delivery="auto"` keeps small results inline and automatically stores large results as resources when the estimated token count exceeds `ONEC_MCP_UI_TREE_RESOURCE_AUTO_THRESHOLD_TOKENS` (default 50k).
-Use `delivery="inline"` to force the selected JSON/outline/yaml directly in the response. Use `delivery="resource"` to force resource storage for large diagnostics:
+По умолчанию `delivery="auto"` возвращает небольшие результаты прямо в ответе, а большие автоматически сохраняет как ресурс, когда оценка числа токенов превышает `ONEC_MCP_UI_TREE_RESOURCE_AUTO_THRESHOLD_TOKENS` (по умолчанию 50 тысяч).
+`delivery="inline"` принудительно возвращает выбранный JSON/outline/yaml в ответе, `delivery="resource"` — принудительно сохраняет большую диагностику в ресурс:
 
 ```text
 r = ui_tree(profile="full", include_hidden=true, delivery="resource")
 ```
 
-When auto switches to resource, or when `delivery="resource"` is forced, the inline response contains only `resource_uri`, `snapshot_id`, summary, metrics, byte size, estimated tokens, threshold reason and a small preview. The full JSON snapshot is stored under the Answer42 runtime data directory and registered as an MCP resource (`answer42://ui-tree/<session>/<snapshot_id>`). Do not load that whole resource into the agent context unless you really need the raw file; use targeted snapshot tools instead:
+Когда `auto` переключается на ресурс или `delivery="resource"` задан явно, ответ содержит только `resource_uri`, `snapshot_id`, сводку, метрики, размер в байтах, оценку токенов, причину срабатывания порога и небольшой фрагмент. Полный JSON-снимок сохраняется в каталоге данных Answer42 и регистрируется как MCP-ресурс (`answer42://ui-tree/<session>/<snapshot_id>`). Не загружайте весь ресурс в контекст агента без необходимости — для работы со снимком есть точечные инструменты:
 
-- `ui_tree_resource_search(resource_uri=..., name/title/type/text=...)` — find a few controls in a saved snapshot and get their `path`/`index_path`.
-- `ui_tree_resource_get_node(resource_uri=..., index_path=...)` — read exactly one node.
-- `ui_tree_resource_children(resource_uri=..., index_path=..., depth=1|2)` — read a small subtree.
-- `ui_tree_diff(before_resource_uri=..., after_resource_uri=...)` — compare snapshots before/after a UI action.
-- `ui_tree_resource_action(resource_uri=..., index_path=..., action="focus|click_button|activate_field|field_value_text|field_info")` — reuse a node selector from the snapshot and execute a first-class live UI tool.
+- `ui_tree_resource_search(resource_uri=..., name/title/type/text=...)` — найти несколько элементов в сохранённом снимке и получить их `path`/`index_path`.
+- `ui_tree_resource_get_node(resource_uri=..., index_path=...)` — прочитать ровно один узел.
+- `ui_tree_resource_children(resource_uri=..., index_path=..., depth=1|2)` — прочитать небольшое поддерево.
+- `ui_tree_diff(before_resource_uri=..., after_resource_uri=...)` — сравнить снимки до и после действия в интерфейсе.
+- `ui_tree_resource_action(resource_uri=..., index_path=..., action="focus|click_button|activate_field|field_value_text|field_info")` — использовать селектор узла из снимка и выполнить соответствующий инструмент на живой форме.
 
-`index_path` is the preferred stable address inside one snapshot. `path` is human-readable and useful for reports, but less reliable when several controls have the same captions.
+`index_path` — предпочтительный стабильный адрес внутри одного снимка. `path` читаем человеком и удобен для отчётов, но менее надёжен, когда у нескольких элементов одинаковые заголовки.
 
 
 ## Встроенные рекомендации для агентов
 
-Answer42 больше не поставляет и не устанавливает bundled skills. Рекомендации
-по UI-автоматизации, RAG, Универсальному отчёту и экспорту табличных документов
-находятся в descriptions соответствующих MCP-инструментов и встроенных MCP prompts.
+Answer42 больше не поставляет и не устанавливает встроенные skills. Рекомендации
+по автоматизации интерфейса, RAG, Универсальному отчёту и выгрузке табличных документов
+находятся в описаниях соответствующих MCP-инструментов и во встроенных MCP prompts.
 
-Команды `answer42 install-skills` и `answer42 skills-install` сохранены как
-совместимые no-op: они ничего не копируют и выводят сообщение о новой модели.
+Команды `answer42 install-skills` и `answer42 skills-install` сохранены для совместимости:
+они ничего не копируют и выводят сообщение о новой схеме.
 
 ## Инструкция для AI-агентов
 
@@ -104,9 +105,9 @@ Answer42 больше не поставляет и не устанавливае
 1. установите пакет через `pipx` или virtualenv;
 2. подготовьте `ONEC_MCP_CREDENTIALS_FILE` вне репозитория;
 3. зарегистрируйте MCP-сервер в агентском клиенте;
-4. проверьте установку через `credentials_check`, затем smoke-сессию `start_session` → `active_window` → `stop_session`.
+4. проверьте установку через `credentials_check`, затем пробной сессией `start_session` → `active_window` → `stop_session`.
 
-## Linux display prerequisite
+## Дисплей на Linux
 
 На Linux `start_session` использует живую X11-сессию, если процесс Answer42 унаследовал непустой `DISPLAY`: test manager и test client запускаются на этом дисплее, поэтому их окна и скриншоты видны на desktop.
 
@@ -131,7 +132,7 @@ sudo dnf install xorg-x11-server-Xvfb
 
 ## Транспорты: stdio и StreamableHTTP
 
-По умолчанию Answer42 использует stdio MCP transport (запускается MCP-хостом как subprocess). Для удалённого deployment доступен **StreamableHTTP** режим с MCP auth:
+По умолчанию Answer42 использует транспорт MCP stdio (MCP-хост запускает его как дочерний процесс). Для удалённого развёртывания есть режим **StreamableHTTP** с авторизацией MCP:
 
 ```bash
 answer42 --http --http-host 0.0.0.0 --http-port 8080 \
@@ -161,13 +162,14 @@ answer42
 
 | Группа | Что внутри |
 |---|---|
-| `forms` | фокус и обход элементов, ожидания, группы и страницы, декорации, диалог выбора файла, пакетный ввод полей |
+| `forms` | фокус и обход элементов, ожидания, группы и страницы, декорации, HTML-поля через API тест-клиента, диалог выбора файла, пакетный ввод полей |
 | `tables` | перемещение по таблице, ячейки, выделение, копирование и пометка удаления, режим редактирования |
 | `lists` | настройки динамических списков: отборы, сортировка, поиск, вывод списка |
 | `commands` | командный интерфейс, командные панели и контекстные меню |
 | `ui_snapshots` | работа с сохранённым большим `ui_tree` (включается сама, когда `ui_tree` сохранил результат в ресурс) |
 | `metadata` | метаданные конфигурации из живого интерфейса |
 | `rag` | RAG по исходникам конфигурации — **только пока RAG активен** (`start_session(rag_enabled=true)`) |
+| `html` | живые веб-страницы в HTML-полях: текст, поиск элементов, клик, ввод, ожидание, JavaScript, ошибки консоли (включается сама после `start_session`) |
 | `recording` | запись доказательств (скриншоты, слайды, PDF) |
 | `credentials` | сохранённые учётные данные баз |
 
@@ -178,6 +180,34 @@ answer42
 - **для сервера целиком** — `--tool-profile` / `ONEC_MCP_TOOL_PROFILE` (например `core,lists` или `full`). Старые имена профилей (`ui`, `dynamic`, `tabular`, `sessions`, `windows`) продолжают работать.
 
 **Старый режим (статический список).** `--tool-groups off` или `ONEC_MCP_TOOL_GROUPS=off` выключает группы: клиент сразу видит весь список профиля (по умолчанию `full`), инструмента `tool_groups` нет, RAG-инструменты не скрываются. Отдельному клиенту полный список можно дать и без выключения групп — `?tools=full`.
+
+## HTML-поля и живые веб-страницы
+
+Поле HTML-документа 1С может показывать как статический HTML, так и полноценное веб-приложение (чат, SPA), которое рисует себя скриптами.
+
+**Статический HTML** — инструменты группы `forms` через API клиента тестирования: `html_field_content` (HTML поля в том виде, в каком страница загрузилась, и её видимый текст), `html_field_click_link`, `html_field_input`.
+
+**Живые страницы** — группа `html`. `start_session` по умолчанию (`html_agent=true`) готовит мост к встроенному WebKit клиента; `html_agent=false` его не запускает.
+
+| Инструмент | Что делает |
+|---|---|
+| `html_pages` | список живых страниц HTML-полей; подключает новые |
+| `html_text` | текст страницы или элементов по CSS-селектору |
+| `html_query` | элементы по селектору или тексту: тег, id, класс, value, атрибуты, видимость |
+| `html_click` | нажать элемент |
+| `html_type` | ввести значение в поле (`submit=true` — отправить Enter) |
+| `html_wait` | дождаться появления или исчезновения текста / элемента |
+| `html_eval` | выполнить JavaScript в странице |
+| `html_console` | ошибки и предупреждения консоли страницы и скрипты, которые эта сборка WebKit не разбирает (например `?.`) |
+
+Если живых страниц несколько, нужная выбирается параметром `page` (id из `html_pages` или часть URL / заголовка).
+
+Как это устроено:
+
+- **Windows.** Встроенный WebKit клиента 1С не имеет сервера удалённой отладки, но его Web Inspector открывается по Ctrl+Alt+Shift+F12. При первом вызове `html_*` Answer42 открывает инспектор поля (он встраивается в нижнюю часть формы), фокусирует строку консоли и вводит однострочный мост. Мост подключается к локальному WebSocket Answer42 по одноразовому токену и выполняет операции в странице. После перезагрузки страницы мост вводится заново. Платформа используется как установлена, ничего не копируется и не патчится.
+- **Linux.** HTML-поля рисует системный WebKitGTK. Answer42 запускает тест-клиент с `WEBKIT_INSPECTOR_SERVER=127.0.0.1:<порт>` и подключается к удалённому отладчику WebKitGTK напрямую: окна инспектора и ввода с клавиатуры нет.
+
+Ограничения: на Windows инспектор остаётся встроенным в форму и попадает на скриншоты; первое подключение к странице занимает 15–25 секунд. `html_console` на Linux отдаёт сообщения с момента загрузки страницы, а на Windows — с момента подключения моста (`collected_since`); неподдержанный синтаксис в скриптах страницы находит проверка скриптов (`check_scripts`). Встроенный WebKit Windows-клиента 1С не поддерживает часть современного JavaScript (например `?.`), а WebKitGTK на Linux — поддерживает: одна и та же страница может работать в одном клиенте и ломаться в другом.
 
 ## Безопасное хранение логинов и паролей
 
@@ -221,7 +251,7 @@ export ONEC_MCP_CREDENTIALS_FILE=/secure/path/credentials.json
 }
 ```
 
-Устаревший v1 формат (flat `entries`) автоматически загружается в account `legacy` и мигрирует в v2 при следующем сохранении. Рекомендуется явно задать `account_id` (через HTTP auth claim или `ONEC_MCP_ACCOUNT_ID` в stdio) и перенести записи в соответствующий account.
+Устаревший формат v1 (плоский список `entries`) автоматически загружается в аккаунт `legacy` и переводится в v2 при следующем сохранении. Рекомендуется явно задать `account_id` (через claim авторизации HTTP или `ONEC_MCP_ACCOUNT_ID` в stdio) и перенести записи в нужный аккаунт.
 
 Рекомендуемые права на файл: `0600`.
 
@@ -301,7 +331,7 @@ stop_session(session_id="my-session", clean_data=False)
 
 ## Сборка конфигураций 1С
 
-Конфигурация менеджера тестирования собирается из XML-исходников `src/cf/` через временную файловую ИБ: `ibcmd infobase config import` и затем `ibcmd config save` (приоритетный способ). Такой путь создаёт переносимый `.cf` с compatibility mode XML-исходников; Конфигуратор/DESIGNER используется как fallback, если `ibcmd` отсутствует:
+Конфигурация менеджера тестирования собирается из XML-исходников `src/cf/` через временную файловую ИБ: `ibcmd infobase config import` и затем `ibcmd config save` (приоритетный способ). Такой путь создаёт переносимый `.cf` с режимом совместимости XML-исходников; если `ibcmd` нет, используется Конфигуратор (DESIGNER):
 
 ```bash
 python scripts/build_cf.py src/cf build/MCPTestManager.cf
@@ -359,4 +389,4 @@ MIT
 
 Copyright (c) 2026 Kosolapov Stanislav aka proDOOMman <prodoomman@gmail.com>, Marvin (AI Assistant), 42Clouds, and contributors.
 
-Licensed under the MIT License.
+Распространяется по лицензии MIT.

@@ -96,7 +96,8 @@ pages:
   rules:
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
   script:
-    - python scripts/build_pages.py
+    - python -m pip install --disable-pip-version-check '.[docs]'
+    - python -m sphinx -W --keep-going -b html docs-site public
   artifacts:
     paths:
       - public

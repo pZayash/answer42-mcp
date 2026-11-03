@@ -5248,7 +5248,7 @@ async def start_session(
     rag_enabled: Annotated[bool, "Enable built-in RAG for this session"] = False,
     summary_rag_config: Annotated[str, "Explicit Summary RAG configuration alias/code, e.g. bp, bpc, ka, ut, zup, Accounting30, Бухгалтерия предприятия. Enables configuration+fresh summary snapshot without live autodetection."] = "",
     include_timings: Annotated[bool, "Include diagnostic startup timing breakdown in the returned _timings field"] = False,
-    html_agent: Annotated[bool, "Start a local bridge for live web pages in HTML document fields; enables the html_* tools (live DOM read/click/type through the embedded WebKit inspector; Windows and Linux clients)"] = False,
+    html_agent: Annotated[bool, "Bridge live web pages in HTML document fields for the html_* tools (live DOM read/click/type/console through the embedded WebKit inspector; Windows and Linux clients); false = do not start it"] = True,
 ) -> dict[str, Any]:
     """One-shot session factory: detect version, start infrastructure, and connect the 1C test client.
 
@@ -5257,7 +5257,7 @@ async def start_session(
     passing secrets in tool calls. After a long UI operation, use
     `client_busy_status` or `wait_client_idle` before sending more commands.
 
-    With `html_agent=true` the html_* tools reach live pages in HTML document
+    By default (`html_agent=true`) the html_* tools reach live pages in HTML document
     fields: on Windows through the embedded Web Inspector, which stays docked at
     the bottom of the form; on Linux through the WebKitGTK remote inspector.
     """
@@ -7126,7 +7126,7 @@ async def _html_agent_for(session_id: str) -> html_agent.HtmlInspector:
     _touch_session(sess)
     if sess.html_agent is None:
         raise ToolError(
-            "HTML agent is not running for this session: start it with start_session(html_agent=true). "
+            "HTML agent is not running for this session (started with html_agent=false, or restored after an MCP server restart): start a new session. "
             "For static HTML fields use html_field_content instead."
         )
     return sess.html_agent
@@ -7146,7 +7146,7 @@ async def html_pages(
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
-    """List live web pages in HTML document fields of the client (needs start_session(html_agent=true)).
+    """List live web pages in HTML document fields of the client (start_session bridges them unless html_agent=false).
 
     Connects HTML fields that appeared (or reloaded) since the last call (on Windows by typing
     a one-line bridge into their embedded Web Inspector console).
