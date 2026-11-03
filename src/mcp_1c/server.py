@@ -7277,6 +7277,31 @@ async def html_eval(
 
 
 @mcp.tool()
+async def html_console(
+    levels: Annotated[str, "Comma-separated levels to return: error, warning, log, info, debug; empty = all"] = "error,warning",
+    check_scripts: Annotated[bool, "Also compile every script of the page and report syntax this WebKit cannot parse (e.g. ?.)"] = True,
+    limit: Annotated[int, "Return at most this many latest messages; 0 = all"] = 100,
+    clear: Annotated[bool, "Forget the returned messages, so the next call shows only new ones"] = False,
+    page: Annotated[str, "Page id or part of its URL/title; may be empty when one page is live"] = "",
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Console errors and warnings of a live page in an HTML document field.
+
+    On Linux the messages go back to the page load; on Windows they are caught
+    from the moment Answer42 connected to the page (`collected_since`), and
+    `check_scripts` finds scripts that fail to parse in this WebKit. Script
+    line numbers are approximate.
+    """
+    inspector = await _html_agent_for(session_id)
+    wanted = frozenset(part.strip().lower() for part in levels.split(",") if part.strip())
+    try:
+        return await inspector.console(page, levels=wanted, limit=max(0, int(limit)), clear=clear, check_scripts=check_scripts)
+    except html_agent.HtmlAgentError as exc:
+        raise ToolError(str(exc)) from exc
+
+
+@mcp.tool()
 async def object_command_panel(
     name: Annotated[str, "Object technical name; empty = the active form's command bar"] = "",
     title: Annotated[str, "Object title substring"] = "",

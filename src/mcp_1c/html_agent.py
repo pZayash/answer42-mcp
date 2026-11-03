@@ -179,7 +179,75 @@ OPS_JS = r"""function (op, args) {
       }
       return describe(el, a.index || 0);
     },
-    eval: function (a) { return (0, eval)(a.code); }
+    eval: function (a) { return (0, eval)(a.code); },
+    hook_console: function () {
+      if (window.__answer42Console) { return false; }
+      var log = window.__answer42Console = [];
+      function push(level, text, url, line, column, source) {
+        log.push({ level: level, text: String(text), url: url || '', line: line || 0, column: column || 0, source: source, time: new Date().toISOString() });
+        if (log.length > 500) { log.shift(); }
+      }
+      window.addEventListener('error', function (e) {
+        var el = e.target;
+        if (el && el !== window && el.tagName) {
+          push('error', 'Failed to load ' + el.tagName.toLowerCase() + ': ' + (el.src || el.href || ''), el.src || el.href, 0, 0, 'network');
+          return;
+        }
+        push('error', e.message || (e.error && e.error.message) || 'Script error', e.filename, e.lineno, e.colno, 'javascript');
+      }, true);
+      window.addEventListener('unhandledrejection', function (e) {
+        var r = e.reason;
+        push('error', 'Unhandled promise rejection: ' + ((r && r.message) || r), '', 0, 0, 'javascript');
+      });
+      ['error', 'warn'].forEach(function (name) {
+        var original = console[name];
+        console[name] = function () {
+          try {
+            var parts = [];
+            for (var i = 0; i < arguments.length; i++) {
+              var x = arguments[i];
+              try { parts.push(typeof x === 'string' ? x : (x && x.message) || JSON.stringify(x)); } catch (ignore) { parts.push(String(x)); }
+            }
+            push(name === 'warn' ? 'warning' : 'error', parts.join(' '), '', 0, 0, 'console-api');
+          } catch (ignore2) {}
+          return original.apply(console, arguments);
+        };
+      });
+      return true;
+    },
+    console: function (a) {
+      var log = window.__answer42Console;
+      if (!log) { return { hooked: false, messages: [] }; }
+      var out = log.slice(-(a.limit || 200));
+      if (a.clear) { log.length = 0; }
+      return { hooked: true, messages: out };
+    },
+    check_scripts: function () {
+      var list = document.scripts, errors = [], checked = 0;
+      for (var i = 0; i < list.length; i++) {
+        var s = list[i], type = (s.type || '').toLowerCase();
+        if (type && !/^(text|application)\/(x-)?(javascript|ecmascript)$/.test(type)) { continue; }
+        var name = s.src || ('inline script #' + i), code = s.text;
+        if (s.src) {
+          try {
+            var x = new XMLHttpRequest();
+            x.open('GET', s.src, false);
+            x.send(null);
+            if (x.status && (x.status < 200 || x.status >= 300)) { errors.push({ script: name, error: 'HTTP ' + x.status }); continue; }
+            code = x.responseText;
+          } catch (e) { errors.push({ script: name, error: 'cannot fetch: ' + ((e && e.message) || e) }); continue; }
+        }
+        checked++;
+        try { new Function(code); }
+        catch (e) {
+          var d = { script: name, error: (e && e.name ? e.name + ': ' : '') + ((e && e.message) || e) };
+          if (e && e.line) { d.line = e.line; }
+          if (!(e instanceof SyntaxError)) { d.unchecked = true; }
+          errors.push(d);
+        }
+      }
+      return { scripts: list.length, checked: checked, errors: errors };
+    }
   };
   try { return { ok: true, result: plain(OPS[op](args || {}), 0) }; }
   catch (e) { return { ok: false, error: String((e && e.message) || e) }; }
@@ -426,6 +494,9 @@ class RemoteInspectorClient:
         self._page_targets: dict[tuple[int, int], str] = {}
         self._changed = asyncio.Event()
         self._setup: set[tuple[int, int]] = set()
+        self.console: dict[tuple[int, int], list[dict[str, Any]]] = {}
+        self._console_enabled: set[str] = set()
+        self._tasks: set[asyncio.Task] = set()
 
     async def connect(self, timeout: float = REMOTE_SETUP_SECONDS) -> None:
         deadline = time.monotonic() + timeout
@@ -459,6 +530,8 @@ class RemoteInspectorClient:
                 self._writer.close()
         if self._task is not None:
             self._task.cancel()
+        for task in list(self._tasks):
+            task.cancel()
         self._fail_pending("remote inspector connection closed")
         self.closed = True
 
@@ -512,15 +585,20 @@ class RemoteInspectorClient:
             if info.get("type") == "page" and not info.get("isProvisional"):
                 self._page_targets[key] = str(info.get("targetId"))
                 self._changed.set()
+                self._enable_console_soon(key)
         elif method == "Target.didCommitProvisionalTarget":
             self._page_targets[key] = str(params.get("newTargetId"))
             self._changed.set()
+            self._enable_console_soon(key)
         elif method == "Target.targetDestroyed":
             if self._page_targets.get(key) == params.get("targetId"):
                 self._page_targets.pop(key, None)
         elif method == "Target.dispatchMessageFromTarget":
             with suppress(ValueError, TypeError):
                 inner = json.loads(params.get("message") or "")
+                if inner.get("method") == "Console.messageAdded":
+                    self._console_message(key, (inner.get("params") or {}).get("message") or {})
+                    return
                 future = self._pending.pop(inner.get("id"), None)
                 if future is not None and not future.done():
                     future.set_result(inner)
@@ -529,12 +607,44 @@ class RemoteInspectorClient:
             if future is not None and not future.done():
                 future.set_result(message)
 
+    def _console_message(self, key: tuple[int, int], message: dict[str, Any]) -> None:
+        log = self.console.setdefault(key, [])
+        log.append({
+            "level": str(message.get("level") or "log"),
+            "text": str(message.get("text") or ""),
+            "url": str(message.get("url") or ""),
+            "line": int(message.get("line") or 0),
+            "column": int(message.get("column") or 0),
+            "source": str(message.get("source") or ""),
+            **({"repeat": int(message["repeatCount"])} if int(message.get("repeatCount") or 1) > 1 else {}),
+        })
+        del log[:-500]
+
+    def _enable_console_soon(self, key: tuple[int, int]) -> None:
+        task = asyncio.get_running_loop().create_task(self._enable_console(key))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _enable_console(self, key: tuple[int, int]) -> None:
+        """Console.enable on the current page target: WebKit replays the messages since the page loaded."""
+        page_target = self._page_targets.get(key)
+        if not page_target or page_target in self._console_enabled or key not in self._setup:
+            return
+        self._console_enabled.add(page_target)
+        message_id = next(self._ids)
+        inner = {"id": message_id, "method": "Console.enable"}
+        outer = {"id": message_id, "method": "Target.sendMessageToTarget",
+                 "params": {"targetId": page_target, "message": json.dumps(inner)}}
+        with suppress(HtmlAgentError, OSError):
+            await self._send("SendMessageToBackend", _ids_body(*key, json.dumps(outer)))
+
     async def inspect(self, key: tuple[int, int]) -> None:
         """Attach to a WebPage target and wait for its page target."""
         if key not in self._setup:
             await self._send("Setup", _ids_body(*key))
             self._setup.add(key)
         await self._page_target(key, REMOTE_SETUP_SECONDS)
+        await self._enable_console(key)
 
     async def _page_target(self, key: tuple[int, int], timeout: float) -> str:
         deadline = time.monotonic() + timeout
@@ -832,6 +942,7 @@ class HtmlInspector:
             self._tokens.pop(token, None)
         self._attempts.pop(view, None)
         with suppress(HtmlAgentError):
+            await self.run(page, "hook_console", {}, timeout=10)  # errors from now on; see console()
             await self.refresh(page)
         return page
 
@@ -867,6 +978,37 @@ class HtmlInspector:
         """Resolve a page, first opening inspectors of WebKit views that appeared since the last call."""
         await self.open_inspectors()
         return self.resolve_page(selector)
+
+    async def console(self, selector: str = "", levels: frozenset[str] = frozenset({"error", "warning"}),
+                      limit: int = 100, clear: bool = False, check_scripts: bool = True) -> dict[str, Any]:
+        """Console errors/warnings of a page, plus scripts this WebKit cannot parse.
+
+        Linux reads the inspector's Console domain, which keeps messages since
+        the page loaded.  The Windows page bridge hooks errors only once it is
+        connected, so earlier load-time errors are missing there; the script
+        check (every script compiled with ``new Function``) still reports
+        syntax this WebKit does not support, such as ``?.``.
+        """
+        page = await self.page(selector)
+        result: dict[str, Any] = {"page": page.page_id, "url": page.url}
+        if page.target is not None and self._remote is not None:
+            log = self._remote.console.get(page.target, [])
+            messages = list(log)
+            if clear:
+                log.clear()
+            result["collected_since"] = "page load"
+        else:
+            hooked = await self.run(page, "console", {"limit": 500, "clear": clear}, timeout=10)
+            if not hooked.get("hooked"):
+                await self.run(page, "hook_console", {}, timeout=10)
+            messages = list(hooked.get("messages") or [])
+            result["collected_since"] = _dt.datetime.fromtimestamp(page.opened_at, _dt.UTC).isoformat(timespec="seconds")
+        selected = [m for m in messages if not levels or m.get("level") in levels]
+        result["messages"] = selected[-limit:] if limit > 0 else selected
+        result["total"] = len(selected)
+        if check_scripts:
+            result["scripts"] = await self.run(page, "check_scripts", {}, timeout=60)
+        return result
 
     async def command(self, selector: str, op: str, args: dict[str, Any], timeout: float = 30.0) -> Any:
         return await self.run(await self.page(selector), op, args, timeout=timeout)

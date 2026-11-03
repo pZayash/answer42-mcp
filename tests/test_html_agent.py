@@ -160,6 +160,13 @@ class _FakeRemoteInspector:
                     outer = json.loads(body[16:].rstrip(b"\0"))
                     inner = json.loads(outer["params"]["message"])
                     self.frontend({"result": {}, "id": outer["id"]})
+                    if inner["method"] == "Console.enable":
+                        self.received.append("Console.enable " + outer["params"]["targetId"])
+                        for level, text in (("error", "SyntaxError: Unexpected token '.'"), ("log", "hello")):
+                            self.frontend({"method": "Target.dispatchMessageFromTarget", "params": {
+                                "targetId": outer["params"]["targetId"], "message": json.dumps({"method": "Console.messageAdded", "params": {
+                                    "message": {"source": "javascript", "level": level, "text": text, "url": "https://chat.test/app.js", "line": 3}}})}})
+                        continue
                     self.frontend({"method": "Target.dispatchMessageFromTarget", "params": {
                         "targetId": outer["params"]["targetId"], "message": json.dumps(self.reply(outer["params"]["targetId"], inner))}})
         except asyncio.IncompleteReadError:
@@ -169,6 +176,8 @@ class _FakeRemoteInspector:
         expression = inner["params"]["expression"]
         if '"info"' in expression:
             value = {"ok": True, "result": {"url": "https://chat.test/", "title": "Chat", "target": target_id}}
+        elif '"check_scripts"' in expression:
+            value = {"ok": True, "result": {"scripts": 2, "checked": 2, "errors": [{"script": "https://chat.test/app.js", "error": "SyntaxError: Unexpected token '.'"}]}}
         elif '"click"' in expression:
             return {"id": inner["id"], "result": {"result": {"type": "object", "description": "TypeError: boom"}, "wasThrown": True}}
         else:
@@ -196,6 +205,11 @@ def test_remote_inspector_pages_on_linux(monkeypatch):
             opened = await inspector.open_inspectors()
             page = inspector.resolve_page("")
             first = await inspector.run(page, "text", {}, timeout=5)
+            console = await inspector.console("", clear=True)
+            assert [m["text"] for m in console["messages"]] == ["SyntaxError: Unexpected token '.'"]
+            assert console["messages"][0]["line"] == 3 and console["collected_since"] == "page load"
+            assert console["scripts"]["errors"][0]["script"] == "https://chat.test/app.js"
+            assert (await inspector.console("", levels=frozenset(), check_scripts=False))["messages"] == []
             with pytest.raises(html_agent.HtmlAgentError, match="TypeError: boom"):
                 await inspector.run(page, "click", {"selector": "#x"}, timeout=5)
             fake.frontend({"method": "Target.didCommitProvisionalTarget", "params": {"oldTargetId": "page-1", "newTargetId": "page-2"}})
@@ -214,4 +228,33 @@ def test_remote_inspector_pages_on_linux(monkeypatch):
     opened, page, first, second, received = asyncio.run(scenario())
     assert opened == ["p1"] and page.target == (1, 2) and page.title == "Chat"
     assert (first, second) == ("page-1", "page-2")
-    assert received[:2] == ["SetupInspectorClient", "Setup"]
+    assert received[:3] == ["SetupInspectorClient", "Setup", "SendMessageToBackend"]
+    assert {"Console.enable page-1", "Console.enable page-2"} <= set(received)
+
+
+def test_console_through_the_page_bridge():
+    async def scenario():
+        inspector = html_agent.HtmlInspector()
+        port = await inspector.start()
+        token, connected = inspector.expect(hwnd=7)
+        messages = [{"level": "error", "text": "boom", "source": "javascript"}, {"level": "log", "text": "fine"}]
+        page_side = asyncio.create_task(_fake_page(port, token, [
+            {"value": {"ok": True, "result": {"hooked": True, "messages": messages}}},
+            {"value": {"ok": True, "result": {"scripts": 1, "checked": 1, "errors": []}}},
+        ]))
+        try:
+            await asyncio.wait_for(connected, 5)
+            inspector.open_inspectors = _no_new_pages
+            result = await inspector.console("")
+            await page_side
+            return result
+        finally:
+            await inspector.stop()
+
+    result = asyncio.run(scenario())
+    assert [m["text"] for m in result["messages"]] == ["boom"] and result["total"] == 1
+    assert result["scripts"] == {"scripts": 1, "checked": 1, "errors": []}
+
+
+async def _no_new_pages():
+    return []

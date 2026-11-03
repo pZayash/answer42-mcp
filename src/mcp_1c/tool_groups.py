@@ -61,7 +61,7 @@ GROUPS: dict[str, frozenset[str]] = {
         "rag_session_autoconfigure", "rag_sources_list", "rag_snapshot_create", "rag_snapshots_list",
         "rag_index_build", "rag_lookup_object", "rag_query", "dynamic_list_metadata_available_fields",
     }),
-    "html": frozenset({"html_pages", "html_text", "html_query", "html_click", "html_type", "html_wait", "html_eval"}),
+    "html": frozenset({"html_pages", "html_text", "html_query", "html_click", "html_type", "html_wait", "html_eval", "html_console"}),
     "recording": frozenset({"recording_start", "recording_capture", "recording_stop"}),
     "credentials": frozenset({"credentials_check", "credentials_save", "credentials_remove", "credentials_list"}),
 }
@@ -75,7 +75,7 @@ DESCRIPTIONS: dict[str, str] = {
     "ui_snapshots": "inspect saved large ui_tree snapshots (search, nodes, children, diff, actions)",
     "metadata": "configuration metadata from the live UI: metadata catalog, subsystem and extension versions",
     RAG: "configuration source RAG: lookup, search, sources and snapshots (shown only while RAG is active)",
-    "html": "live web pages in HTML document fields via the Web Inspector bridge of start_session(html_agent=true): text, query, click, type, wait, eval",
+    "html": "live web pages in HTML document fields via the Web Inspector bridge of start_session(html_agent=true): text, query, click, type, wait, eval, console errors",
     "recording": "evidence recording: screenshots and slides for each step, PDF report",
     "credentials": "manage saved infobase credentials",
 }
