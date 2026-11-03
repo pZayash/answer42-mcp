@@ -535,6 +535,49 @@ def test_reference_setters_pass_create_if_missing_to_bridge(monkeypatch):
     ]
 
 
+def test_html_field_content_returns_visible_text_and_truncates(monkeypatch):
+    from mcp_1c import server
+
+    html = (
+        "<html><head><title>t</title><style>.a{}</style></head><body>"
+        "<div class='msg user'>Кто мне должен?</div>"
+        "<script>var x = 1;</script>"
+        "<div class='msg bot'><p>Долга нет:&nbsp;0 руб.</p><ul><li>60</li><li>41</li></ul></div>"
+        "</body></html>"
+    )
+    calls = []
+
+    async def fake_bridge_call(session_id, method, params, *, timeout=None):
+        calls.append((method, params))
+        return {"found": True, "html": html, "attachments": ["logo.png"]}
+
+    monkeypatch.setattr(server, "_bridge_call_recorded", fake_bridge_call)
+
+    result = asyncio.run(server.html_field_content("ДокументHTML", session_id="unit"))
+
+    assert calls == [("html_field_get", {"field_name": "ДокументHTML", "search_by_title": False})]
+    assert result["text"] == "Кто мне должен?\nДолга нет:\xa00 руб.\n60\n41"
+    assert result["attachments"] == ["logo.png"]
+    assert result["html_length"] == len(html)
+    assert "html" not in result and result["truncated"] is False
+
+    short = asyncio.run(server.html_field_content("ДокументHTML", include_html=True, max_chars=5, session_id="unit"))
+    assert short["text"] == "Кто м" and short["html"] == html[:5] and short["truncated"] is True
+
+
+def test_html_field_content_passes_through_bridge_errors(monkeypatch):
+    from mcp_1c import server
+
+    async def fake_bridge_call(session_id, method, params, *, timeout=None):
+        return {"found": True, "field_kind": "Поле ввода", "error": "Метод объекта не обнаружен"}
+
+    monkeypatch.setattr(server, "_bridge_call_recorded", fake_bridge_call)
+
+    result = asyncio.run(server.html_field_content("Комментарий", session_id="unit"))
+
+    assert result == {"found": True, "field_kind": "Поле ввода", "error": "Метод объекта не обнаружен"}
+
+
 def test_set_field_value_normalizes_creation_window_from_post_step_diagnostics(monkeypatch):
     from mcp_1c import server
 

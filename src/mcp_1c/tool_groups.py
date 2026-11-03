@@ -31,6 +31,7 @@ GROUPS: dict[str, frozenset[str]] = {
         "close_user_messages_panel", "goto_window", "set_file_dialog_result", "clear_file_dialog_result",
         "group_state", "group_set_expanded", "group_activate_page",
         "decoration_links", "decoration_click_link", "decoration_click",
+        "html_field_content", "html_field_click_link", "html_field_input",
     }),
     "tables": frozenset({
         "table_goto_row", "table_move_row", "table_cell_text", "table_selected_rows", "table_selection",
@@ -60,19 +61,21 @@ GROUPS: dict[str, frozenset[str]] = {
         "rag_session_autoconfigure", "rag_sources_list", "rag_snapshot_create", "rag_snapshots_list",
         "rag_index_build", "rag_lookup_object", "rag_query", "dynamic_list_metadata_available_fields",
     }),
+    "html": frozenset({"html_pages", "html_text", "html_query", "html_click", "html_type", "html_wait", "html_eval"}),
     "recording": frozenset({"recording_start", "recording_capture", "recording_stop"}),
     "credentials": frozenset({"credentials_check", "credentials_save", "credentials_remove", "credentials_list"}),
 }
 
 DESCRIPTIONS: dict[str, str] = {
     CORE: "sessions, windows, navigation, buttons, fields, basic table and report work (always on)",
-    "forms": "more form work: focus/element navigation, waits, groups and pages, decorations, file dialogs, batch field input",
+    "forms": "more form work: focus/element navigation, waits, groups and pages, decorations, HTML document fields, file dialogs, batch field input",
     "tables": "more table work: cursor moves, cells, selection, copy/delete marks, edit mode, row batches",
     "lists": "dynamic list settings: filters, sorting, search, output to a tabular document",
     "commands": "command interface sections/commands/search, command panels and context menus",
     "ui_snapshots": "inspect saved large ui_tree snapshots (search, nodes, children, diff, actions)",
     "metadata": "configuration metadata from the live UI: metadata catalog, subsystem and extension versions",
     RAG: "configuration source RAG: lookup, search, sources and snapshots (shown only while RAG is active)",
+    "html": "live web pages in HTML document fields via the Web Inspector bridge of start_session(html_agent=true): text, query, click, type, wait, eval",
     "recording": "evidence recording: screenshots and slides for each step, PDF report",
     "credentials": "manage saved infobase credentials",
 }

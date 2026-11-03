@@ -23,6 +23,7 @@ from collections.abc import Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Annotated, Any
 from urllib.parse import parse_qs, unquote, urlsplit, urlunsplit
@@ -38,6 +39,7 @@ from starlette.responses import FileResponse, PlainTextResponse
 
 from . import (
     __version__,
+    html_agent,
     os_support,
     release_helper,
     runtime,
@@ -547,6 +549,8 @@ class SessionState:
         self.idle_timeout_seconds: int = 60 * 60
         self.last_activity_monotonic: float = time.monotonic()
         self.blocked_action: dict[str, Any] | None = None
+        # In-process only: after an MCP restart the restored client's pages point at a dead bridge.
+        self.html_agent: html_agent.HtmlInspector | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -4254,12 +4258,15 @@ def _visible_tool_names(request_context: Any) -> set[str]:
 
 
 def _auto_enable_tool_groups(request_context: Any, tool_name: str, result: Any) -> None:
-    """Show the tools a result points to: a ui_tree saved as a resource needs ui_snapshots."""
-    if tool_name != "ui_tree":
+    """Show the tools a result points to: a ui_tree saved as a resource needs ui_snapshots,
+    a session started with the HTML agent needs the html tools."""
+    if tool_name not in {"ui_tree", "start_session"}:
         return
     text = "".join(str(getattr(block, "text", "")) for block in getattr(result, "content", None) or [])
-    if '"resource_uri"' in text:
+    if tool_name == "ui_tree" and '"resource_uri"' in text:
         _enabled_tool_groups(request_context).add("ui_snapshots")
+    if tool_name == "start_session" and '"html_agent"' in text:
+        _enabled_tool_groups(request_context).add("html")
 
 
 async def _notify_tool_list_changed_if_needed(request_context: Any, visible_before: set[str]) -> None:
@@ -5241,6 +5248,7 @@ async def start_session(
     rag_enabled: Annotated[bool, "Enable built-in RAG for this session"] = False,
     summary_rag_config: Annotated[str, "Explicit Summary RAG configuration alias/code, e.g. bp, bpc, ka, ut, zup, Accounting30, Бухгалтерия предприятия. Enables configuration+fresh summary snapshot without live autodetection."] = "",
     include_timings: Annotated[bool, "Include diagnostic startup timing breakdown in the returned _timings field"] = False,
+    html_agent: Annotated[bool, "Start a local bridge for live web pages in HTML document fields; enables the html_* tools (live DOM read/click/type through the embedded WebKit inspector; Windows and Linux clients)"] = False,
 ) -> dict[str, Any]:
     """One-shot session factory: detect version, start infrastructure, and connect the 1C test client.
 
@@ -5248,6 +5256,10 @@ async def start_session(
     infobase path. Prefer credentials saved with `credentials_save` over
     passing secrets in tool calls. After a long UI operation, use
     `client_busy_status` or `wait_client_idle` before sending more commands.
+
+    With `html_agent=true` the html_* tools reach live pages in HTML document
+    fields: on Windows through the embedded Web Inspector, which stays docked at
+    the bottom of the form; on Linux through the WebKitGTK remote inspector.
     """
     start_monotonic = time.perf_counter()
     stage_monotonic = start_monotonic
@@ -5583,6 +5595,13 @@ async def start_session(
     if not connect_connection_value and pipeline_info.get("client_connection_value"):
         connect_connection_value = str(pipeline_info["client_connection_value"])
         connect_connection_mode = str(pipeline_info.get("client_connection_mode") or "file-direct")
+    if html_agent and (connect_base_url or connect_connection_value):
+        try:
+            await _start_html_agent(sess)
+        except Exception:
+            await _cleanup_failed_start_session(sess, "HTML page bridge startup failure")
+            raise
+        mark_stage("start_html_agent")
     if connect_base_url or connect_connection_value:
         try:
             connect_result = await _connect_test_client_impl(
@@ -5671,9 +5690,19 @@ async def start_session(
         "idle_timeout_seconds": sess.idle_timeout_seconds,
         "test_client": _compact_start_test_client_result(connect_result, include_timings=include_timings), **pipeline_info,
     }
+    if sess.html_agent is not None:
+        sess.html_agent.attach(sess.client_display or sess.display, sess.test_client_pid)
+        response["html_agent"] = sess.html_agent.status()
     if include_timings:
         response["_timings"] = timings
     return response
+
+
+async def _start_html_agent(sess: SessionState) -> None:
+    """Start the session's page bridge server."""
+    inspector = html_agent.HtmlInspector()
+    await inspector.start()
+    sess.html_agent = inspector
 
 
 async def _stop_session_impl(session_id: str = DEFAULT_SESSION, clean_data: bool = False) -> dict[str, Any]:
@@ -5683,6 +5712,10 @@ async def _stop_session_impl(session_id: str = DEFAULT_SESSION, clean_data: bool
     except ValueError:
         return {"stopped": False, "reason": f"session {session_id!r} not found"}
     stopped: list[str] = []
+    if sess.html_agent is not None:
+        await sess.html_agent.stop()
+        sess.html_agent = None
+        stopped.append("html-page-bridge")
     try:
         # A hung manager must not delay teardown: all processes are killed below.
         await sess.bridge.call("disconnect_test_client", {}, timeout=_STOP_DISCONNECT_TIMEOUT)
@@ -6495,6 +6528,7 @@ async def _connect_test_client_impl(
         log_dir=sess.client_log_dir,
         display=sess.client_display or sess.display,
         log_name=client_stdout_log,
+        extra_env=sess.html_agent.client_env() if sess.html_agent is not None else None,
     )
     sess.test_client_pid = sess.test_client_process.pid
     mark_stage("spawn_test_client_process")
@@ -6988,6 +7022,258 @@ async def field_info(
             if isinstance(tooltip, dict) and tooltip.get("tooltip"):
                 result["tooltip"] = tooltip["tooltip"]
     return result
+
+
+class _HtmlTextExtractor(HTMLParser):
+    """Visible text of an HTML document: no scripts/styles, block tags become line breaks."""
+
+    _SKIP = frozenset({"script", "style", "noscript", "template", "head"})
+    _BLOCK = frozenset({"p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6", "section", "article", "pre"})
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._parts: list[str] = []
+        self._skip_depth = 0
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag in self._SKIP:
+            self._skip_depth += 1
+        elif tag in self._BLOCK:
+            self._parts.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in self._SKIP:
+            self._skip_depth = max(0, self._skip_depth - 1)
+        elif tag in self._BLOCK:
+            self._parts.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if not self._skip_depth:
+            self._parts.append(data)
+
+    def text(self) -> str:
+        lines = (re.sub(r"[ \t\r\f\v]+", " ", line).strip() for line in "".join(self._parts).split("\n"))
+        return "\n".join(line for line in lines if line)
+
+
+def _html_visible_text(html: str) -> str:
+    parser = _HtmlTextExtractor()
+    parser.feed(html)
+    parser.close()
+    return parser.text()
+
+
+@mcp.tool()
+async def html_field_content(
+    field_name: Annotated[str, "HTML document field name, or title when search_by_title=true"],
+    search_by_title: Annotated[bool, "Search by visible title instead of technical name"] = False,
+    include_html: Annotated[bool, "Also return the raw HTML (can be large); by default only visible text"] = False,
+    max_chars: Annotated[int, "Truncate returned text/html to this many characters; 0 = no limit"] = 20000,
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Read the current document of an HTML document field (1C 8.3.25+): visible text, optional raw HTML, picture names."""
+    result = await _bridge_call_recorded(
+        session_id, "html_field_get", {"field_name": field_name, "search_by_title": search_by_title},
+    )
+    if not isinstance(result, dict) or "html" not in result:
+        return result
+    html = str(result.pop("html") or "")
+    text = _html_visible_text(html)
+    limit = max(0, int(max_chars))
+    result["html_length"] = len(html)
+    result["text_length"] = len(text)
+    result["text"] = text[:limit] if limit else text
+    if include_html:
+        result["html"] = html[:limit] if limit else html
+    result["truncated"] = bool(limit) and (len(text) > limit or (include_html and len(html) > limit))
+    return result
+
+
+@mcp.tool()
+async def html_field_click_link(
+    field_name: Annotated[str, "HTML document field name, or title when search_by_title=true"],
+    link: Annotated[str, "Hyperlink presentation (text); empty with link_index<0 clicks the current link"] = "",
+    link_index: Annotated[int, "Zero-based hyperlink number in the document; -1 = use link"] = -1,
+    search_by_title: Annotated[bool, "Search by visible title instead of technical name"] = False,
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Raise the 1C hyperlink-click event of an HTML document field (the form's OnClick handler, 1C 8.3.25+)."""
+    return await _bridge_call_recorded(
+        session_id,
+        "html_field_click_link",
+        {"field_name": field_name, "search_by_title": search_by_title, "link": link, "link_index": link_index},
+    )
+
+
+@mcp.tool()
+async def html_field_input(
+    field_name: Annotated[str, "HTML document field name, or title when search_by_title=true"],
+    html: Annotated[str, "HTML that replaces the field's document"],
+    search_by_title: Annotated[bool, "Search by visible title instead of technical name"] = False,
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Simulate user input of HTML into an HTML document field, replacing its document (1C 8.3.25+)."""
+    return await _bridge_call_recorded(
+        session_id, "html_field_input", {"field_name": field_name, "search_by_title": search_by_title, "html": html},
+    )
+
+
+async def _html_agent_for(session_id: str) -> html_agent.HtmlInspector:
+    sess = await _ensure_restored_session(session_id)
+    _touch_session(sess)
+    if sess.html_agent is None:
+        raise ToolError(
+            "HTML agent is not running for this session: start it with start_session(html_agent=true). "
+            "For static HTML fields use html_field_content instead."
+        )
+    return sess.html_agent
+
+
+async def _html_command(session_id: str, page: str, op: str, args: dict[str, Any], timeout: float = 30.0) -> Any:
+    inspector = await _html_agent_for(session_id)
+    try:
+        return await inspector.command(page, op, args, timeout=timeout)
+    except html_agent.HtmlAgentError as exc:
+        raise ToolError(str(exc)) from exc
+
+
+@mcp.tool()
+async def html_pages(
+    include_dead: Annotated[bool, "Also list pages whose form was closed or that reloaded"] = False,
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """List live web pages in HTML document fields of the client (needs start_session(html_agent=true)).
+
+    Connects HTML fields that appeared (or reloaded) since the last call (on Windows by typing
+    a one-line bridge into their embedded Web Inspector console).
+    """
+    inspector = await _html_agent_for(session_id)
+    try:
+        await inspector.open_inspectors()
+    except html_agent.HtmlAgentError as exc:
+        raise ToolError(str(exc)) from exc
+    return {"pages": await inspector.list_pages(include_dead=include_dead), "bridge": inspector.status()}
+
+
+@mcp.tool()
+async def html_text(
+    selector: Annotated[str, "CSS selector; default is the whole page body"] = "body",
+    all: Annotated[bool, "Return the text of every match instead of the first"] = False,
+    max_chars: Annotated[int, "Truncate each text to this many characters; 0 = no limit"] = 20000,
+    page: Annotated[str, "Page id or part of its URL/title; may be empty when one page is live"] = "",
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Return the current rendered text (innerText) of a live page in an HTML document field."""
+    result = await _html_command(session_id, page, "text", {"selector": selector, "all": all})
+    limit = max(0, int(max_chars))
+
+    def cut(value: Any) -> Any:
+        return value[:limit] if limit and isinstance(value, str) else value
+
+    return {"selector": selector, "text": [cut(v) for v in result] if isinstance(result, list) else cut(result)}
+
+
+@mcp.tool()
+async def html_query(
+    selector: Annotated[str, "CSS selector; with text and no selector, clickable elements are searched"] = "",
+    text: Annotated[str, "Keep only elements whose text/value/aria-label contains this text"] = "",
+    exact: Annotated[bool, "Require the element text to equal text exactly"] = False,
+    visible_only: Annotated[bool, "Skip elements that are not rendered"] = False,
+    limit: Annotated[int, "Maximum number of elements to describe"] = 50,
+    page: Annotated[str, "Page id or part of its URL/title; may be empty when one page is live"] = "",
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Describe elements of a live page (tag, text, value, id, class, href, visibility) with their match index."""
+    return await _html_command(session_id, page, "query", {
+        "selector": selector, "text": text, "exact": exact, "visible_only": visible_only, "limit": limit,
+    })
+
+
+@mcp.tool()
+async def html_click(
+    selector: Annotated[str, "CSS selector of the element; may be empty when text is given"] = "",
+    text: Annotated[str, "Click the element whose text contains this (e.g. a button caption)"] = "",
+    index: Annotated[int, "Zero-based index among the matches"] = 0,
+    exact: Annotated[bool, "Require the element text to equal text exactly"] = False,
+    page: Annotated[str, "Page id or part of its URL/title; may be empty when one page is live"] = "",
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Click an element of a live page in an HTML document field (mousedown, mouseup, click)."""
+    if not selector and not text:
+        raise ToolError("selector or text is required")
+    return await _html_command(session_id, page, "click", {"selector": selector, "text": text, "index": index, "exact": exact})
+
+
+@mcp.tool()
+async def html_type(
+    selector: Annotated[str, "CSS selector of an input, textarea, select or contenteditable element"],
+    value: Annotated[str, "Text to put into the element"],
+    index: Annotated[int, "Zero-based index among the matches"] = 0,
+    append: Annotated[bool, "Append to the current value instead of replacing it"] = False,
+    submit: Annotated[bool, "Then press Enter (and submit the enclosing form if nothing cancels it)"] = False,
+    page: Annotated[str, "Page id or part of its URL/title; may be empty when one page is live"] = "",
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Enter text into a field of a live page, firing input/change events so page scripts see it."""
+    return await _html_command(session_id, page, "type", {
+        "selector": selector, "value": value, "index": index, "append": append, "submit": submit,
+    })
+
+
+@mcp.tool()
+async def html_wait(
+    selector: Annotated[str, "Wait until this CSS selector matches; empty = only text/page"] = "",
+    text: Annotated[str, "Wait until this text appears (inside selector matches, or anywhere in the page)"] = "",
+    gone: Annotated[bool, "Wait for the selector/text to disappear instead"] = False,
+    timeout: Annotated[int, "Timeout in seconds"] = 30,
+    page: Annotated[str, "Page id or part of its URL/title; may be empty when one page is live"] = "",
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Wait for a live page in an HTML document field to appear, then optionally for a selector or text (or their absence)."""
+    inspector = await _html_agent_for(session_id)
+    deadline = time.monotonic() + max(1, int(timeout))
+    last_error = ""
+    while True:
+        try:
+            resolved = await inspector.page(page)
+            if not selector and not text:
+                await inspector.refresh(resolved)
+                return {"found": True, "page": resolved.to_json()}
+            remaining = max(1.0, deadline - time.monotonic())
+            if selector:
+                result = await inspector.run(resolved, "query", {"selector": selector, "text": text, "limit": 1}, timeout=remaining)
+                present = bool(result.get("count"))
+            else:
+                body = await inspector.run(resolved, "text", {"selector": "body"}, timeout=remaining)
+                present = text in str(body or "")
+            if present != gone:
+                return {"found": True, "page": resolved.page_id, "selector": selector, "text": text, "gone": gone}
+        except html_agent.HtmlAgentError as exc:
+            last_error = str(exc)
+        if time.monotonic() >= deadline:
+            return {"found": False, "selector": selector, "text": text, "gone": gone, "error": last_error}
+        await asyncio.sleep(0.5)
+
+
+@mcp.tool()
+async def html_eval(
+    code: Annotated[str, "JavaScript expression/statements evaluated in the page; the last value is returned"],
+    timeout: Annotated[int, "Timeout in seconds"] = 30,
+    page: Annotated[str, "Page id or part of its URL/title; may be empty when one page is live"] = "",
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Evaluate JavaScript in a live page of an HTML document field and return a JSON-friendly result."""
+    return {"result": await _html_command(session_id, page, "eval", {"code": code}, timeout=max(1, int(timeout)))}
 
 
 @mcp.tool()
