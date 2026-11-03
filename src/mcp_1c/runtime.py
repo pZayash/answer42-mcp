@@ -782,6 +782,7 @@ def start_test_client(
     log_dir: Path,
     display: str = "",
     log_name: str = "test_client_stdout.log",
+    extra_env: dict[str, str] | None = None,
 ) -> subprocess.Popen:
     """Start 1C /TESTCLIENT from Python so argv quoting and PID are controlled."""
     if not Path(argv[0]).exists():
@@ -793,6 +794,7 @@ def start_test_client(
         proc = _popen_on_display(
             argv,
             display,
+            env={**os.environ, **extra_env} if extra_env else None,
             stdout=log_handle,
             stderr=log_handle,
             stdin=subprocess.DEVNULL,

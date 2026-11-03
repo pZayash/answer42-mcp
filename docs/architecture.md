@@ -13,6 +13,7 @@
 1. **UI Driver** — запуск менеджера тестирования, подключение тест-клиента и выполнение интерактивных операций над формами 1С.
 2. **Доказательная запись** — запись аннотированных слайдов с MCP method/request/response и скриншотом окна 1С.
 3. **RAG metadata index** — SQLite/FTS индекс метаданных конфигураций и расширений 1С для подсказок агенту и обогащения `ui_tree` типами элементов формы.
+4. **Мост к живым веб-страницам** — доступ к DOM и консоли страниц в HTML-полях через встроенный WebKit клиента (`mcp_1c.html_agent`).
 
 ## Сессии
 
@@ -90,6 +91,7 @@ class SessionState:
 
 `dynamic_list_sort_by_column` — отдельный быстрый tool для сортировки уже открытого динамического списка по видимой колонке через API списка. Он не является fallback-веткой `dynamic_list_set_settings`.
 - табличные документы: `tabular_documents` (список или ячейки одного документа по `name`/`title`), `tabular_document_save`;
+- HTML-поля: `html_field_content`, `html_field_click_link`, `html_field_input` (API тест-клиента) и живые страницы `html_pages`, `html_text`, `html_query`, `html_click`, `html_type`, `html_wait`, `html_eval`, `html_console` (через `mcp_1c.html_agent`);
 - доказательная запись: `recording_start`, `recording_capture`, `recording_stop`;
 - RAG: `rag_source_add`, `rag_sources_add_from_directory`, `rag_source_roots_list`, `rag_sources_list`, `rag_available_configurations`, `rag_snapshot_create`, `rag_snapshots_list`, `rag_index_build`, `rag_lookup_object`, `rag_query`, `rag_session_autoconfigure`.
 
@@ -115,6 +117,29 @@ OS-specific слой окна тест-клиента: Linux (`wmctrl`/`xdotool`
 
 Windows-аналог Xvfb: скрытые рабочие столы (`CreateDesktopW` в `WinSta0`), `DesktopPopen` — `subprocess.Popen` с `STARTUPINFO.lpDesktop` (CPython его не поддерживает), перечисление окон рабочего стола, `PrintWindow`-скриншоты и maximize из вспомогательного потока, привязанного к рабочему столу через `SetThreadDesktop`. Включается `ONEC_MCP_WINDOWS_DESKTOP=hidden`; тогда `session.display`/`client_display` содержат имена рабочих столов.
 
+### `mcp_1c.html_agent`
+
+Мост к живым страницам HTML-полей. API тест-клиента отдаёт только HTML, с которым страница загрузилась, поэтому для страниц, которые рисуют себя скриптами, Answer42 работает со встроенным WebKit клиента напрямую. Операции над страницей — одна самодостаточная ES5-функция `OPS_JS` (`info`, `text`, `html`, `query`, `click`, `type`, `eval`, `hook_console`, `console`, `check_scripts`), которая выполняется в странице и возвращает JSON. `HtmlInspector` — состояние моста сессии: страницы `p1`, `p2`, …, выбор страницы, ошибки подключения.
+
+```mermaid
+flowchart LR
+  agent[MCP-клиент] -->|html_*| server[mcp_1c.server]
+  server --> inspector[HtmlInspector]
+  subgraph Windows
+    inspector -->|Ctrl+Alt+Shift+F12, ввод в консоль| frontend[Web Inspector формы]
+    frontend -->|выполняет однострочник| page1[страница HTML-поля]
+    page1 -->|WebSocket + одноразовый токен| inspector
+  end
+  subgraph Linux
+    inspector -->|WEBKIT_INSPECTOR_SERVER, GVariant поверх TCP| remote[удалённый отладчик WebKitGTK]
+    remote -->|Target.sendMessageToTarget / Runtime.evaluate| page2[страница HTML-поля]
+  end
+```
+
+**Windows.** Встроенный WebKit (старый Windows-порт WebKit1) не имеет сервера удалённой отладки, но в нём включены developer extras. `find_webviews` перечисляет окна `WebViewWindowClass` процесса тест-клиента (на скрытом рабочем столе — через `EnumDesktopWindows`). Для каждого нового WebView Answer42 отправляет Ctrl+Alt+Shift+F12 (модификаторы — через `AttachThreadInput` + `SetKeyboardState`, клавиша — posted message: `SendInput` на скрытый рабочий стол не доходит). 1С встраивает интерфейс инспектора в форму ещё одним WebView; всё, что появилось после горячей клавиши, запоминается как интерфейс инспектора и само не инспектируется. Затем Answer42 фокусирует строку консоли (клик и Ctrl+`; Esc нельзя — его первой обрабатывает 1С и закрывает форму) и вводит `loader_js`: однострочник подключается к локальному WebSocket `HtmlInspector` с одноразовым токеном и выполняет присланные выражения через `eval`. Если интерфейс инспектора ещё не загрузился, ввод повторяется. Мост живёт в странице: после перезагрузки следующий вызов вводит его заново.
+
+**Linux.** HTML-поля рисует системный WebKitGTK (`libwebkit2gtk-4.0`). `HtmlInspector.client_env()` добавляет тест-клиенту `WEBKIT_INSPECTOR_SERVER=127.0.0.1:<свободный порт>` (`runtime.start_test_client(extra_env=...)`). `RemoteInspectorClient` подключается к этому серверу как фронтенд: сообщения — размер (uint32 BE), флаг порядка байт, имя и параметры GVariant (`SetupInspectorClient`, `SetTargetList (ta(tsssb))`, `Setup (tt)`, `SendMessageToBackend (tts)`, `SendMessageToFrontend (tts)`). Каждая страница — цель `WebPage`; протокол инспектора мультиплексирован доменом `Target`, поэтому `Runtime.evaluate` уходит в `Target.sendMessageToTarget` текущей page-цели (она меняется при навигации, `Target.didCommitProvisionalTarget`). Домен `Console` включается на каждой page-цели, и WebKit отдаёт сообщения с момента загрузки страницы. Пустые скрытые страницы `about:blank` пропускаются. Некорректное сообщение может уронить клиент 1С, поэтому отправляются только перечисленные формы сообщений.
+
 ### `mcp_1c.runtime`
 
 Управляет процессами 1С:
@@ -123,6 +148,7 @@ Windows-аналог Xvfb: скрытые рабочие столы (`CreateDesk
 - загрузка и применение `.cf`;
 - запуск автономного сервера;
 - запуск тонкого клиента в режиме `/TESTMANAGER`;
+- запуск тест-клиента с дополнительными переменными окружения (`extra_env`, например `WEBKIT_INSPECTOR_SERVER`);
 - остановка процессов;
 - ожидание портов и проверка runtime-состояния.
 
@@ -181,43 +207,42 @@ python3 scripts/rag_cli.py build --snapshot Configuration+Extension1
 python3 scripts/rag_cli.py lookup РегистрСведений.Регистр1 --snapshot Configuration+Extension1
 ```
 
-### Discovery roots
+### Каталоги-источники (discovery roots)
 
-MCP tool `rag_sources_add_from_directory(path, watch=true)` scans a directory for
-EDT/Designer XML configuration and extension roots, registers discovered sources,
-and stores the directory in `source_roots`. Later calls to `rag_sources_list`,
-`rag_source_roots_list` or `rag_available_configurations` can sync those roots and
-pick up newly added source trees automatically. Discovery is bounded by
-`max_depth` and skips noisy directories such as `.git`, `.venv`, `build`, `dist`
-and `node_modules`.
+MCP-инструмент `rag_sources_add_from_directory(path, watch=true)` ищет в каталоге
+корни конфигураций и расширений в формате EDT и XML-выгрузки Конфигуратора,
+регистрирует найденные источники и запоминает каталог в `source_roots`. Последующие
+вызовы `rag_sources_list`, `rag_source_roots_list` и `rag_available_configurations`
+синхронизируют эти каталоги и автоматически подхватывают новые деревья исходников.
+Глубина поиска ограничена `max_depth`; каталоги вроде `.git`, `.venv`, `build`, `dist`
+и `node_modules` пропускаются.
 
-`rag_available_configurations` returns grouped base/configuration sources,
-extensions, other sources, snapshots, discovery roots and per-source indexed
-object/chunk counts.
+`rag_available_configurations` возвращает сгруппированные источники базовых
+конфигураций, расширения, прочие источники, снимки, каталоги-источники и для каждого
+источника число проиндексированных объектов и фрагментов.
 
-If a RAG lookup/query runs without a session snapshot, or the selected snapshot
-has no indexed data, the result includes `rag_diagnostic.diagnostics[]` with a
-machine-readable code and remediation message for the agent.
+Если поиск или запрос RAG выполняется без снимка сессии или у выбранного снимка нет
+проиндексированных данных, результат содержит `rag_diagnostic.diagnostics[]` с
+машиночитаемым кодом и подсказкой агенту, как это исправить.
 
-`start_session()` defaults to `rag_enabled=false` so ordinary sessions do not pay
-for live configuration registry reads. To bind a summary snapshot explicitly,
-pass `summary_rag_config`, for example `summary_rag_config="bp"`. Supported
-aliases include summary repository codes (`bp`, `bpc`, `ka`, `ut`, `zup`, etc.),
-1C identifiers (`Accounting30`, `AccountingCorp30`, `ARAutomation20`, etc.) and
-common Russian names such as `Бухгалтерия предприятия`, `Комплексная автоматизация`,
-`Управление торговлей` and `Зарплата и управление персоналом`; Answer42 creates a
-`configuration+fresh` summary snapshot without live autodetection and
-returns `rag_notice`. Successful explicit binding reports
-`rag_notice.enabled=true`, `backend="configuration-summary"`, the selected
-snapshot, layers and `summary_backend` transport/project/ref. If the summary
-configuration is not found or RAG is disabled, `rag_notice.enabled=false` and the
-`reason`/`message` explain why no binding was applied.
+`start_session()` по умолчанию запускается с `rag_enabled=false`, чтобы обычные сессии
+не тратили время на чтение реестров живой конфигурации. Чтобы явно привязать сводный
+снимок, передайте `summary_rag_config`, например `summary_rag_config="bp"`.
+Поддерживаются коды сводного репозитория (`bp`, `bpc`, `ka`, `ut`, `zup` и т. д.),
+идентификаторы 1С (`Accounting30`, `AccountingCorp30`, `ARAutomation20` и т. д.)
+и распространённые русские названия: `Бухгалтерия предприятия`, `Комплексная автоматизация`,
+`Управление торговлей`, `Зарплата и управление персоналом`. Answer42 создаёт сводный
+снимок `configuration+fresh` без автоопределения по живой базе и возвращает `rag_notice`.
+При успешной привязке `rag_notice.enabled=true`, `backend="configuration-summary"`,
+указаны выбранный снимок, слои и `summary_backend` (транспорт, проект, ref). Если сводная
+конфигурация не найдена или RAG выключен, `rag_notice.enabled=false`, а `reason` /
+`message` объясняют, почему привязка не выполнена.
 
-The older live autodetection path for `start_session(rag_enabled=true)` is kept
-behind `ONEC_MCP_AUTO_SUMMARY_RAG_ON_START=1`. It reads
-`РегистрСведений.ВерсииПодсистем`, matches the configured summary repository,
-adds available extension layers from `ВерсииРасширений`, and can be slower on
-large remote infobases.
+Прежний путь с автоопределением по живой базе для `start_session(rag_enabled=true)`
+доступен при `ONEC_MCP_AUTO_SUMMARY_RAG_ON_START=1`. Он читает
+`РегистрСведений.ВерсииПодсистем`, сопоставляет его с настроенным сводным репозиторием,
+добавляет доступные слои расширений из `ВерсииРасширений` и может работать медленно на
+больших удалённых базах.
 
 ## Доказательная запись
 
@@ -226,9 +251,9 @@ large remote infobases.
 - именем MCP tool;
 - параметрами вызова;
 - кратким ответом;
-- скриншотом окна 1С или text-only содержимым для RAG-вызовов.
+- скриншотом окна 1С или только текстом для вызовов RAG.
 
-`recording_stop()` собирает `manifest.json` и `recording.pdf`, если доступен backend PDF. MP4/GIF больше не генерируются.
+`recording_stop()` собирает `manifest.json` и `recording.pdf`, если доступна библиотека для PDF. MP4/GIF больше не генерируются.
 
 ## Переменные окружения
 
@@ -247,24 +272,24 @@ large remote infobases.
 | `DISPLAY` | X11 display | `:99` |
 
 
-## `ui_tree` output profiles
+## Профили вывода `ui_tree`
 
-`ui_tree` is intended for UI structure diagnostics, not bulk data extraction.
-The default `profile="navigation"` returns visible UI structure with compact fields,
-`include_data=false`, `include_rag_types=false`, and command panels excluded. The tree
-has no depth limit. Use targeted tools such as `field_info`, `table_rows`,
-`tabular_documents(name=...)`, or `tabular_document_save` when values/report data are
-needed.
+`ui_tree` предназначен для диагностики структуры интерфейса, а не для массового
+чтения данных. Профиль по умолчанию `profile="navigation"` возвращает видимую
+структуру с компактными полями, `include_data=false`, `include_rag_types=false`
+и без командных панелей. Глубина дерева не ограничена. Когда нужны значения
+или данные отчётов, используйте точечные инструменты: `field_info`, `table_rows`,
+`tabular_documents(name=...)`, `tabular_document_save`.
 
-Supported presentation controls:
+Параметры представления:
 
-- `profile="navigation"` — lightweight default for navigating forms.
-- `profile="diagnostic"` — includes command panels and diagnostic state, without data.
-- `profile="data"` — includes data presentations; use sparingly on large forms.
-- `profile="full"` — closest to the historical verbose behavior, including RAG when available.
-- `profile="command_panels"` or `command_panels="only"` — returns command-panel nodes as a deduplicated flat list.
-- `include_command_panels` / `command_panels` — explicitly include, exclude, or return only command panels.
-- `parent_name` — serializes only the subtree rooted at a specific technical element name.
-- `name`, `title`, `type` — filter nodes; active filters return a flat `objects` list and are pushed to the 1C manager on current protocol versions.
-- `group_mode="include|flatten|flatten_layout|exclude|exclude_empty|pages_only"` — controls whether group nodes are returned as regular nodes, lifted, or omitted.
-- `format="json|outline|yaml|yml"` — JSON remains the structured default; outline/YAML are readable text views wrapped in a structured result. Mode arguments are strictly validated, and responses include `metrics` for timing/payload diagnostics.
+- `profile="navigation"` — лёгкий профиль по умолчанию для навигации по формам.
+- `profile="diagnostic"` — добавляет командные панели и диагностическое состояние, без данных.
+- `profile="data"` — добавляет представления данных; на больших формах используйте осторожно.
+- `profile="full"` — ближе всего к прежнему подробному поведению, включая RAG, если он доступен.
+- `profile="command_panels"` или `command_panels="only"` — возвращает узлы командных панелей плоским списком без повторов.
+- `include_command_panels` / `command_panels` — явно включить, исключить или вернуть только командные панели.
+- `parent_name` — сериализует только поддерево элемента с указанным техническим именем.
+- `name`, `title`, `type` — фильтры узлов; при активных фильтрах возвращается плоский список `objects`, а на актуальных версиях протокола фильтрация выполняется в менеджере 1С.
+- `group_mode="include|flatten|flatten_layout|exclude|exclude_empty|pages_only"` — возвращать ли узлы групп как обычные узлы, поднимать их элементы или опускать группы.
+- `format="json|outline|yaml|yml"` — JSON остаётся структурированным форматом по умолчанию; outline и YAML — читаемые текстовые представления внутри структурированного результата. Аргументы режимов строго проверяются, а ответы содержат `metrics` с замерами времени и объёма.

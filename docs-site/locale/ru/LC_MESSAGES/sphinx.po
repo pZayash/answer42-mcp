@@ -1,0 +1,26 @@
+# Russian strings of the Furo theme that the Sphinx catalog does not translate.
+msgid ""
+msgstr ""
+"Content-Type: text/plain; charset=UTF-8\n"
+"Language: ru\n"
+
+msgid "Next"
+msgstr "Далее"
+
+msgid "Previous"
+msgstr "Назад"
+
+msgid "On this page"
+msgstr "На этой странице"
+
+msgid "Back to top"
+msgstr "Наверх"
+
+msgid "Edit this page"
+msgstr "Редактировать страницу"
+
+msgid "View this page"
+msgstr "Исходный текст страницы"
+
+msgid "Home"
+msgstr "Главная"

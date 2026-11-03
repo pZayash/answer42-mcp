@@ -1,6 +1,6 @@
 [project]
 name = "answer42"
-version = "0.5.14"
+version = "0.6.0"
 description = "Answer42 — The Answer to Life, Universe, and 1C — UI Driver. MCP-powered 1C:Enterprise UI automation: click, fill, navigate, test, and introspect managed forms through the test-client API"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -27,6 +27,7 @@ authors = [
 [project.optional-dependencies]
 screenshot = ["mss>=9.0.0"]
 dev = ["pytest>=8.0", "ruff>=0.5"]
+docs = ["sphinx>=7.3,<10", "furo>=2024.8", "myst-parser>=3,<6", "sphinxcontrib-mermaid>=1,<3"]
 linux-window-control = ["python-xlib>=0.33"]
 windows-window-control = ["pywin32>=306"]
 window-control = ["python-xlib>=0.33"]
