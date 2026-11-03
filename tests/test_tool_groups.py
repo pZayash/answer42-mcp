@@ -45,13 +45,13 @@ def _call_groups(ctx, **kwargs):
 
 
 def test_every_tool_belongs_to_exactly_one_group():
-    registered = set(server.mcp._tool_manager._tools) - {"dev_eval"}
+    registered = set(server.mcp._tool_manager._tools) - server.DEV_TOOL_NAMES
     seen: dict[str, str] = {}
     for group, tools in tool_groups.GROUPS.items():
         for tool in tools:
             assert tool not in seen, f"{tool} is in {seen.get(tool)} and {group}"
             seen[tool] = group
-    assert registered == set(seen)
+    assert registered == set(seen) - server.DEV_TOOL_NAMES
 
 
 def test_default_client_sees_core_only():

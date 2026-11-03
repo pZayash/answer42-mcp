@@ -7264,7 +7264,6 @@ async def html_wait(
         await asyncio.sleep(0.5)
 
 
-@mcp.tool()
 async def html_eval(
     code: Annotated[str, "JavaScript expression/statements evaluated in the page; the last value is returned"],
     timeout: Annotated[int, "Timeout in seconds"] = 30,
@@ -7272,7 +7271,11 @@ async def html_eval(
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
-    """Evaluate JavaScript in a live page of an HTML document field and return a JSON-friendly result."""
+    """Evaluate JavaScript in a live page of an HTML document field and return a JSON-friendly result.
+
+    Runs arbitrary code in the page, so like dev_eval it is registered only with
+    --dev-tools or ONEC_MCP_DEV_TOOLS=1.
+    """
     return {"result": await _html_command(session_id, page, "eval", {"code": code}, timeout=max(1, int(timeout)))}
 
 
@@ -11789,17 +11792,24 @@ async def _cleanup_sessions() -> None:
     _SESSIONS.clear()
 
 
+# Tools that run arbitrary code: registered only with --dev-tools / ONEC_MCP_DEV_TOOLS=1.
+DEV_TOOL_NAMES = frozenset({"dev_eval", "html_eval"})
+
+
 def _register_dev_tools(enabled: bool) -> None:
-    try:
-        mcp.remove_tool("dev_eval")
-    except Exception:
-        pass
+    for name in DEV_TOOL_NAMES:
+        try:
+            mcp.remove_tool(name)
+        except Exception:
+            pass
     if enabled:
         mcp.add_tool(
             _dev_eval,
             name="dev_eval",
             description="Development-only: execute a BSL expression in MCPTestManager. Enable with --dev-tools or ONEC_MCP_DEV_TOOLS=1.",
         )
+        mcp.add_tool(html_eval, name="html_eval")
+        _polish_tool_schemas()  # parameter descriptions and session_id schema, as for the other tools
 
 
 def _tool_names_for_profile(profile: str) -> set[str] | None:
@@ -11873,7 +11883,7 @@ def main(argv: list[str] | None = None) -> None:
         "--dev-tools",
         action="store_true",
         default=os.getenv("ONEC_MCP_DEV_TOOLS", "").strip().lower() in {"1", "true", "yes", "on"},
-        help="register dangerous development-only MCP tools, including dev_eval for arbitrary BSL expression evaluation",
+        help="register dangerous tools that run arbitrary code: dev_eval (BSL in the test manager) and html_eval (JavaScript in live pages of HTML fields)",
     )
     parser.add_argument(
         "--dev",

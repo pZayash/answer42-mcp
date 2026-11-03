@@ -457,15 +457,16 @@ def test_new_mcp_tools_are_registered():
     assert EXPECTED_NEW_TOOLS <= tool_names
 
 
-def test_dev_eval_tool_is_registered_only_when_dev_tools_enabled():
+def test_arbitrary_code_tools_are_registered_only_when_dev_tools_enabled():
     _register_dev_tools(False)
-    assert "dev_eval" not in set(_tools_by_name())
+    assert not {"dev_eval", "html_eval"} & set(_tools_by_name())
 
     try:
         _register_dev_tools(True)
         tools = _tools_by_name()
-        assert "dev_eval" in tools
         assert tools["dev_eval"].input_schema["required"] == ["code"]
+        assert tools["html_eval"].input_schema["required"] == ["code"]
+        assert "--dev-tools" in tools["html_eval"].description
     finally:
         _register_dev_tools(False)
 

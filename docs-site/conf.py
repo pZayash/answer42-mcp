@@ -161,11 +161,12 @@ GROUP_DESCRIPTIONS = {
     "ui_snapshots": "работа с сохранёнными большими снимками `ui_tree`: поиск, узлы, потомки, сравнение, действия",
     "metadata": "метаданные конфигурации из живого интерфейса: каталог метаданных, версии подсистем и расширений",
     "rag": "RAG по исходникам конфигурации: поиск, источники и снимки; видна только пока RAG активен",
-    "html": "живые веб-страницы в HTML-полях через встроенный WebKit клиента: текст, поиск, клик, ввод, ожидание, JavaScript, ошибки консоли",
+    "html": "живые веб-страницы в HTML-полях через встроенный WebKit клиента: текст, поиск, клик, ввод, ожидание, ошибки консоли; произвольный JavaScript (`html_eval`) — только с `--dev-tools`",
     "recording": "доказательная запись: скриншоты и слайды каждого шага, PDF-отчёт",
     "credentials": "сохранённые учётные данные информационных баз",
 }
 GROUP_ORDER = list(GROUP_TITLES)
+DEV_TOOLS: frozenset[str] = frozenset()  # mcp_1c.server.DEV_TOOL_NAMES, set by _generate_api
 API_DIR = HERE / "api"
 # Tool docstrings stay in English for MCP clients; the site shows these translations.
 API_RU = json.loads((HERE / "api_ru.json").read_text(encoding="utf-8"))
@@ -213,6 +214,10 @@ def _summary(tool) -> str:
 
 def _tool_markdown(tool) -> str:
     lines = [f"## `{tool.name}`", ""]
+    if tool.name in DEV_TOOLS:
+        warning = ("Выполняет произвольный код. Регистрируется только с флагом `--dev-tools` "
+                   "или переменной `ONEC_MCP_DEV_TOOLS=1`; по умолчанию клиент его не видит.")
+        lines += [":::{warning}", warning, ":::", ""]
     description = API_RU["tools"].get(tool.name) or (tool.description or "").strip()
     if description:
         lines += [description, ""]
@@ -232,6 +237,9 @@ def _tool_markdown(tool) -> str:
 def _generate_api(app) -> None:
     from mcp_1c import server
 
+    global DEV_TOOLS
+    DEV_TOOLS = server.DEV_TOOL_NAMES
+    server._register_dev_tools(True)  # documented too, with a warning that they need --dev-tools
     tools = {tool.name: tool for tool in asyncio.run(server.mcp.list_tools())}
     API_DIR.mkdir(exist_ok=True)
     for old in API_DIR.glob("group-*.md"):
@@ -254,7 +262,8 @@ def _generate_api(app) -> None:
         ]
         (API_DIR / f"group-{index:02d}-{group}.md").write_text("\n".join(page), encoding="utf-8")
     if ungrouped:
-        page = ["# Прочие инструменты", "", *(_tool_markdown(tools[n]) for n in ungrouped)]
+        title = "Инструменты разработчика" if set(ungrouped) <= DEV_TOOLS else "Прочие инструменты"
+        page = [f"# {title}", "", *(_tool_markdown(tools[n]) for n in ungrouped)]
         (API_DIR / "group-99-other.md").write_text("\n".join(page), encoding="utf-8")
 
 
