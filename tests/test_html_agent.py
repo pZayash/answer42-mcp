@@ -14,17 +14,20 @@ def test_ops_expression_calls_the_ops_function_with_json_args():
     assert expression.endswith(')("type", {"selector": "textarea", "value": "Привет \\"мир\\""})')
 
 
-def test_loader_is_one_ascii_line_with_port_and_token():
+def test_loader_is_one_short_ascii_line_with_port_and_token():
     loader = html_agent.loader_js(4321, "tok-EN_1")
-    assert "ws://127.0.0.1:4321/" in loader and "'tok-EN_1'" in loader
-    assert loader.isascii() and "\n" not in loader and "__" not in loader
-    assert loader.endswith(")") and loader.count("(") == loader.count(")")
+    assert "ws://127.0.0.1:4321/answer42-page/tok-EN_1'" in loader
+    assert loader.isascii() and "\n" not in loader and "__PORT__" not in loader and "__TOKEN__" not in loader
+    assert len(loader) < 140  # typed character by character into the console
 
 
 async def _fake_page(port, token, replies, origin="https://chat.test"):
-    """Play the page side of the loader: hello with the token, then answer each expression in turn."""
-    async with websockets.connect(f"ws://127.0.0.1:{port}/answer42-page", additional_headers={"Origin": origin}) as ws:
-        await ws.send(json.dumps({"type": "hello", "token": token}))
+    """Play the page side: open the socket with the token, take the bridge, say hello, answer each expression."""
+    url = f"ws://127.0.0.1:{port}{html_agent.PAGE_PATH}{token}"
+    async with websockets.connect(url, additional_headers={"Origin": origin}) as ws:
+        bridge = await ws.recv()
+        assert bridge == html_agent.PAGE_BRIDGE_JS
+        await ws.send(json.dumps({"type": "hello"}))
         async for raw in ws:
             sent = json.loads(raw)
             assert sent["expression"].startswith("(function (op, args) {")

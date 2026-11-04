@@ -57,6 +57,7 @@
   "html_field_click_link": "Вызывает событие нажатия на гиперссылку 1С в поле HTML-документа (обработчик ПриНажатии формы, 1С 8.3.25+).",
   "html_field_content": "Читает текущий документ поля HTML-документа (1С 8.3.25+): видимый текст, при необходимости исходный HTML, имена картинок.",
   "html_field_input": "Имитирует пользовательский ввод HTML в поле HTML-документа с заменой его документа (1С 8.3.25+).",
+  "html_inspector_patch": "Windows: встраивает мост Answer42 в Web Inspector установленных платформ 1С.\n\nНеобязательно. Без этого инструменты html_* вводят короткий загрузчик в консоль инспектора каждого\nHTML-поля. С ним интерфейс инспектора сам подключается к Answer42: ничего не вводится, мост\nпереживает перезагрузку страницы, а html_console видит сообщения с момента её загрузки. install\nменяет файлы в каталоге платформы (Program Files), поэтому Windows просит пользователя за компьютером\nподтвердить права администратора; uninstall возвращает исходные файлы. Сессии подхватывают изменение\nпри следующем открытии инспектора.",
   "html_pages": "Перечисляет живые веб-страницы в полях HTML-документа клиента (start_session подключает их, если не задан html_agent=false).\n\nПодключает поля HTML, которые появились (или перезагрузились) с момента предыдущего вызова (в Windows — вводом\nоднострочного моста в консоль их встроенного Web Inspector).",
   "html_query": "Описывает элементы живой страницы (тег, текст, значение, id, класс, href, видимость) с индексом совпадения.",
   "html_text": "Возвращает текущий отображаемый текст (innerText) живой страницы в поле HTML-документа.",
@@ -321,6 +322,7 @@
   "Parent node numeric index_path returned by ui_tree_resource_search/get_node": "Числовой index_path родительского узла, возвращённый ui_tree_resource_search/get_node",
   "Parent node path returned by ui_tree_resource_search/get_node": "Путь родительского узла, возвращённый ui_tree_resource_search/get_node",
   "Path to 1C source directory": "Путь к каталогу исходников 1С",
+  "Platform version, e.g. 8.5.1.1343; empty = every installed platform": "Версия платформы, например 8.5.1.1343; пусто — все установленные платформы",
   "Polling interval in seconds": "Интервал опроса в секундах",
   "Read tabular document cells after output; disable when only document metadata/dimensions are needed": "Прочитать ячейки табличного документа после вывода; отключите, если нужны только метаданные/размеры документа",
   "Reference field technical name or title": "Техническое имя или заголовок поля-ссылки",
@@ -398,6 +400,7 @@
   "first | last | next | previous | expand | collapse | level_down | level_up": "first | last | next | previous | expand | collapse | level_down | level_up",
   "list | enable | disable": "list | enable | disable",
   "start_page | previous | next": "start_page | previous | next",
+  "status: show the platforms; install / uninstall: build the bridge into their Web Inspector or remove it (asks for administrator rights with a UAC prompt when needed)": "status — показать платформы; install / uninstall — встроить мост в их Web Inspector или убрать его (при необходимости запрашивает права администратора через UAC)",
   "true = expand, false = collapse": "true = раскрыть, false = свернуть",
   "true = select all rows, false = clear the selection": "true = выделить все строки, false = снять выделение"
  }
