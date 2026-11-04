@@ -9,10 +9,11 @@ view of the client (one per HTML field), Answer42:
 
 * sends the inspector hot key; 1C docks the inspector front end into the form
   as one more WebKit view;
-* focuses the front end's console prompt (a click, then Ctrl+`) and types ``loader_js``: a one-line
-  bridge that the console runs in the inspected page; it connects to this
-  session's local WebSocket with a one-time token and evaluates the
-  expressions Answer42 sends;
+* focuses the front end's console prompt (a click, then Ctrl+`) and types
+  ``loader_js``: a short line that the console runs in the inspected page; it
+  opens this session's local WebSocket with a one-time token in the URL, and the
+  server answers with ``PAGE_BRIDGE_JS``, which evaluates the expressions
+  Answer42 sends;
 * runs page operations as ``OPS_JS``, a self-contained ES5 function (text,
   query, click, type, eval) evaluated in the live page.
 
@@ -38,32 +39,45 @@ import struct
 import time
 from contextlib import suppress
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import websockets
 
-from . import os_support, win_desktop
+from . import os_support, webkit_patch, win_desktop
 
 LOGGER = logging.getLogger(__name__)
 
 WEBVIEW_CLASS = "WebViewWindowClass"
 INSPECTOR_WINDOW_CLASS = "WebInspectorWindowClass"
-INSPECTOR_OPEN_SECONDS = 4.0
-CONNECT_TIMEOUT_SECONDS = 20.0
-RETYPE_SECONDS = 5.0
+INSPECTOR_OPEN_SECONDS = 10.0  # only a limit: the first opening after a cold start can take several seconds
+CONNECT_TIMEOUT_SECONDS = 15.0
+# The first evaluation in a fresh console can take a second; then the loader is typed again.
+RETYPE_SECONDS = 2.0
+PAGE_PATH = "/answer42-page/"
+PATCHED_CONNECT_SECONDS = 6.0
 
+# Typed into the console character by character, so as short as possible: it only
+# opens the socket; the server's first message installs PAGE_BRIDGE_JS.
 LOADER_JS = (
-    "(function(){var w=new WebSocket('ws://127.0.0.1:__PORT__/answer42-page');"
-    "w.onopen=function(){w.send(JSON.stringify({type:'hello',token:'__TOKEN__'}))};"
-    "w.onmessage=function(e){var m=JSON.parse(e.data),r;"
-    "try{r={type:'reply',id:m.id,value:(0,eval)(m.expression)}}"
-    "catch(x){r={type:'reply',id:m.id,error:String(x&&x.message||x)}}"
-    "w.send(JSON.stringify(r))}})()"
+    "__answer42=new WebSocket('ws://127.0.0.1:__PORT__" + PAGE_PATH + "__TOKEN__');"
+    "__answer42.onmessage=function(e){(0,eval)(e.data)(this)}"
 )
+
+PAGE_BRIDGE_JS = r"""(function (w) {
+  try { delete window.__answer42; } catch (ignore) {}
+  w.onmessage = function (e) {
+    var m = JSON.parse(e.data), r;
+    try { r = { type: 'reply', id: m.id, value: (0, eval)(m.expression) }; }
+    catch (x) { r = { type: 'reply', id: m.id, error: String((x && x.message) || x) }; }
+    w.send(JSON.stringify(r));
+  };
+  w.send(JSON.stringify({ type: 'hello' }));
+})"""
 
 
 def loader_js(port: int, token: str) -> str:
-    """The one-line page bridge typed into the inspector console (ASCII only, no line breaks)."""
+    """The line typed into the inspector console (ASCII only, no line breaks)."""
     return LOADER_JS.replace("__PORT__", str(int(port))).replace("__TOKEN__", token)
 
 OPS_JS = r"""function (op, args) {
@@ -258,6 +272,18 @@ class HtmlAgentError(RuntimeError):
     pass
 
 
+def _protocol_value(reply: dict[str, Any]) -> Any:
+    """The JSON value of a Runtime.evaluate reply (returnByValue)."""
+    if "error" in reply:
+        error = reply["error"]
+        raise HtmlAgentError(f"Inspector error: {error.get('message') if isinstance(error, dict) else error}")
+    result = reply.get("result") or {}
+    value = result.get("result") or {}
+    if result.get("wasThrown"):
+        raise HtmlAgentError(str(value.get("description") or value.get("value") or "page script failed"))
+    return value.get("value")
+
+
 def ops_expression(op: str, args: dict[str, Any]) -> str:
     """Build the Runtime.evaluate expression that runs one page operation."""
     return f"({OPS_JS})({json.dumps(op)}, {json.dumps(args, ensure_ascii=False)})"
@@ -265,10 +291,12 @@ def ops_expression(op: str, args: dict[str, Any]) -> str:
 
 # --- Windows: find the client's WebKit views, open their inspectors, type into the console ---
 
-_VK_SHIFT, _VK_CONTROL, _VK_MENU, _VK_F12, _VK_RETURN, _VK_OEM_3, _VK_A, _VK_HOME = 0x10, 0x11, 0x12, 0x7B, 0x0D, 0xC0, 0x41, 0x24
+_VK_SHIFT, _VK_CONTROL, _VK_MENU, _VK_F12, _VK_RETURN, _VK_A, _VK_C, _VK_HOME, _VK_DELETE = (
+    0x10, 0x11, 0x12, 0x7B, 0x0D, 0x41, 0x43, 0x24, 0x2E,
+)
 _VK_LSHIFT, _VK_LCONTROL, _VK_LMENU = 0xA0, 0xA2, 0xA4
 _WM_KEYDOWN, _WM_KEYUP, _WM_CHAR, _WM_SYSKEYDOWN, _WM_SYSKEYUP = 0x100, 0x101, 0x102, 0x104, 0x105
-_WM_MOUSEMOVE, _WM_LBUTTONDOWN, _WM_LBUTTONUP, _MK_LBUTTON = 0x200, 0x201, 0x202, 0x1
+_WM_SETFOCUS = 0x7
 
 
 def _user32() -> Any:
@@ -277,9 +305,79 @@ def _user32() -> Any:
 
     user32 = ctypes.WinDLL("user32", use_last_error=True)
     user32.PostMessageW.argtypes = [wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM]
+    user32.SendMessageTimeoutW.argtypes = [
+        wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM, wt.UINT, wt.UINT, ctypes.POINTER(ctypes.c_size_t),
+    ]
     user32.GetWindowThreadProcessId.argtypes = [wt.HWND, ctypes.POINTER(wt.DWORD)]
     user32.AttachThreadInput.argtypes = [wt.DWORD, wt.DWORD, wt.BOOL]
     return user32
+
+
+_SMTO_ABORTIFHUNG = 0x2
+_SEND_TIMEOUT_MS = 3000
+
+
+def _send(user32: Any, hwnd: int, message: int, wparam: int, lparam: int) -> bool:
+    """SendMessage that returns once the window has handled the message (or the thread hangs)."""
+    import ctypes
+
+    result = ctypes.c_size_t()
+    return bool(user32.SendMessageTimeoutW(hwnd, message, wparam, lparam, _SMTO_ABORTIFHUNG, _SEND_TIMEOUT_MS, ctypes.byref(result)))
+
+
+def _enum_client_windows(desktop: str, pid: int, visit: Any) -> None:
+    """Call ``visit(hwnd, class_name)`` for top-level windows of ``pid`` (on a hidden desktop when one is named)."""
+    import ctypes
+    import ctypes.wintypes as wt
+
+    user32 = _user32()
+    proc = ctypes.WINFUNCTYPE(ctypes.c_bool, wt.HWND, wt.LPARAM)
+
+    def top(hwnd: int, _lparam: int) -> bool:
+        owner = wt.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+        if owner.value == pid:
+            visit(int(hwnd), _class_name(user32, hwnd))
+        return True
+
+    if win_desktop.is_hidden_desktop_name(desktop):
+        handle = win_desktop._open_desktop(desktop)
+        try:
+            user32.EnumDesktopWindows(handle, proc(top), 0)
+        finally:
+            user32.CloseDesktop(handle)
+    else:
+        user32.EnumWindows(proc(top), 0)
+
+
+def _class_name(user32: Any, hwnd: int) -> str:
+    import ctypes
+
+    buf = ctypes.create_unicode_buffer(128)
+    user32.GetClassNameW(hwnd, buf, 128)
+    return buf.value
+
+
+def find_inspector_windows(desktop: str, pid: int) -> dict[int, str]:
+    """The client's (hidden) Web Inspector windows and their titles.
+
+    WebKit names the window "Web Inspector — <url>" once the front end has loaded
+    and reported the inspected page: the sign that its console accepts input.
+    """
+    import ctypes
+
+    user32 = _user32()
+    found: dict[int, str] = {}
+
+    def visit(hwnd: int, class_name: str) -> None:
+        if class_name == INSPECTOR_WINDOW_CLASS:
+            length = user32.GetWindowTextLengthW(hwnd)
+            buf = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, buf, length + 1)
+            found[hwnd] = buf.value
+
+    _enum_client_windows(desktop, pid, visit)
+    return found
 
 
 def find_webviews(desktop: str, pid: int) -> list[int]:
@@ -291,41 +389,27 @@ def find_webviews(desktop: str, pid: int) -> list[int]:
     proc = ctypes.WINFUNCTYPE(ctypes.c_bool, wt.HWND, wt.LPARAM)
     found: list[int] = []
 
-    def class_name(hwnd: int) -> str:
-        buf = ctypes.create_unicode_buffer(128)
-        user32.GetClassNameW(hwnd, buf, 128)
-        return buf.value
-
     def child(hwnd: int, _lparam: int) -> bool:
-        if class_name(hwnd) == WEBVIEW_CLASS and user32.IsWindowVisible(hwnd):
+        if _class_name(user32, hwnd) == WEBVIEW_CLASS and user32.IsWindowVisible(hwnd):
             found.append(int(hwnd))
         return True
 
-    def top(hwnd: int, _lparam: int) -> bool:
-        owner = wt.DWORD()
-        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+    def visit(hwnd: int, class_name: str) -> None:
         # An undocked inspector window holds a WebKit view of the same process: never inspect it.
-        if owner.value == pid and class_name(hwnd) != INSPECTOR_WINDOW_CLASS:
+        if class_name != INSPECTOR_WINDOW_CLASS:
             user32.EnumChildWindows(hwnd, proc(child), 0)
-        return True
 
-    if win_desktop.is_hidden_desktop_name(desktop):
-        handle = win_desktop._open_desktop(desktop)
-        try:
-            user32.EnumDesktopWindows(handle, proc(top), 0)
-        finally:
-            user32.CloseDesktop(handle)
-    else:
-        user32.EnumWindows(proc(top), 0)
+    _enum_client_windows(desktop, pid, visit)
     return found
 
 
-def _post_shortcut(hwnd: int, vk: int, modifiers: tuple[int, ...], system: bool = False, hold: float = 0.3) -> None:
+def _post_shortcut(hwnd: int, vk: int, modifiers: tuple[int, ...] = (), system: bool = False, char: int | None = None) -> bool:
     """A key with modifiers to a window of another thread, without the real keyboard.
 
     The modifiers are put into the keyboard state shared with the window's
-    thread (AttachThreadInput + SetKeyboardState); the key is a posted key message.
-    This works on a hidden desktop, where SendInput cannot reach.
+    thread (AttachThreadInput + SetKeyboardState); the key messages are *sent*, so
+    the window has handled them before the state is restored and no delay has to
+    be guessed.  This works on a hidden desktop, where SendInput cannot reach.
     """
     import ctypes
 
@@ -343,10 +427,11 @@ def _post_shortcut(hwnd: int, vk: int, modifiers: tuple[int, ...], system: bool 
     flags = 1 | (1 << 29 if system else 0)  # bit 29: Alt is down
     try:
         user32.SetKeyboardState(state)
-        user32.PostMessageW(hwnd, down, vk, flags)
-        time.sleep(hold)  # the key is handled asynchronously while the modifiers must still be down
-        user32.PostMessageW(hwnd, up, vk, flags | (3 << 30))
-        time.sleep(0.3)
+        handled = _send(user32, hwnd, down, vk, flags)
+        if char is not None:
+            _send(user32, hwnd, _WM_CHAR, char, flags)
+        _send(user32, hwnd, up, vk, flags | (3 << 30))
+        return handled
     finally:
         user32.SetKeyboardState(previous)
         if attached:
@@ -355,48 +440,46 @@ def _post_shortcut(hwnd: int, vk: int, modifiers: tuple[int, ...], system: bool 
 
 def _press_inspector_hotkey(hwnd: int) -> None:
     """Ctrl+Alt+Shift+F12: open the Web Inspector of a WebKit view."""
-    _post_shortcut(hwnd, _VK_F12, (_VK_SHIFT, _VK_CONTROL, _VK_MENU, _VK_LSHIFT, _VK_LCONTROL, _VK_LMENU), system=True, hold=1.0)
+    _post_shortcut(hwnd, _VK_F12, (_VK_SHIFT, _VK_CONTROL, _VK_MENU, _VK_LSHIFT, _VK_LCONTROL, _VK_LMENU), system=True)
 
 
 def _type_into_console(desktop: str, front_end: int, text: str) -> None:
     """Run ``text`` in the console of an inspector front end.
 
-    A click in the middle of the front end gives it the focus that its key
-    shortcuts need; Ctrl+` (the "focus console prompt" shortcut, matched by key
-    code so the keyboard layout does not matter) then focuses the quick console
-    prompt wherever it is, and Ctrl+A selects what earlier attempts left there.
-    The text goes in as WM_CHAR and Enter runs it.  The prompt takes the focus
-    asynchronously and may put the first character after the second, so the
-    text starts with a space that absorbs this.  Esc must not be used: 1C
-    handles it first and closes the form.
-    """
-    import ctypes
-    import ctypes.wintypes as wt
+    WM_SETFOCUS makes WebKit treat the front end as focused, which its key
+    shortcuts need, without moving the focus inside its document (a click would:
+    on the toolbar it takes the focus from the prompt, in the Elements tree it
+    selects a node and paints its highlight over the page).  Ctrl+Alt+C (matched by key code,
+    so the keyboard layout does not matter) shows the Console tab, which focuses
+    its prompt; the inspector remembers the tab, so later it opens there.  Keys
+    must never reach the Elements tab: its DOM tree takes the focus when it
+    finishes loading, and keys typed into it, Enter above all, edit the page's
+    DOM.  A typed space brings the focus back to the prompt if an earlier attempt
+    left it in the message list, and Ctrl+A selects what is in the prompt.
 
+    The text is typed behind ``//``: the prompt's autocompletion answers typed
+    code asynchronously and may replace what was typed after it, but it never
+    completes inside a comment.  Home and two Deletes then uncomment the line, and
+    Enter with the cursor not at the end runs it at once (at the end the prompt
+    first asks the page whether the code is complete).  The prompt takes the focus
+    asynchronously and may swap the first two characters, which "//" absorbs.
+    Esc must not be used: 1C handles it first and closes the form.
+    """
     user32 = _user32()
-    rect = wt.RECT()
-    user32.GetClientRect(wt.HWND(front_end), ctypes.byref(rect))
-    middle = ((rect.bottom // 2) << 16) | (rect.right // 2)
-    user32.PostMessageW(front_end, _WM_MOUSEMOVE, 0, middle)
-    user32.PostMessageW(front_end, _WM_LBUTTONDOWN, _MK_LBUTTON, middle)
-    user32.PostMessageW(front_end, _WM_LBUTTONUP, 0, middle)
-    time.sleep(0.5)
+    _send(user32, front_end, _WM_SETFOCUS, 0, 0)
     ctrl = (_VK_CONTROL, _VK_LCONTROL)
-    _run_on_client_desktop(desktop, lambda: _post_shortcut(front_end, _VK_OEM_3, ctrl))
-    time.sleep(1.0)
+    _run_on_client_desktop(desktop, lambda: _post_shortcut(front_end, _VK_C, (*ctrl, _VK_MENU, _VK_LMENU)))
+    time.sleep(0.05)
+    _send(user32, front_end, _WM_CHAR, ord(" "), 1)
+    time.sleep(0.05)
     _run_on_client_desktop(desktop, lambda: _post_shortcut(front_end, _VK_A, ctrl))
-    for char in " " + text:
-        user32.PostMessageW(front_end, _WM_CHAR, ord(char), 1)
-    # The prompt reads typed text asynchronously.  With the cursor at the end, Enter first
-    # asks the page whether the code is complete and may insert a new line instead; with
-    # the cursor elsewhere (Home) it runs the code at once.
-    time.sleep(1.0)
-    user32.PostMessageW(front_end, _WM_KEYDOWN, _VK_HOME, 1)
-    user32.PostMessageW(front_end, _WM_KEYUP, _VK_HOME, 1 | (3 << 30))
-    time.sleep(0.2)
-    user32.PostMessageW(front_end, _WM_KEYDOWN, _VK_RETURN, 1)
-    user32.PostMessageW(front_end, _WM_CHAR, 13, 1)
-    user32.PostMessageW(front_end, _WM_KEYUP, _VK_RETURN, 1 | (3 << 30))
+    for char in "//" + text:
+        _send(user32, front_end, _WM_CHAR, ord(char), 1)
+    time.sleep(0.1)  # the prompt reads typed text asynchronously
+    _post_shortcut(front_end, _VK_HOME)
+    _post_shortcut(front_end, _VK_DELETE)
+    _post_shortcut(front_end, _VK_DELETE)
+    _post_shortcut(front_end, _VK_RETURN, char=13)
 
 
 def _run_on_client_desktop(desktop: str, fn: Any) -> Any:
@@ -471,6 +554,19 @@ def free_local_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         probe.bind(("127.0.0.1", 0))
         return int(probe.getsockname()[1])
+
+
+def console_entry(message: dict[str, Any]) -> dict[str, Any]:
+    """A Console.messageAdded message of the inspector protocol, as html_console reports it."""
+    return {
+        "level": str(message.get("level") or "log"),
+        "text": str(message.get("text") or ""),
+        "url": str(message.get("url") or ""),
+        "line": int(message.get("line") or 0),
+        "column": int(message.get("column") or 0),
+        "source": str(message.get("source") or ""),
+        **({"repeat": int(message["repeatCount"])} if int(message.get("repeatCount") or 1) > 1 else {}),
+    }
 
 
 class RemoteInspectorClient:
@@ -609,15 +705,7 @@ class RemoteInspectorClient:
 
     def _console_message(self, key: tuple[int, int], message: dict[str, Any]) -> None:
         log = self.console.setdefault(key, [])
-        log.append({
-            "level": str(message.get("level") or "log"),
-            "text": str(message.get("text") or ""),
-            "url": str(message.get("url") or ""),
-            "line": int(message.get("line") or 0),
-            "column": int(message.get("column") or 0),
-            "source": str(message.get("source") or ""),
-            **({"repeat": int(message["repeatCount"])} if int(message.get("repeatCount") or 1) > 1 else {}),
-        })
+        log.append(console_entry(message))
         del log[:-500]
 
     def _enable_console_soon(self, key: tuple[int, int]) -> None:
@@ -692,6 +780,9 @@ class InspectorPage:
     connection: Any
     hwnd: int = 0
     target: tuple[int, int] | None = None
+    # Windows with webkit_patch: the connection is the inspector front end, not the page.
+    front_end: bool = False
+    console_log: list[dict[str, Any]] = field(default_factory=list)
     url: str = ""
     title: str = ""
     opened_at: float = field(default_factory=time.time)
@@ -717,16 +808,18 @@ class HtmlInspector:
         self.pages: dict[str, InspectorPage] = {}
         self.desktop = ""
         self.client_pid = 0
+        self.client_bin = ""
         self.last_error = ""
         self._server: Any = None
         self._ids = itertools.count(1)
         self._page_numbers = itertools.count(1)
         self._pending: dict[int, asyncio.Future] = {}
-        self._tokens: dict[str, tuple[int, asyncio.Future]] = {}
+        self._tokens: dict[str, tuple[int, asyncio.Future, str]] = {}
         self._front_ends: dict[int, int] = {}
         self._known_front_ends: set[int] = set()
         self._attempts: dict[int, int] = {}
         self._open_lock = asyncio.Lock()
+        self.last_connect: dict[str, Any] = {}  # Windows: timings of the latest page connection
         # Linux: the client is started with its WebKit remote inspector server on this port.
         self.remote_port = 0 if os_support.IS_WINDOWS else free_local_port()
         self._remote: RemoteInspectorClient | None = None
@@ -745,7 +838,7 @@ class HtmlInspector:
             with suppress(Exception):
                 await asyncio.wait_for(self._server.wait_closed(), 5)
             self._server = None
-        for future in [*self._pending.values(), *(f for _, f in self._tokens.values())]:
+        for future in [*self._pending.values(), *(f for _, f, _ in self._tokens.values())]:
             if not future.done():
                 future.set_exception(HtmlAgentError("HTML page bridge stopped"))
         self._pending.clear()
@@ -755,8 +848,13 @@ class HtmlInspector:
         """Environment for the test client: Linux clients serve the WebKit remote inspector."""
         return {"WEBKIT_INSPECTOR_SERVER": f"127.0.0.1:{self.remote_port}"} if self.remote_port else {}
 
-    def attach(self, desktop: str, pid: int) -> None:
+    def attach(self, desktop: str, pid: int, client_path: str = "") -> None:
         self.desktop, self.client_pid = desktop, int(pid or 0)
+        self.client_bin = str(Path(client_path).parent) if client_path else ""
+
+    def uses_patched_inspector(self) -> bool:
+        """Windows: the client's platform has the current webkit_patch bridge (checked on each use)."""
+        return bool(os_support.IS_WINDOWS and self.client_bin and webkit_patch.is_ready(self.client_bin))
 
     def status(self) -> dict[str, Any]:
         return {
@@ -764,43 +862,68 @@ class HtmlInspector:
             "running": self._server is not None,
             "pages_alive": sum(1 for p in self.pages.values() if not p.closed),
             **({"remote_inspector_port": self.remote_port} if self.remote_port else {}),
+            **({"patched_inspector": self.uses_patched_inspector()} if os_support.IS_WINDOWS else {}),
+            **({"last_connect": self.last_connect} if self.last_connect else {}),
             **({"last_error": self.last_error} if self.last_error else {}),
         }
 
     # --- bridge connections ---
 
-    def expect(self, hwnd: int = 0) -> tuple[str, asyncio.Future]:
-        """Register a one-time token for the bridge about to be typed into ``hwnd``'s console."""
+    def expect(self, hwnd: int = 0, path: str = PAGE_PATH) -> tuple[str, asyncio.Future]:
+        """Register a one-time token for the bridge about to connect for ``hwnd``.
+
+        ``PAGE_PATH``: the loader typed into the console; ``webkit_patch.INSPECTOR_PATH``:
+        the bridge of a patched inspector front end.
+        """
         token = secrets.token_urlsafe(18)
         future = asyncio.get_running_loop().create_future()
-        self._tokens[token] = (hwnd, future)
+        self._tokens[token] = (hwnd, future, path)
         return token, future
 
     async def _handle(self, connection: Any) -> None:
         # The bridge runs in the inspected page, so its Origin is the page's own:
         # only a one-time token typed into the console admits a connection.
+        path = str(getattr(getattr(connection, "request", None), "path", "") or "")
+        expected = None
+        for prefix in (PAGE_PATH, webkit_patch.INSPECTOR_PATH):
+            token = path[len(prefix):] if path.startswith(prefix) else ""
+            if token and self._tokens.get(token, (0, None, ""))[2] == prefix:
+                expected = self._tokens.pop(token)
+        if expected is None:
+            LOGGER.warning("HTML page bridge: rejected a connection without a valid token")
+            await connection.close(1008, "token required")
+            return
+        hwnd, future, kind = expected
+        front_end = kind == webkit_patch.INSPECTOR_PATH
         page: InspectorPage | None = None
         try:
+            if not front_end:
+                await connection.send(PAGE_BRIDGE_JS)
             async for raw in connection:
                 try:
                     message = json.loads(raw)
                 except ValueError:
                     continue
                 if page is None:
-                    expected = self._tokens.pop(str(message.get("token") or ""), None) if message.get("type") == "hello" else None
-                    if expected is None:
-                        LOGGER.warning("HTML page bridge: rejected a connection without a valid token")
-                        await connection.close(1008, "token required")
-                        return
-                    hwnd, future = expected
-                    page = InspectorPage(f"p{next(self._page_numbers)}", connection, hwnd=hwnd)
+                    if message.get("type") != "hello":
+                        continue
+                    page = InspectorPage(f"p{next(self._page_numbers)}", connection, hwnd=hwnd, front_end=front_end)
                     self.pages[page.page_id] = page
                     if not future.done():
                         future.set_result(page)
                 elif message.get("type") == "reply":
-                    future = self._pending.pop(message.get("id"), None)
-                    if future is not None and not future.done():
-                        future.set_result(message)
+                    waiting = self._pending.pop(message.get("id"), None)
+                    if waiting is not None and not waiting.done():
+                        waiting.set_result(message)
+                elif message.get("type") == "message":  # a patched front end relays a protocol reply
+                    reply = message.get("message") or {}
+                    waiting = self._pending.pop(reply.get("id"), None)
+                    if waiting is not None and not waiting.done():
+                        waiting.set_result(reply)
+                elif message.get("type") == "event":  # ... or a console message
+                    params = (message.get("message") or {}).get("params") or {}
+                    page.console_log.append(console_entry(params.get("message") or {}))
+                    del page.console_log[:-500]
         except websockets.ConnectionClosed:
             pass
         finally:
@@ -817,10 +940,16 @@ class HtmlInspector:
                 raise HtmlAgentError(f"Page {page.page_id} is closed (its form was closed)")
             return await self._remote.evaluate(page.target, expression, timeout)
         message_id = next(self._ids)
+        if page.front_end:
+            message_id += webkit_patch.BRIDGE_BASE_ID  # the front end relays only ids from BRIDGE_BASE_ID
+            outgoing: dict[str, Any] = {"type": "send", "message": {"id": message_id, "method": "Runtime.evaluate", "params": {
+                "expression": expression, "returnByValue": True, "doNotPauseOnExceptionsAndMuteConsole": True}}}
+        else:
+            outgoing = {"id": message_id, "expression": expression}
         future = asyncio.get_running_loop().create_future()
         self._pending[message_id] = future
         try:
-            await page.connection.send(json.dumps({"id": message_id, "expression": expression}, ensure_ascii=False))
+            await page.connection.send(json.dumps(outgoing, ensure_ascii=False))
             reply = await asyncio.wait_for(future, timeout)
         except TimeoutError:
             raise HtmlAgentError(f"No reply from page {page.page_id} within {timeout:g}s") from None
@@ -829,6 +958,8 @@ class HtmlInspector:
             raise HtmlAgentError(f"Page {page.page_id} disconnected") from None
         finally:
             self._pending.pop(message_id, None)
+        if page.front_end:
+            return _protocol_value(reply)
         if "error" in reply:
             raise HtmlAgentError(str(reply["error"]))
         return reply.get("value")
@@ -907,33 +1038,69 @@ class HtmlInspector:
         front_end = self._front_ends.get(view)
         if front_end in views:
             return front_end
+        inspectors = set(await asyncio.to_thread(find_inspector_windows, self.desktop, self.client_pid))
         await asyncio.to_thread(_run_on_client_desktop, self.desktop, lambda: _press_inspector_hotkey(view))
         deadline = time.monotonic() + INSPECTOR_OPEN_SECONDS
         new: set[int] = set()
-        while not new and time.monotonic() < deadline:
-            await asyncio.sleep(0.5)
-            new = set(await self._views()) - views
+        loaded = False
+        while not (new and loaded) and time.monotonic() < deadline:
+            await asyncio.sleep(0.05)
+            new = new or set(await self._views()) - views
+            titles = await asyncio.to_thread(find_inspector_windows, self.desktop, self.client_pid)
+            loaded = any(title for hwnd, title in titles.items() if hwnd not in inspectors)
         # Whatever appeared is a front end and must never be inspected itself.
         self._known_front_ends.update(new)
         if not new:
             raise HtmlAgentError(f"The inspector of WebKit view {view} did not open")
         front_end = min(new)
         self._front_ends[view] = front_end
-        await asyncio.sleep(2.0)  # let the front end load its UI before the console is used
         return front_end
+
+    async def _connect_patched(self, view: int, timings: dict[str, Any]) -> InspectorPage | None:
+        """Open the inspector of a patched platform: its front end connects by itself."""
+        token, future = self.expect(view, webkit_patch.INSPECTOR_PATH)
+        started = time.monotonic()
+        holder = webkit_patch.opening_inspector(self.client_bin, self.port, token)
+        await asyncio.to_thread(holder.__enter__)
+        try:
+            await self._front_end(view)
+            page = await asyncio.wait_for(future, PATCHED_CONNECT_SECONDS)
+        except (HtmlAgentError, TimeoutError) as exc:
+            timings["patched_error"] = str(exc) or "the patched inspector did not connect"
+            return None
+        finally:
+            await asyncio.to_thread(holder.__exit__, None, None, None)
+            self._tokens.pop(token, None)
+        timings["mode"] = "patched"
+        timings["connected_seconds"] = round(time.monotonic() - started, 2)
+        return page
 
     async def _connect(self, view: int) -> InspectorPage | None:
         self._attempts[view] = self._attempts.get(view, 0) + 1
+        started = time.monotonic()
+        timings: dict[str, Any] = {"view": view, "typed": 0}
+        self.last_connect = timings
+        if view not in self._front_ends and self.uses_patched_inspector():
+            patched = await self._connect_patched(view, timings)
+            if patched is not None:
+                self._attempts.pop(view, None)
+                with suppress(HtmlAgentError):
+                    await self.refresh(patched)
+                return patched
+            # The inspector is open now (or failed to open): fall back to the console loader.
         token, future = self.expect(view)
         try:
             front_end = await self._front_end(view)
+            timings["front_end_seconds"] = round(time.monotonic() - started, 2)
             # A front end that is still loading drops the click and the keys: type again until the page connects.
             deadline = time.monotonic() + CONNECT_TIMEOUT_SECONDS
             while not future.done() and time.monotonic() < deadline:
                 await asyncio.to_thread(_type_into_console, self.desktop, front_end, loader_js(self.port, token))
+                timings["typed"] += 1
                 with suppress(TimeoutError):
                     await asyncio.wait_for(asyncio.shield(future), RETYPE_SECONDS)
             page = await asyncio.wait_for(future, 0.1)
+            timings["connected_seconds"] = round(time.monotonic() - started, 2)
         except (HtmlAgentError, TimeoutError) as exc:
             self.last_error = str(exc) or f"The page of WebKit view {view} did not connect within {CONNECT_TIMEOUT_SECONDS:g}s"
             LOGGER.warning("%s", self.last_error)
@@ -941,6 +1108,7 @@ class HtmlInspector:
         finally:
             self._tokens.pop(token, None)
         self._attempts.pop(view, None)
+        timings["mode"] = "console"
         with suppress(HtmlAgentError):
             await self.run(page, "hook_console", {}, timeout=10)  # errors from now on; see console()
             await self.refresh(page)
@@ -983,16 +1151,17 @@ class HtmlInspector:
                       limit: int = 100, clear: bool = False, check_scripts: bool = True) -> dict[str, Any]:
         """Console errors/warnings of a page, plus scripts this WebKit cannot parse.
 
-        Linux reads the inspector's Console domain, which keeps messages since
-        the page loaded.  The Windows page bridge hooks errors only once it is
-        connected, so earlier load-time errors are missing there; the script
+        Linux and a patched Windows inspector (webkit_patch) read the inspector's
+        Console domain, which keeps messages since the page loaded.  The console
+        loader hooks errors only once it is connected, so earlier load-time
+        errors are missing there; the script
         check (every script compiled with ``new Function``) still reports
         syntax this WebKit does not support, such as ``?.``.
         """
         page = await self.page(selector)
         result: dict[str, Any] = {"page": page.page_id, "url": page.url}
-        if page.target is not None and self._remote is not None:
-            log = self._remote.console.get(page.target, [])
+        if page.front_end or (page.target is not None and self._remote is not None):
+            log = page.console_log if page.front_end or self._remote is None else self._remote.console.get(page.target, [])
             messages = list(log)
             if clear:
                 log.clear()

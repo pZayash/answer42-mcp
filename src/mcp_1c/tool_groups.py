@@ -61,7 +61,10 @@ GROUPS: dict[str, frozenset[str]] = {
         "rag_session_autoconfigure", "rag_sources_list", "rag_snapshot_create", "rag_snapshots_list",
         "rag_index_build", "rag_lookup_object", "rag_query", "dynamic_list_metadata_available_fields",
     }),
-    "html": frozenset({"html_pages", "html_text", "html_query", "html_click", "html_type", "html_wait", "html_eval", "html_console"}),
+    "html": frozenset({
+        "html_pages", "html_text", "html_query", "html_click", "html_type", "html_wait", "html_eval", "html_console",
+        "html_inspector_patch",
+    }),
     "recording": frozenset({"recording_start", "recording_capture", "recording_stop"}),
     "credentials": frozenset({"credentials_check", "credentials_save", "credentials_remove", "credentials_list"}),
 }

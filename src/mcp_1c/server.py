@@ -45,6 +45,7 @@ from . import (
     runtime,
     skill_installer,
     tool_groups,
+    webkit_patch,
     win_desktop,
 )
 from . import platform as _platform
@@ -5691,7 +5692,7 @@ async def start_session(
         "test_client": _compact_start_test_client_result(connect_result, include_timings=include_timings), **pipeline_info,
     }
     if sess.html_agent is not None:
-        sess.html_agent.attach(sess.client_display or sess.display, sess.test_client_pid)
+        sess.html_agent.attach(sess.client_display or sess.display, sess.test_client_pid, sess.onec_thin)
         response["html_agent"] = sess.html_agent.status()
     if include_timings:
         response["_timings"] = timings
@@ -7277,6 +7278,32 @@ async def html_eval(
     --dev-tools or ONEC_MCP_DEV_TOOLS=1.
     """
     return {"result": await _html_command(session_id, page, "eval", {"code": code}, timeout=max(1, int(timeout)))}
+
+
+@mcp.tool()
+async def html_inspector_patch(
+    action: Annotated[str, "status: show the platforms; install / uninstall: build the bridge into their Web Inspector or remove it (asks for administrator rights with a UAC prompt when needed)"] = "status",
+    version: Annotated[str, "Platform version, e.g. 8.5.1.1343; empty = every installed platform"] = "",
+) -> Any:
+    """Windows: build the Answer42 bridge into the Web Inspector of installed 1C platforms.
+
+    Optional.  Without it the html_* tools type a short loader into the inspector
+    console of each HTML field.  With it the inspector front end connects to
+    Answer42 by itself: nothing is typed, the bridge survives page reloads and
+    html_console sees messages from the page load.  install changes files in
+    the platform directory (Program Files), so Windows asks the person at the
+    computer to confirm administrator rights; uninstall restores the original
+    files.  Sessions pick the change up on the next inspector they open.
+    """
+    if action not in {"status", "install", "uninstall"}:
+        raise ToolError("action must be status, install or uninstall")
+    try:
+        bins = await asyncio.to_thread(webkit_patch.select_platforms, [version] if version else None)
+        if action == "status":
+            return {"platforms": [webkit_patch.platform_status(b) for b in bins]}
+        return await asyncio.to_thread(webkit_patch.change, action, bins)
+    except webkit_patch.WebKitPatchError as exc:
+        raise ToolError(str(exc)) from exc
 
 
 @mcp.tool()
@@ -11840,6 +11867,8 @@ def main(argv: list[str] | None = None) -> None:
         from . import credentials_cli
 
         raise SystemExit(credentials_cli.main(argv[1:]))
+    if argv and argv[0] == "webkit-inspector":
+        raise SystemExit(webkit_patch.main(argv[1:]))
 
     parser = argparse.ArgumentParser(description="MCP server for 1C:Enterprise test manager")
     parser.add_argument("--version", action="version", version=f"answer42 {__version__}")

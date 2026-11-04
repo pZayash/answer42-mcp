@@ -94,22 +94,8 @@ def _platform_component_score(path: Path) -> tuple[int, int]:
     )
 
 
-def find_platform_dir(version: str | None = None) -> Path:
-    """Locate the platform directory for a given version.
-
-    If `version` is omitted the maximum available version is selected.
-    Searches standard Linux and Windows installation locations. The
-    ``ONEC_PLATFORM_DIR`` environment variable can point directly to the
-    platform ``bin`` directory and takes precedence.
-    """
-    override = os.getenv("ONEC_PLATFORM_DIR")
-    if override:
-        path = Path(override)
-        missing = _missing_required_tools(path)
-        if not missing:
-            return path
-        raise ValueError(f"ONEC_PLATFORM_DIR does not contain required 1C tools {missing}: {path}")
-
+def installed_platform_dirs() -> list[Path]:
+    """Platform directories (with 1cv8c and ibcmd) in the standard installation locations."""
     candidates: list[Path] = []
     if os_support.IS_WINDOWS:
         bases = []
@@ -133,6 +119,26 @@ def find_platform_dir(version: str | None = None) -> Path:
             for sub in base.iterdir():
                 if sub.is_dir() and _is_platform_candidate(sub):
                     candidates.append(sub)
+    return candidates
+
+
+def find_platform_dir(version: str | None = None) -> Path:
+    """Locate the platform directory for a given version.
+
+    If `version` is omitted the maximum available version is selected.
+    Searches standard Linux and Windows installation locations. The
+    ``ONEC_PLATFORM_DIR`` environment variable can point directly to the
+    platform ``bin`` directory and takes precedence.
+    """
+    override = os.getenv("ONEC_PLATFORM_DIR")
+    if override:
+        path = Path(override)
+        missing = _missing_required_tools(path)
+        if not missing:
+            return path
+        raise ValueError(f"ONEC_PLATFORM_DIR does not contain required 1C tools {missing}: {path}")
+
+    candidates = installed_platform_dirs()
     if not candidates:
         raise RuntimeError(
             "No suitable 1C platform directories found. "
