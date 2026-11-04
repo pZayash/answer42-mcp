@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import contextvars
 import copy
 import functools
@@ -17,6 +18,7 @@ import subprocess
 import sys
 import time
 import typing
+import urllib.parse
 import urllib.request
 import uuid
 from collections.abc import Sequence
@@ -552,6 +554,7 @@ class SessionState:
         self.blocked_action: dict[str, Any] | None = None
         # In-process only: after an MCP restart the restored client's pages point at a dead bridge.
         self.html_agent: html_agent.HtmlInspector | None = None
+        self.html_disabled = False  # started with html_mode=disabled
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -5212,6 +5215,7 @@ def session_status(*,
         "configuration_version": sess.configuration_version,
         "extension_names": sess.extension_names,
         "idle_timeout_seconds": sess.idle_timeout_seconds,
+        **({"external_opens": opens} if (opens := runtime.external_opens(sess.data_dir)) else {}),
     }
 
 
@@ -5249,7 +5253,7 @@ async def start_session(
     rag_enabled: Annotated[bool, "Enable built-in RAG for this session"] = False,
     summary_rag_config: Annotated[str, "Explicit Summary RAG configuration alias/code, e.g. bp, bpc, ka, ut, zup, Accounting30, Бухгалтерия предприятия. Enables configuration+fresh summary snapshot without live autodetection."] = "",
     include_timings: Annotated[bool, "Include diagnostic startup timing breakdown in the returned _timings field"] = False,
-    html_agent: Annotated[bool, "Bridge live web pages in HTML document fields for the html_* tools (live DOM read/click/type/console through the embedded WebKit inspector; Windows and Linux clients); false = do not start it"] = True,
+    html_mode: Annotated[str, "How the html_* tools reach live pages in HTML document fields: auto (Linux: remote; Windows: patched when the platform's Web Inspector has the Answer42 bridge, console otherwise; default, or ONEC_MCP_HTML_MODE), console (Windows: the inspector hot key and a loader typed into its console), patched (the bridge built into the inspector front end: Windows — installed into the platform, see html_inspector_patch; Linux — overlaid per session, nothing to install, needs xdotool), remote (Linux: the WebKitGTK remote inspector), disabled (no bridge: the html_* tools are unavailable)"] = "",
 ) -> dict[str, Any]:
     """One-shot session factory: detect version, start infrastructure, and connect the 1C test client.
 
@@ -5258,9 +5262,9 @@ async def start_session(
     passing secrets in tool calls. After a long UI operation, use
     `client_busy_status` or `wait_client_idle` before sending more commands.
 
-    By default (`html_agent=true`) the html_* tools reach live pages in HTML document
-    fields: on Windows through the embedded Web Inspector, which stays docked at
-    the bottom of the form; on Linux through the WebKitGTK remote inspector.
+    The html_* tools reach live pages in HTML document fields as `html_mode` says:
+    on Windows through the embedded Web Inspector, which stays docked at the bottom
+    of the form; on Linux through the WebKitGTK remote inspector.
     """
     start_monotonic = time.perf_counter()
     stage_monotonic = start_monotonic
@@ -5596,9 +5600,9 @@ async def start_session(
     if not connect_connection_value and pipeline_info.get("client_connection_value"):
         connect_connection_value = str(pipeline_info["client_connection_value"])
         connect_connection_mode = str(pipeline_info.get("client_connection_mode") or "file-direct")
-    if html_agent and (connect_base_url or connect_connection_value):
+    if connect_base_url or connect_connection_value:
         try:
-            await _start_html_agent(sess)
+            await _start_html_agent(sess, html_mode)
         except Exception:
             await _cleanup_failed_start_session(sess, "HTML page bridge startup failure")
             raise
@@ -5699,9 +5703,57 @@ async def start_session(
     return response
 
 
-async def _start_html_agent(sess: SessionState) -> None:
-    """Start the session's page bridge server."""
-    inspector = html_agent.HtmlInspector()
+class _HtmlFieldDriver:
+    """Linux console / patched html_mode: the active form's HTML document fields, found and focused through the test client."""
+
+    def __init__(self, session_id: str) -> None:
+        self.session_id = session_id
+        self._is_html: dict[tuple[str, str], bool] = {}  # (form, field) -> an HTML document field
+
+    async def html_fields(self) -> list[str]:
+        tree = await ui_tree(profile="navigation", format="json", delivery="inline", session_id=self.session_id)
+        fields: list[tuple[str, str]] = []
+
+        def walk(node: Any, form: str) -> None:
+            if isinstance(node, dict):
+                form = str(node.get("form_name") or form)
+                kind = str(node.get("type") or "").lower()
+                if node.get("name") and ("поле формы" in kind or "formfield" in kind.replace(" ", "")):
+                    fields.append((form, str(node["name"])))
+                for value in node.values():
+                    walk(value, form)
+            elif isinstance(node, list):
+                for value in node:
+                    walk(value, form)
+
+        walk(tree, "")
+        found: list[str] = []
+        for form, name in fields:
+            if (form, name) not in self._is_html:
+                info = await _bridge_call_recorded(self.session_id, "field_info", {"field_name": name, "search_by_title": False})
+                kind = str(info.get("field_kind") or "") if isinstance(info, dict) else ""
+                self._is_html[(form, name)] = "html" in kind.lower()
+            if self._is_html[(form, name)]:
+                found.append(name)
+        return found
+
+    async def focus(self, name: str) -> None:
+        await _bridge_call_recorded(self.session_id, "activate_field", {"field_name": name, "search_by_title": False})
+
+
+async def _start_html_agent(sess: SessionState, mode: str = "") -> None:
+    """Start the session's page bridge server for the chosen html_mode (none for disabled)."""
+    mode = mode or os.getenv("ONEC_MCP_HTML_MODE", "auto")
+    try:
+        if html_agent.resolve_mode(mode) == "disabled":
+            sess.html_disabled = True
+            return
+        inspector = html_agent.HtmlInspector(mode)
+        inspector.check_platform(sess.onec_thin)
+    except html_agent.HtmlAgentError as exc:
+        raise ToolError(str(exc)) from exc
+    inspector.field_driver = _HtmlFieldDriver(sess.session_id)
+    inspector.overlay_dir = sess.data_dir / "webkit-inspector-overlay"
     await inspector.start()
     sess.html_agent = inspector
 
@@ -6257,13 +6309,19 @@ def _client_failure_diagnostics(sess: SessionState, error: Exception, target_con
     return RuntimeError(message)
 
 
+# GLib/GTK log lines of the Linux client ("** (1cv8c:123): WARNING **: ...", "(1cv8c:123): Gtk-WARNING **: ...").
+# They are not startup failures: WebKitGTK, for one, warns "Error sending message on socket connection"
+# whenever a remote inspector connection closes.
+_GLIB_LOG_LINE = re.compile(r"\(\S+:\d+\): (?:[\w.-]+-)?(?:WARNING|CRITICAL|Message|INFO|DEBUG) \*\*")
+
+
 def _test_client_startup_error_from_logs(sess: SessionState) -> str:
     """Return a meaningful early startup error from test-client logs, if any."""
     fragments: list[str] = []
     for path in (sess.client_log_dir / "test_client_1c_out.log", sess.client_log_dir / "test_client_stdout.log"):
         tail = _tail_text_file(path, max_lines=120, max_chars=30000)
         if tail:
-            fragments.append(tail)
+            fragments.append("\n".join(line for line in tail.splitlines() if not _GLIB_LOG_LINE.search(line)))
     if not fragments:
         return ""
 
@@ -6285,6 +6343,22 @@ def _test_client_startup_error_from_logs(sess: SessionState) -> str:
     if meaningful and any(marker in meaningful.lower() for marker in _EVENTLOG_ERROR_MARKERS):
         return meaningful
     return ""
+
+
+_EXTERNAL_OPEN_MODES = {"auto", "open", "record"}
+
+
+def _test_client_env(sess: SessionState) -> dict[str, str] | None:
+    """Extra environment of the test client: the WebKit remote inspector and, on Linux, a non-blocking xdg-open."""
+    env: dict[str, str] = {}
+    if sess.html_agent is not None:
+        env.update(sess.html_agent.client_env())
+    mode = os.getenv("ONEC_MCP_EXTERNAL_OPEN", "auto").strip().lower()
+    if not os_support.IS_WINDOWS and mode in _EXTERNAL_OPEN_MODES:
+        # auto: open in a browser on a real display, only record on Answer42's own Xvfb.
+        open_targets = mode == "open" or (mode == "auto" and sess.client_xvfb_process is None)
+        env.update(runtime.external_open_env(sess.data_dir, open_targets))
+    return env or None
 
 
 async def _wait_for_test_client_process_exit(process: subprocess.Popen[Any]) -> int | None:
@@ -6529,7 +6603,7 @@ async def _connect_test_client_impl(
         log_dir=sess.client_log_dir,
         display=sess.client_display or sess.display,
         log_name=client_stdout_log,
-        extra_env=sess.html_agent.client_env() if sess.html_agent is not None else None,
+        extra_env=_test_client_env(sess),
     )
     sess.test_client_pid = sess.test_client_process.pid
     mark_stage("spawn_test_client_process")
@@ -7100,12 +7174,22 @@ async def html_field_click_link(
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
-    """Raise the 1C hyperlink-click event of an HTML document field (the form's OnClick handler, 1C 8.3.25+)."""
-    return await _bridge_call_recorded(
+    """Raise the 1C hyperlink-click event of an HTML document field (the form's OnClick handler, 1C 8.3.25+).
+
+    When the click makes 1C open a URL or file outside (a browser, a viewer), the
+    result lists it in `external_opens` (Linux); html_download fetches such a file.
+    """
+    started = time.time() - 1
+    result = await _bridge_call_recorded(
         session_id,
         "html_field_click_link",
         {"field_name": field_name, "search_by_title": search_by_title, "link": link, "link_index": link_index},
     )
+    sess = _SESSIONS.get(session_id)
+    opens = runtime.external_opens(sess.data_dir, since=started) if sess is not None else []
+    if opens and isinstance(result, dict):
+        result = {**result, "external_opens": opens}
+    return result
 
 
 @mcp.tool()
@@ -7126,8 +7210,11 @@ async def _html_agent_for(session_id: str) -> html_agent.HtmlInspector:
     sess = await _ensure_restored_session(session_id)
     _touch_session(sess)
     if sess.html_agent is None:
+        if sess.html_disabled:
+            raise ToolError("The HTML page bridge is off: the session was started with html_mode=disabled. "
+                            "For static HTML fields use html_field_content.")
         raise ToolError(
-            "HTML agent is not running for this session (started with html_agent=false, or restored after an MCP server restart): start a new session. "
+            "The HTML page bridge is not running for this session (it was restored after an MCP server restart): start a new session. "
             "For static HTML fields use html_field_content instead."
         )
     return sess.html_agent
@@ -7147,7 +7234,7 @@ async def html_pages(
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
-    """List live web pages in HTML document fields of the client (start_session bridges them unless html_agent=false).
+    """List live web pages in HTML document fields of the client (reached as start_session's html_mode says).
 
     Connects HTML fields that appeared (or reloaded) since the last call (on Windows by typing
     a one-line bridge into their embedded Web Inspector console).
@@ -7278,6 +7365,74 @@ async def html_eval(
     --dev-tools or ONEC_MCP_DEV_TOOLS=1.
     """
     return {"result": await _html_command(session_id, page, "eval", {"code": code}, timeout=max(1, int(timeout)))}
+
+
+_DISPOSITION_NAME = re.compile(r"filename\*\s*=\s*([\w-]+)''([^;]+)|filename\s*=\s*\"?([^\";]+)\"?", re.IGNORECASE)
+
+
+def _download_file_name(disposition: str, url: str) -> str:
+    """File name from Content-Disposition (RFC 5987 first) or the URL path, safe for the file system."""
+    name = ""
+    for charset, encoded, plain in _DISPOSITION_NAME.findall(disposition or ""):
+        if encoded:
+            name = urllib.parse.unquote(encoded.strip(), encoding=charset or "utf-8", errors="replace")
+            break
+        if plain and not name:
+            name = plain.strip()
+    if not name:
+        name = urllib.parse.unquote(urllib.parse.urlsplit(url).path.rsplit("/", 1)[-1])
+    name = re.sub(r'[\\/:*?"<>|\x00-\x1f]+', "_", name).strip(" .")
+    return name[:180] or "download"
+
+
+@mcp.tool()
+async def html_download(
+    selector: Annotated[str, "CSS selector of the link (or an element with href, data-href or src); may be empty when text or url is given"] = "",
+    text: Annotated[str, "Download by the element whose text contains this (e.g. a link caption)"] = "",
+    index: Annotated[int, "Zero-based index among the matches"] = 0,
+    url: Annotated[str, "Download this URL (absolute or relative to the page) instead of an element's link"] = "",
+    max_mb: Annotated[int, "Refuse files larger than this many megabytes"] = 50,
+    timeout: Annotated[int, "Timeout in seconds"] = 120,
+    page: Annotated[str, "Page id or part of its URL/title; may be empty when one page is live"] = "",
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Download the file a link of a live page points to and save it in the session's data directory.
+
+    The request runs inside the page, so its cookies and session apply, and
+    nothing is opened outside the client.  Returns the saved `path`, `filename`,
+    `size`, `content_type`, HTTP `status` and `sha256`; a 4xx/5xx answer is an
+    error.  Cross-origin URLs work only when the server allows the page to
+    read them (CORS).
+    """
+    if not (selector or text or url):
+        raise ToolError("Give selector, text or url")
+    args = {"selector": selector, "text": text, "index": index, "url": url, "max_bytes": max(1, int(max_mb)) * 1024 * 1024}
+    result = await _html_command(session_id, page, "fetch", args, timeout=max(5, int(timeout)))
+    status = int(result.get("status") or 0)
+    data = base64.b64decode(result.get("base64") or "")
+    if not 200 <= status < 300:
+        preview = data[:300].decode("utf-8", errors="replace")
+        raise ToolError(f"HTTP {status or 'error'} for {result.get('url')}: {preview}")
+    sess = _SESSIONS[session_id]
+    folder = sess.data_dir / "downloads"
+    folder.mkdir(parents=True, exist_ok=True)
+    name = _download_file_name(str(result.get("disposition") or ""), str(result.get("url") or url))
+    path = folder / name
+    stem, suffix, number = path.stem, path.suffix, 1
+    while path.exists():
+        number += 1
+        path = folder / f"{stem} ({number}){suffix}"
+    path.write_bytes(data)
+    return {
+        "path": str(path),
+        "filename": path.name,
+        "size": len(data),
+        "content_type": result.get("content_type") or "",
+        "status": status,
+        "url": result.get("url") or url,
+        "sha256": hashlib.sha256(data).hexdigest(),
+    }
 
 
 @mcp.tool()
