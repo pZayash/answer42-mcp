@@ -63,7 +63,7 @@ GROUPS: dict[str, frozenset[str]] = {
     }),
     "html": frozenset({
         "html_pages", "html_text", "html_query", "html_click", "html_type", "html_wait", "html_eval", "html_console",
-        "html_inspector_patch",
+        "html_inspector_patch", "html_download",
     }),
     "recording": frozenset({"recording_start", "recording_capture", "recording_stop"}),
     "credentials": frozenset({"credentials_check", "credentials_save", "credentials_remove", "credentials_list"}),

@@ -33,9 +33,12 @@ import datetime as _dt
 import itertools
 import json
 import logging
+import os
 import secrets
+import shutil
 import socket
 import struct
+import subprocess
 import time
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -194,6 +197,30 @@ OPS_JS = r"""function (op, args) {
       return describe(el, a.index || 0);
     },
     eval: function (a) { return (0, eval)(a.code); },
+    fetch: function (a) {
+      var url = a.url;
+      if (!url) {
+        var el = one(a);
+        url = el.href || el.getAttribute('href') || el.getAttribute('data-href') || el.src || '';
+        if (!url) { throw new Error('the element has no link (href, data-href or src)'); }
+      }
+      var link = document.createElement('a');
+      link.href = url;
+      var x = new XMLHttpRequest();
+      x.open('GET', link.href, false);
+      x.overrideMimeType('text/plain; charset=x-user-defined');
+      x.send(null);
+      var body = x.responseText || '', size = body.length;
+      if (a.max_bytes && size > a.max_bytes) { throw new Error('the file is too large: ' + size + ' bytes, the limit is ' + a.max_bytes); }
+      var chunks = [], step = 0x6000;
+      for (var i = 0; i < size; i += step) {
+        var part = body.substr(i, step), bytes = new Array(part.length);
+        for (var j = 0; j < part.length; j++) { bytes[j] = part.charCodeAt(j) & 0xff; }
+        chunks.push(String.fromCharCode.apply(null, bytes));
+      }
+      return { url: x.responseURL || link.href, status: x.status, content_type: x.getResponseHeader('Content-Type') || '',
+               disposition: x.getResponseHeader('Content-Disposition') || '', size: size, base64: btoa(chunks.join('')) };
+    },
     hook_console: function () {
       if (window.__answer42Console) { return false; }
       var log = window.__answer42Console = [];
@@ -774,14 +801,115 @@ class RemoteInspectorClient:
         return value.get("value")
 
 
+
+# --- Linux, local inspector (html_mode patched) ---
+#
+# 1C opens the WebKitGTK inspector of the focused HTML field on Ctrl+Alt+Shift+F12, docked into
+# the form.  GTK widgets are no X11 windows, so the field gets the focus through the test client
+# (activate_field) and the keys go to the client's window with xdotool (XTEST).  patched: GLib's
+# G_RESOURCE_OVERLAYS replaces one resource of the inspector front end, its localized strings
+# (the UI falls back to the English keys), with a file that also carries the session's port,
+# token and LINUX_BRIDGE_JS; no system file changes and no administrator rights.
+
+INSPECTOR_STRINGS_RESOURCE = "/org/webkit/inspector/Localizations/en.lproj"
+INSPECTOR_STRINGS_FILE = "localizedStrings.js"
+LINUX_INSPECTOR_KEYS = "ctrl+alt+shift+F12"
+
+# Like webkit_patch.BRIDGE_JS, plus the Target domain: WebKitGTK's front end talks to the page
+# through Target.sendMessageToTarget / Target.dispatchMessageFromTarget.
+LINUX_BRIDGE_JS = r"""(function () {
+  var config = window.ANSWER42_BRIDGE;
+  window.ANSWER42_BRIDGE = null;
+  if (!config || !config.port || !config.token) { return; }
+  var BASE_ID = __BASE_ID__;
+  function start() {
+    if (!window.InspectorFrontendAPI || !window.InspectorFrontendHost || !InspectorFrontendAPI.dispatchMessageAsync) { setTimeout(start, 50); return; }
+    var ws = new WebSocket('ws://127.0.0.1:' + config.port + '__PATH__' + config.token), queue = [];
+    function post(obj) { var text = JSON.stringify(obj); if (ws.readyState === 1) { ws.send(text); } else { queue.push(text); } }
+    function parse(message) {
+      if (typeof message !== 'string') { return message; }
+      if (message.indexOf('"id":') < 0 && message.indexOf('"Target.') < 0 && message.indexOf('Console.messageAdded') < 0) { return null; }
+      try { return JSON.parse(message); } catch (e) { return null; }
+    }
+    function divert(obj) {
+      if (!obj) { return false; }
+      if (typeof obj.id === 'number' && obj.id >= BASE_ID) { post({ type: 'message', message: obj }); return true; }
+      if (obj.method === 'Target.dispatchMessageFromTarget') {
+        var inner = obj.params && obj.params.message, o = null;
+        if (typeof inner === 'string' && (inner.indexOf('"id":') >= 0 || inner.indexOf('Console.messageAdded') >= 0)) {
+          try { o = JSON.parse(inner); } catch (e) { o = null; }
+        }
+        if (o && typeof o.id === 'number' && o.id >= BASE_ID) { post({ type: 'message', message: o }); return true; }
+        if (o && o.method === 'Console.messageAdded') { post({ type: 'event', message: o }); }
+        return false;
+      }
+      if (obj.method && obj.method.indexOf('Target.') === 0) { post({ type: 'target', message: obj }); }
+      if (obj.method === 'Console.messageAdded') { post({ type: 'event', message: obj }); }
+      return false;
+    }
+    ['dispatchMessageAsync', 'dispatchMessage'].forEach(function (name) {
+      var original = InspectorFrontendAPI[name];
+      if (!original) { return; }
+      InspectorFrontendAPI[name] = function (message) {
+        if (divert(parse(message))) { return undefined; }
+        return original.apply(this, arguments);
+      };
+    });
+    ws.onopen = function () { ws.send(JSON.stringify({ type: 'hello', version: 1 })); while (queue.length) { ws.send(queue.shift()); } };
+    ws.onmessage = function (event) {
+      var m;
+      try { m = JSON.parse(event.data); } catch (e) { return; }
+      if (m.type === 'send') { InspectorFrontendHost.sendMessageToBackend(JSON.stringify(m.message)); }
+    };
+  }
+  start();
+})();
+""".replace("__BASE_ID__", str(webkit_patch.BRIDGE_BASE_ID)).replace("__PATH__", webkit_patch.INSPECTOR_PATH)
+
+
+def write_inspector_strings(overlay_dir: Path, port: int = 0, token: str = "") -> None:
+    """The overlay localizedStrings.js: empty strings, the bridge config (or none) and LINUX_BRIDGE_JS."""
+    overlay_dir.mkdir(parents=True, exist_ok=True)
+    config = json.dumps({"port": int(port), "token": token}) if port and token else "null"
+    text = f"var localizedStrings = {{}};\nwindow.ANSWER42_BRIDGE = {config};\n{LINUX_BRIDGE_JS}"
+    tmp = overlay_dir / (INSPECTOR_STRINGS_FILE + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(overlay_dir / INSPECTOR_STRINGS_FILE)
+
+
+def _xdotool(display: str, *args: str) -> subprocess.CompletedProcess:
+    env = {**os.environ, "DISPLAY": display} if display else None
+    return subprocess.run(["xdotool", *args], env=env, capture_output=True, text=True, timeout=30)
+
+
+def _client_x_window(display: str, pid: int) -> str:
+    """The client's main X11 window: the visible window of the pid that has a title."""
+    for window in _xdotool(display, "search", "--pid", str(pid), "--onlyvisible", "--name", "").stdout.split():
+        if _xdotool(display, "getwindowname", window).stdout.strip():
+            return window
+    raise HtmlAgentError(f"No visible window of the test client (pid {pid}) on display {display or '$DISPLAY'}")
+
+
+def _x_keys(display: str, pid: int, *keys: str) -> None:
+    window = _client_x_window(display, pid)
+    _xdotool(display, "windowfocus", "--sync", window)
+    for key in keys:
+        _xdotool(display, "key", "--clearmodifiers", key)
+
+
+
 @dataclass
 class InspectorPage:
     page_id: str
     connection: Any
     hwnd: int = 0
     target: tuple[int, int] | None = None
-    # Windows with webkit_patch: the connection is the inspector front end, not the page.
+    # patched: the connection is the inspector front end, not the page.
     front_end: bool = False
+    # WebKitGTK front end: the page is reached through this target of the Target domain.
+    page_target: str = ""
+    # Linux console / patched: the HTML field the page belongs to.
+    field_name: str = ""
     console_log: list[dict[str, Any]] = field(default_factory=list)
     url: str = ""
     title: str = ""
@@ -798,12 +926,41 @@ class InspectorPage:
         }
 
 
+HTML_MODES = ("auto", "console", "patched", "remote", "disabled")
+
+
+def resolve_mode(mode: str = "auto") -> str:
+    """The way to reach live pages: auto stays auto on Windows (see check_platform), remote on Linux.
+
+    console (Windows): open the embedded Web Inspector with its hot key and type
+    the loader into its console; patched (Windows): the bridge built into the
+    platform's Web Inspector (webkit_patch); remote (Linux): the WebKitGTK remote
+    inspector of a client started with WEBKIT_INSPECTOR_SERVER.
+    """
+    mode = (mode or "auto").strip().lower()
+    if mode not in HTML_MODES:
+        raise HtmlAgentError(f"Unknown html_mode {mode!r}: use {', '.join(HTML_MODES)}")
+    if mode == "auto":
+        return "auto" if os_support.IS_WINDOWS else "remote"
+    if mode == "remote" and os_support.IS_WINDOWS:
+        raise HtmlAgentError("html_mode=remote is for the Linux client (WebKitGTK); on Windows use console or patched")
+    if mode == "console" and not os_support.IS_WINDOWS:
+        # The docked WebKitGTK inspector is no X11 window: keys sent with XTEST go to the focused widget,
+        # which stays the page (its input field), so the loader would be typed and submitted there.
+        raise HtmlAgentError(
+            "html_mode=console is not available on Linux: keys cannot be routed to the WebKitGTK inspector "
+            "console and would land in the page itself; use patched (nothing is typed) or remote"
+        )
+    return mode
+
+
 class HtmlInspector:
     """A session's page bridge server plus the bookkeeping of the client's WebKit views."""
 
     MAX_ATTEMPTS = 2
 
-    def __init__(self) -> None:
+    def __init__(self, mode: str = "auto") -> None:
+        self.mode = resolve_mode(mode)
         self.port = 0
         self.pages: dict[str, InspectorPage] = {}
         self.desktop = ""
@@ -820,8 +977,13 @@ class HtmlInspector:
         self._attempts: dict[int, int] = {}
         self._open_lock = asyncio.Lock()
         self.last_connect: dict[str, Any] = {}  # Windows: timings of the latest page connection
-        # Linux: the client is started with its WebKit remote inspector server on this port.
-        self.remote_port = 0 if os_support.IS_WINDOWS else free_local_port()
+        # remote: the client is started with its WebKit remote inspector server on this port.
+        self.remote_port = free_local_port() if self.mode == "remote" else 0
+        # Linux console / patched: finds and focuses HTML fields through the test client (set by the server).
+        self.field_driver: Any = None
+        self.overlay_dir: Path | None = None  # Linux patched: the session's G_RESOURCE_OVERLAYS directory
+        self._outer: dict[int, int] = {}  # Target.sendMessageToTarget id -> the inner message id
+        self._field_keys: dict[str, int] = {}
         self._remote: RemoteInspectorClient | None = None
 
     async def start(self) -> int:
@@ -845,16 +1007,42 @@ class HtmlInspector:
         self._tokens.clear()
 
     def client_env(self) -> dict[str, str]:
-        """Environment for the test client: Linux clients serve the WebKit remote inspector."""
-        return {"WEBKIT_INSPECTOR_SERVER": f"127.0.0.1:{self.remote_port}"} if self.remote_port else {}
+        """Environment for the test client: the WebKit remote inspector (remote) or the inspector overlay (Linux patched)."""
+        if self.remote_port:
+            return {"WEBKIT_INSPECTOR_SERVER": f"127.0.0.1:{self.remote_port}"}
+        if self._linux_local() and self.mode == "patched" and self.overlay_dir is not None:
+            write_inspector_strings(self.overlay_dir)
+            return {"G_RESOURCE_OVERLAYS": f"{INSPECTOR_STRINGS_RESOURCE}={self.overlay_dir}"}
+        return {}
+
+    def _linux_local(self) -> bool:
+        return not os_support.IS_WINDOWS and self.mode in {"console", "patched"}
 
     def attach(self, desktop: str, pid: int, client_path: str = "") -> None:
         self.desktop, self.client_pid = desktop, int(pid or 0)
         self.client_bin = str(Path(client_path).parent) if client_path else ""
 
-    def uses_patched_inspector(self) -> bool:
-        """Windows: the client's platform has the current webkit_patch bridge (checked on each use)."""
-        return bool(os_support.IS_WINDOWS and self.client_bin and webkit_patch.is_ready(self.client_bin))
+    def check_platform(self, client_path: str) -> None:
+        """Settle auto for this client's platform; fail early when the chosen mode cannot work with it.
+
+        Windows auto prefers the bridge built into the platform's Web Inspector
+        (webkit_patch) when it is installed and current, and types into the
+        console otherwise.
+        """
+        if self.mode == "auto":
+            self.mode = "patched" if webkit_patch.is_ready(Path(client_path).parent) else "console"
+        if self._linux_local():
+            if not shutil.which("xdotool"):  # Ctrl+Alt+Shift+F12 that opens the inspector
+                raise HtmlAgentError(f"html_mode={self.mode} on Linux needs xdotool (apt install xdotool), or use html_mode=remote")
+            return
+        if self.mode == "patched":
+            bin_dir = Path(client_path).parent
+            if not webkit_patch.is_ready(bin_dir):
+                raise HtmlAgentError(
+                    f"html_mode=patched: the Web Inspector of the platform in {bin_dir} has no current Answer42 bridge; "
+                    f"install it with html_inspector_patch(action='install', version='{bin_dir.parent.name}') "
+                    "(or `answer42 webkit-inspector install`), or use html_mode=console"
+                )
 
     def status(self) -> dict[str, Any]:
         return {
@@ -862,7 +1050,7 @@ class HtmlInspector:
             "running": self._server is not None,
             "pages_alive": sum(1 for p in self.pages.values() if not p.closed),
             **({"remote_inspector_port": self.remote_port} if self.remote_port else {}),
-            **({"patched_inspector": self.uses_patched_inspector()} if os_support.IS_WINDOWS else {}),
+            "mode": self.mode,
             **({"last_connect": self.last_connect} if self.last_connect else {}),
             **({"last_error": self.last_error} if self.last_error else {}),
         }
@@ -917,9 +1105,21 @@ class HtmlInspector:
                         waiting.set_result(message)
                 elif message.get("type") == "message":  # a patched front end relays a protocol reply
                     reply = message.get("message") or {}
-                    waiting = self._pending.pop(reply.get("id"), None)
+                    inner = self._outer.pop(reply.get("id"), None)
+                    if inner is not None:  # the Target.sendMessageToTarget reply: only an error matters
+                        waiting = self._pending.pop(inner, None) if "error" in reply else None
+                    else:
+                        waiting = self._pending.pop(reply.get("id"), None)
                     if waiting is not None and not waiting.done():
                         waiting.set_result(reply)
+                elif message.get("type") == "target":  # WebKitGTK front end: the page target and its changes
+                    event = message.get("message") or {}
+                    params = event.get("params") or {}
+                    info = params.get("targetInfo") or {}
+                    if event.get("method") == "Target.targetCreated" and info.get("type") == "page" and not info.get("isProvisional"):
+                        page.page_target = str(info.get("targetId") or "")
+                    elif event.get("method") == "Target.didCommitProvisionalTarget":
+                        page.page_target = str(params.get("newTargetId") or "")
                 elif message.get("type") == "event":  # ... or a console message
                     params = (message.get("message") or {}).get("params") or {}
                     page.console_log.append(console_entry(params.get("message") or {}))
@@ -942,8 +1142,14 @@ class HtmlInspector:
         message_id = next(self._ids)
         if page.front_end:
             message_id += webkit_patch.BRIDGE_BASE_ID  # the front end relays only ids from BRIDGE_BASE_ID
-            outgoing: dict[str, Any] = {"type": "send", "message": {"id": message_id, "method": "Runtime.evaluate", "params": {
-                "expression": expression, "returnByValue": True, "doNotPauseOnExceptionsAndMuteConsole": True}}}
+            evaluate = {"id": message_id, "method": "Runtime.evaluate", "params": {
+                "expression": expression, "returnByValue": True, "doNotPauseOnExceptionsAndMuteConsole": True}}
+            if page.page_target:
+                outer_id = next(self._ids) + webkit_patch.BRIDGE_BASE_ID
+                self._outer[outer_id] = message_id
+                evaluate = {"id": outer_id, "method": "Target.sendMessageToTarget", "params": {
+                    "targetId": page.page_target, "message": json.dumps(evaluate, ensure_ascii=False)}}
+            outgoing: dict[str, Any] = {"type": "send", "message": evaluate}
         else:
             outgoing = {"id": message_id, "expression": expression}
         future = asyncio.get_running_loop().create_future()
@@ -983,9 +1189,12 @@ class HtmlInspector:
         """Bridge every WebKit view of the client that has no live page yet; return new page ids."""
         if not self.client_pid:
             raise HtmlAgentError("The test client is not running for the HTML page bridge")
-        if not os_support.IS_WINDOWS:
+        if self.mode == "remote":
             async with self._open_lock:
                 return await self._open_remote()
+        if self._linux_local():
+            async with self._open_lock:
+                return await self._open_linux_local()
         async with self._open_lock:
             live = {p.hwnd for p in self.pages.values() if not p.closed}
             opened: list[str] = []
@@ -1031,6 +1240,53 @@ class HtmlInspector:
             self.pages[page.page_id] = page
             opened.append(page.page_id)
         return opened
+
+    async def _open_linux_local(self) -> list[str]:
+        """Linux console / patched: open the inspector of each HTML field of the active form without a live page."""
+        if self.field_driver is None:
+            raise HtmlAgentError("The HTML page bridge cannot reach the test client's form fields")
+        live = {p.field_name for p in self.pages.values() if not p.closed}
+        opened: list[str] = []
+        for name in await self.field_driver.html_fields():
+            key = self._field_keys.setdefault(name, len(self._field_keys) + 1)
+            if name in live or self._attempts.get(key, 0) >= self.MAX_ATTEMPTS:
+                continue
+            page = await self._connect_linux(name, key)
+            if page is not None:
+                opened.append(page.page_id)
+        return opened
+
+    async def _connect_linux(self, name: str, key: int) -> InspectorPage | None:
+        self._attempts[key] = self._attempts.get(key, 0) + 1
+        started = time.monotonic()
+        timings: dict[str, Any] = {"field": name, "mode": self.mode}
+        self.last_connect = timings
+        patched = True  # console is refused on Linux (resolve_mode)
+        token, future = self.expect(key, webkit_patch.INSPECTOR_PATH)
+        try:
+            if self.overlay_dir is not None:
+                await asyncio.to_thread(write_inspector_strings, self.overlay_dir, self.port, token)
+            await self.field_driver.focus(name)
+            await asyncio.to_thread(_x_keys, self.desktop, self.client_pid, LINUX_INSPECTOR_KEYS)
+            page = await asyncio.wait_for(future, PATCHED_CONNECT_SECONDS)
+            for _ in range(60):  # the page target arrives right after the front end connects
+                if page.page_target or page.closed:
+                    break
+                await asyncio.sleep(0.05)
+            timings["connected_seconds"] = round(time.monotonic() - started, 2)
+        except (HtmlAgentError, TimeoutError, OSError, subprocess.SubprocessError) as exc:
+            self.last_error = str(exc) or f"The page of HTML field {name} did not connect within the timeout"
+            LOGGER.warning("%s", self.last_error)
+            return None
+        finally:
+            self._tokens.pop(token, None)
+            if patched and self.overlay_dir is not None:
+                await asyncio.to_thread(write_inspector_strings, self.overlay_dir)
+        page.field_name = name
+        self._attempts.pop(key, None)
+        with suppress(HtmlAgentError):
+            await self.refresh(page)
+        return page
 
     async def _front_end(self, view: int) -> int:
         """The docked inspector front end of ``view``, opening the inspector when needed."""
@@ -1080,14 +1336,20 @@ class HtmlInspector:
         started = time.monotonic()
         timings: dict[str, Any] = {"view": view, "typed": 0}
         self.last_connect = timings
-        if view not in self._front_ends and self.uses_patched_inspector():
+        if self.mode == "patched":
+            if view in self._front_ends and self._front_ends[view] in set(await self._views()):
+                self.last_error = (f"The inspector of WebKit view {view} is open without the Answer42 bridge "
+                                   "(it was opened before or its bridge closed): close it and call again")
+                return None
             patched = await self._connect_patched(view, timings)
-            if patched is not None:
-                self._attempts.pop(view, None)
-                with suppress(HtmlAgentError):
-                    await self.refresh(patched)
-                return patched
-            # The inspector is open now (or failed to open): fall back to the console loader.
+            if patched is None:
+                self.last_error = str(timings.get("patched_error") or "the patched inspector did not connect")
+                LOGGER.warning("%s", self.last_error)
+                return None
+            self._attempts.pop(view, None)
+            with suppress(HtmlAgentError):
+                await self.refresh(patched)
+            return patched
         token, future = self.expect(view)
         try:
             front_end = await self._front_end(view)

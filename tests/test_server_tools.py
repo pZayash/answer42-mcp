@@ -1872,6 +1872,35 @@ def test_test_client_startup_error_from_logs_prefers_auth_error(tmp_path):
     assert _test_client_startup_error_from_logs(sess) == "Пользователь ИБ не идентифицирован"
 
 
+def test_test_client_startup_error_from_logs_ignores_glib_warnings(tmp_path):
+    # WebKitGTK warns like this whenever a remote inspector connection closes, e.g. when a session stops.
+    sess = _session_with_client_log_dir(tmp_path)
+    (sess.client_log_dir / "test_client_stdout.log").write_text(
+        "** (1cv8c:1357799): WARNING **: 18:44:27.844: Error sending message on socket connection: "
+        "Error sending data: Broken pipe\n"
+        "(1cv8c:1357799): Gtk-WARNING **: 18:44:28.001: Theme parsing error: gtk.css:1:1: failed\n",
+        encoding="utf-8",
+    )
+    assert _test_client_startup_error_from_logs(sess) == ""
+
+    (sess.client_log_dir / "test_client_stdout.log").write_text(
+        "** (1cv8c:1): WARNING **: 18:44:27.844: Error sending message on socket connection\n"
+        "Ошибка при выполнении операции с информационной базой\n",
+        encoding="utf-8",
+    )
+    assert _test_client_startup_error_from_logs(sess) == "Ошибка при выполнении операции с информационной базой"
+
+
+def test_start_test_client_starts_a_clean_stdout_log(tmp_path):
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    (log_dir / "test_client_stdout.log").write_text("Error: from the previous client\n", encoding="utf-8")
+    proc = runtime.start_test_client([sys.executable, "-c", "print('started')"], log_dir)
+    proc.wait(timeout=30)
+    assert (log_dir / "test_client_stdout.log").read_text(encoding="utf-8").strip() == "started"
+    assert (log_dir / "test_client_stdout.log.previous").read_text(encoding="utf-8") == "Error: from the previous client\n"
+
+
 def test_decode_log_bytes_supports_windows_utf16le_without_bom():
     text = "ordinary startup line\nПользователь ИБ не идентифицирован\nmore details\n"
 

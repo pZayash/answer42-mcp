@@ -261,3 +261,128 @@ def test_console_through_the_page_bridge():
 
 async def _no_new_pages():
     return []
+
+
+@pytest.mark.parametrize(("windows", "mode", "expected"), [
+    (True, "auto", "auto"), (True, "", "auto"), (True, "Console", "console"), (True, "patched", "patched"),
+    (False, "auto", "remote"), (False, "remote", "remote"), (False, "patched", "patched"),
+    (True, "disabled", "disabled"), (False, "disabled", "disabled"),
+])
+def test_resolve_mode(monkeypatch, windows, mode, expected):
+    monkeypatch.setattr(html_agent.os_support, "IS_WINDOWS", windows)
+    assert html_agent.resolve_mode(mode) == expected
+
+
+@pytest.mark.parametrize(("windows", "mode", "message"), [
+    (True, "remote", "Linux"), (True, "off", "Unknown"), (False, "off", "Unknown"),
+    (False, "console", "not available on Linux"),  # XTEST keys would land in the page, not the inspector
+])
+def test_resolve_mode_rejects_modes_of_the_other_platform(monkeypatch, windows, mode, message):
+    monkeypatch.setattr(html_agent.os_support, "IS_WINDOWS", windows)
+    with pytest.raises(html_agent.HtmlAgentError, match=message):
+        html_agent.resolve_mode(mode)
+
+
+def test_patched_mode_needs_the_bridge_in_the_platform(tmp_path, monkeypatch):
+    monkeypatch.setattr(html_agent.os_support, "IS_WINDOWS", True)
+    inspector = html_agent.HtmlInspector("patched")
+    assert inspector.remote_port == 0 and inspector.status()["mode"] == "patched"
+    with pytest.raises(html_agent.HtmlAgentError, match="html_inspector_patch"):
+        inspector.check_platform(str(tmp_path / "8.5.1.1343" / "bin" / "1cv8c.exe"))
+    html_agent.HtmlInspector("console").check_platform(str(tmp_path / "1cv8c.exe"))  # console needs nothing
+
+
+def test_windows_auto_prefers_the_patched_inspector(tmp_path, monkeypatch):
+    from mcp_1c import webkit_patch
+
+    monkeypatch.setattr(html_agent.os_support, "IS_WINDOWS", True)
+    bin_dir = tmp_path / "8.5.1.1343" / "bin"
+    ui = webkit_patch.ui_dir(bin_dir)
+    ui.mkdir(parents=True)
+    (ui / "Main.html").write_text("<html><head></head></html>", encoding="utf-8")
+    plain = html_agent.HtmlInspector("auto")
+    plain.check_platform(str(bin_dir / "1cv8c.exe"))
+    assert plain.mode == "console"
+    webkit_patch._apply_install(bin_dir)
+    patched = html_agent.HtmlInspector("auto")
+    patched.check_platform(str(bin_dir / "1cv8c.exe"))
+    assert patched.mode == "patched"
+
+
+def test_linux_patched_mode_overlays_the_inspector_strings(tmp_path, monkeypatch):
+    monkeypatch.setattr(html_agent.os_support, "IS_WINDOWS", False)
+    inspector = html_agent.HtmlInspector("patched")
+    inspector.overlay_dir = tmp_path / "overlay"
+    env = inspector.client_env()
+    assert env == {"G_RESOURCE_OVERLAYS": f"{html_agent.INSPECTOR_STRINGS_RESOURCE}={tmp_path / 'overlay'}"}
+    strings = (tmp_path / "overlay" / html_agent.INSPECTOR_STRINGS_FILE).read_text(encoding="utf-8")
+    assert strings.startswith("var localizedStrings = {};") and "window.ANSWER42_BRIDGE = null;" in strings
+    html_agent.write_inspector_strings(tmp_path / "overlay", 4321, "tok")
+    strings = (tmp_path / "overlay" / html_agent.INSPECTOR_STRINGS_FILE).read_text(encoding="utf-8")
+    assert 'window.ANSWER42_BRIDGE = {"port": 4321, "token": "tok"};' in strings and "Target.dispatchMessageFromTarget" in strings
+    assert html_agent.HtmlInspector("remote").client_env()["WEBKIT_INSPECTOR_SERVER"].startswith("127.0.0.1:")
+
+
+def test_linux_local_modes_need_xdotool(monkeypatch):
+    monkeypatch.setattr(html_agent.os_support, "IS_WINDOWS", False)
+    monkeypatch.setattr(html_agent.shutil, "which", lambda name: None)
+    with pytest.raises(html_agent.HtmlAgentError, match="xdotool"):
+        html_agent.HtmlInspector("patched").check_platform("/opt/1cv8/x86_64/8.5.1.1343/1cv8c")
+    html_agent.HtmlInspector("remote").check_platform("/opt/1cv8/x86_64/8.5.1.1343/1cv8c")  # remote needs nothing
+
+
+async def _fake_gtk_front_end(port, token, inner_results, outer_error=False):
+    """A WebKitGTK front end: the page is the target page-7, replies come back inside it."""
+    url = f"ws://127.0.0.1:{port}{html_agent.webkit_patch.INSPECTOR_PATH}{token}"
+    async with websockets.connect(url) as ws:
+        await ws.send(json.dumps({"type": "hello", "version": 1}))
+        await ws.send(json.dumps({"type": "target", "message": {"method": "Target.targetCreated", "params": {
+            "targetInfo": {"targetId": "page-7", "type": "page"}}}}))
+        async for raw in ws:
+            outer = json.loads(raw)["message"]
+            assert outer["method"] == "Target.sendMessageToTarget" and outer["params"]["targetId"] == "page-7"
+            inner = json.loads(outer["params"]["message"])
+            assert inner["method"] == "Runtime.evaluate" and inner["id"] != outer["id"]
+            if outer_error:
+                await ws.send(json.dumps({"type": "message", "message": {"id": outer["id"], "error": {"message": "No target"}}}))
+                return
+            await ws.send(json.dumps({"type": "message", "message": {"id": outer["id"], "result": {}}}))
+            await ws.send(json.dumps({"type": "message", "message": {"id": inner["id"], "result": inner_results.pop(0)}}))
+            if not inner_results:
+                return
+
+
+def test_gtk_front_end_bridge_goes_through_the_target_domain():
+    async def scenario():
+        inspector = html_agent.HtmlInspector()
+        port = await inspector.start()
+        try:
+            token, connected = inspector.expect(hwnd=1, path=html_agent.webkit_patch.INSPECTOR_PATH)
+            front = asyncio.create_task(_fake_gtk_front_end(port, token, [_value({"ok": True, "result": "hello"})]))
+            page = await asyncio.wait_for(connected, 5)
+            for _ in range(50):
+                if page.page_target:
+                    break
+                await asyncio.sleep(0.02)
+            text = await inspector.run(page, "text", {}, timeout=5)
+            await front
+            token, connected = inspector.expect(hwnd=2, path=html_agent.webkit_patch.INSPECTOR_PATH)
+            front = asyncio.create_task(_fake_gtk_front_end(port, token, [], outer_error=True))
+            failing = await asyncio.wait_for(connected, 5)
+            for _ in range(50):
+                if failing.page_target:
+                    break
+                await asyncio.sleep(0.02)
+            with pytest.raises(html_agent.HtmlAgentError, match="No target"):
+                await inspector.run(failing, "text", {}, timeout=5)
+            await front
+            return page, text
+        finally:
+            await inspector.stop()
+
+    page, text = asyncio.run(scenario())
+    assert page.page_target == "page-7" and text == "hello"
+
+
+def _value(value):
+    return {"result": {"type": "object", "value": value}, "wasThrown": False}

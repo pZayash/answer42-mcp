@@ -18,6 +18,7 @@ import shutil
 import socket
 import subprocess
 import time
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -781,6 +782,69 @@ def build_test_client_argv(
     return argv
 
 
+EXTERNAL_OPEN_LOG_NAME = "external_open.log"
+
+# 1C opens URLs and files with `sh -c xdg-open ...` and waits for it, and xdg-open waits for a
+# browser it has to start (the first Chrome instance runs until it is closed): the client hangs
+# until then, and with it the bridge and the WebKit remote inspector.  The wrapper records the
+# target, starts the real xdg-open detached when asked to, and returns at once.
+_XDG_OPEN_WRAPPER = """#!/bin/sh
+# Answer42 (mcp_1c.runtime.external_open_env): 1C waits for xdg-open, which waits for a browser it starts.
+printf '%s\\t%s\\n' "$(date +%s)" "$*" >> "$ANSWER42_EXTERNAL_OPEN_LOG" 2>/dev/null
+if [ "$ANSWER42_EXTERNAL_OPEN" = "open" ]; then
+  if command -v setsid >/dev/null 2>&1; then
+    PATH="$ANSWER42_REAL_PATH" setsid xdg-open "$@" >/dev/null 2>&1 </dev/null &
+  else
+    PATH="$ANSWER42_REAL_PATH" nohup xdg-open "$@" >/dev/null 2>&1 </dev/null &
+  fi
+fi
+exit 0
+"""
+
+
+def external_open_env(data_dir: Path, open_targets: bool) -> dict[str, str]:
+    """Linux: environment that gives the test client Answer42's non-blocking xdg-open.
+
+    ``open_targets`` false only records what 1C asked to open (headless sessions:
+    a browser on Answer42's own Xvfb is of no use to anyone).
+    """
+    if os_support.IS_WINDOWS:
+        return {}
+    bin_dir = data_dir / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    wrapper = bin_dir / "xdg-open"
+    wrapper.write_text(_XDG_OPEN_WRAPPER, encoding="utf-8")
+    wrapper.chmod(0o755)
+    log = data_dir / "logs-client" / EXTERNAL_OPEN_LOG_NAME
+    log.unlink(missing_ok=True)  # a new client: earlier sessions' opens are not its own
+    real_path = os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")
+    return {
+        "PATH": f"{bin_dir}{os.pathsep}{real_path}",
+        "ANSWER42_REAL_PATH": real_path,
+        "ANSWER42_EXTERNAL_OPEN_LOG": str(log),
+        "ANSWER42_EXTERNAL_OPEN": "open" if open_targets else "record",
+    }
+
+
+def external_opens(data_dir: Path, since: float = 0.0, limit: int = 20) -> list[dict[str, Any]]:
+    """What the test client asked xdg-open to open (latest last)."""
+    path = data_dir / "logs-client" / EXTERNAL_OPEN_LOG_NAME
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    found: list[dict[str, Any]] = []
+    for line in lines:
+        stamp, _, target = line.partition("\t")
+        try:
+            moment = float(stamp)
+        except ValueError:
+            continue
+        if moment >= since and target:
+            found.append({"time": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(moment)), "target": target})
+    return found[-limit:]
+
+
 def start_test_client(
     argv: list[str],
     log_dir: Path,
@@ -793,7 +857,11 @@ def start_test_client(
         raise FileNotFoundError(f"1cv8c (thin) not found: {argv[0]}")
     log_dir.mkdir(parents=True, exist_ok=True)
     stdout_log_path = log_dir / log_name
-    with stdout_log_path.open("ab", buffering=0) as log_handle:
+    # Startup diagnostics read this file: a previous client's lines must not look like this one's.
+    if stdout_log_path.exists():
+        with suppress(OSError):
+            stdout_log_path.replace(stdout_log_path.with_name(stdout_log_path.name + ".previous"))
+    with stdout_log_path.open("wb", buffering=0) as log_handle:
         LOGGER.info("Starting test client: %s", " ".join(argv))
         proc = _popen_on_display(
             argv,
