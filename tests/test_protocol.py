@@ -468,7 +468,6 @@ def test_manager_cf_passes_1c_configurator_syntax_check(tmp_path):
         "apply",
         f"--db-path={db_path}",
         "--force",
-        "--dynamic=force",
         "--session-terminate=force",
     ], timeout=300, input_text="3\n")
     assert apply.returncode == 0, apply.stdout + apply.stderr

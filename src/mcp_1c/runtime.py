@@ -355,14 +355,18 @@ def load_configuration(
 
 
 def apply_configuration(ibcmd: str, db_path: Path, timeout: float = 120.0) -> None:
-    """Apply the loaded configuration to the infobase database configuration."""
+    """Apply the loaded configuration to the infobase database configuration.
+
+    The infobase is always freshly created, so no dynamic update is needed:
+    `--dynamic=force` makes ibcmd 8.5.4 fail right after a successful update
+    ("base != nullptr", GenerationsStorageImpl.cpp).
+    """
     argv = [
         ibcmd,
         "config",
         "apply",
         "--db-path=" + str(db_path),
         "--force",
-        "--dynamic=force",
         "--session-terminate=force",
     ]
     LOGGER.info("Applying configuration to %s", db_path)
