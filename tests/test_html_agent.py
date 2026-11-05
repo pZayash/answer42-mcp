@@ -1,6 +1,7 @@
 import asyncio
 import json
 import struct
+import time
 
 import pytest
 import websockets
@@ -386,3 +387,46 @@ def test_gtk_front_end_bridge_goes_through_the_target_domain():
 
 def _value(value):
     return {"result": {"type": "object", "value": value}, "wasThrown": False}
+
+
+def _fake_windows(monkeypatch, inspector, views, opens_on_press):
+    """Fake client windows: the inspector front end appears on the given press of the hot key."""
+    presses = []
+
+    def press(view):
+        presses.append(view)
+        if len(presses) == opens_on_press:
+            views.append(900)
+
+    monkeypatch.setattr(html_agent, "HOTKEY_REPEAT_SECONDS", 0.2)
+    monkeypatch.setattr(html_agent, "INSPECTOR_OPEN_SECONDS", 2.0)
+    monkeypatch.setattr(html_agent, "_run_on_client_desktop", lambda desktop, fn: fn())
+    monkeypatch.setattr(html_agent, "_press_inspector_hotkey", press)
+    monkeypatch.setattr(html_agent, "find_inspector_windows",
+                        lambda desktop, pid: {901: "Web Inspector — about:blank"} if 900 in views else {})
+
+    async def current_views():
+        return list(views)
+
+    monkeypatch.setattr(inspector, "_views", current_views)
+    return presses
+
+
+def test_front_end_repeats_a_missed_inspector_hot_key(monkeypatch):
+    inspector = html_agent.HtmlInspector()
+    views = [100]
+    presses = _fake_windows(monkeypatch, inspector, views, opens_on_press=2)
+    front_end = asyncio.run(inspector._front_end(100))
+    assert front_end == 900 and presses == [100, 100]
+    assert 900 in inspector._known_front_ends
+
+
+def test_front_end_reports_a_view_that_disappeared(monkeypatch):
+    inspector = html_agent.HtmlInspector()
+    views = [100]
+    _fake_windows(monkeypatch, inspector, views, opens_on_press=0)
+    views.clear()  # the client recreated the field: its old view is gone
+    started = time.monotonic()
+    with pytest.raises(html_agent.ViewGoneError):
+        asyncio.run(inspector._front_end(100))
+    assert time.monotonic() - started < 1.0
