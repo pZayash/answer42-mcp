@@ -5141,6 +5141,8 @@ def sessions_list() -> dict[str, Any]:
             "configuration_name": sess.configuration_name,
             "configuration_version": sess.configuration_version,
             "extension_names": sess.extension_names,
+            # пустой список без загрузки каталога значит "не определено", а не "расширений нет": его заполняют installed_extensions_from_catalog и RAG
+            "extension_names_loaded": bool(sess.installed_extensions_cache or sess.extension_names),
             "idle_timeout_seconds": sess.idle_timeout_seconds,
         })
     return {"count": len(items), "sessions": items}
@@ -5214,6 +5216,8 @@ def session_status(*,
         "configuration_name": sess.configuration_name,
         "configuration_version": sess.configuration_version,
         "extension_names": sess.extension_names,
+        # пустой список без загрузки каталога значит "не определено", а не "расширений нет": его заполняют installed_extensions_from_catalog и RAG
+        "extension_names_loaded": bool(sess.installed_extensions_cache or sess.extension_names),
         "idle_timeout_seconds": sess.idle_timeout_seconds,
         **({"external_opens": opens} if (opens := runtime.external_opens(sess.data_dir)) else {}),
     }
@@ -5691,6 +5695,8 @@ async def start_session(
         "configuration_name": sess.configuration_name,
         "configuration_version": sess.configuration_version,
         "extension_names": sess.extension_names,
+        # пустой список без загрузки каталога значит "не определено", а не "расширений нет": его заполняют installed_extensions_from_catalog и RAG
+        "extension_names_loaded": bool(sess.installed_extensions_cache or sess.extension_names),
         "web_runtime_probe": web_runtime_probe,
         "idle_timeout_seconds": sess.idle_timeout_seconds,
         "test_client": _compact_start_test_client_result(connect_result, include_timings=include_timings), **pipeline_info,
