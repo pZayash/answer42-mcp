@@ -54,6 +54,7 @@ LOGGER = logging.getLogger(__name__)
 WEBVIEW_CLASS = "WebViewWindowClass"
 INSPECTOR_WINDOW_CLASS = "WebInspectorWindowClass"
 INSPECTOR_OPEN_SECONDS = 10.0  # only a limit: the first opening after a cold start can take several seconds
+HOTKEY_REPEAT_SECONDS = 3.0  # no new front end by then: press the inspector hot key again
 CONNECT_TIMEOUT_SECONDS = 15.0
 # The first evaluation in a fresh console can take a second; then the loader is typed again.
 RETYPE_SECONDS = 2.0
@@ -297,6 +298,10 @@ OPS_JS = r"""function (op, args) {
 
 class HtmlAgentError(RuntimeError):
     pass
+
+
+class ViewGoneError(HtmlAgentError):
+    """The WebKit view was destroyed (the client recreated the field) before its inspector opened."""
 
 
 def _protocol_value(reply: dict[str, Any]) -> Any:
@@ -975,6 +980,7 @@ class HtmlInspector:
         self._front_ends: dict[int, int] = {}
         self._known_front_ends: set[int] = set()
         self._attempts: dict[int, int] = {}
+        self._view_gone = False  # Windows: a view disappeared while open_inspectors was opening it
         self._open_lock = asyncio.Lock()
         self.last_connect: dict[str, Any] = {}  # Windows: timings of the latest page connection
         # remote: the client is started with its WebKit remote inspector server on this port.
@@ -1196,14 +1202,19 @@ class HtmlInspector:
             async with self._open_lock:
                 return await self._open_linux_local()
         async with self._open_lock:
-            live = {p.hwnd for p in self.pages.values() if not p.closed}
             opened: list[str] = []
-            for view in await self._views():
-                if view in self._known_front_ends or view in live or self._attempts.get(view, 0) >= self.MAX_ATTEMPTS:
-                    continue
-                page = await self._connect(view)
-                if page is not None:
-                    opened.append(page.page_id)
+            # A second pass picks up the view that replaced one which disappeared while it was opened.
+            for _ in range(2):
+                self._view_gone = False
+                live = {p.hwnd for p in self.pages.values() if not p.closed}
+                for view in await self._views():
+                    if view in self._known_front_ends or view in live or self._attempts.get(view, 0) >= self.MAX_ATTEMPTS:
+                        continue
+                    page = await self._connect(view)
+                    if page is not None:
+                        opened.append(page.page_id)
+                if not self._view_gone:
+                    break
             return opened
 
     async def _open_remote(self) -> list[str]:
@@ -1297,11 +1308,20 @@ class HtmlInspector:
         inspectors = set(await asyncio.to_thread(find_inspector_windows, self.desktop, self.client_pid))
         await asyncio.to_thread(_run_on_client_desktop, self.desktop, lambda: _press_inspector_hotkey(view))
         deadline = time.monotonic() + INSPECTOR_OPEN_SECONDS
+        repress_at = time.monotonic() + HOTKEY_REPEAT_SECONDS
         new: set[int] = set()
         loaded = False
         while not (new and loaded) and time.monotonic() < deadline:
             await asyncio.sleep(0.05)
-            new = new or set(await self._views()) - views
+            current = set(await self._views())
+            new = new or current - views
+            if not new and view not in current:
+                raise ViewGoneError(f"WebKit view {view} disappeared before its inspector opened")
+            if not new and time.monotonic() >= repress_at:
+                # A hot key the field missed (seen once right after a modal dialog closed) is not
+                # repeated by anyone else; pressing it again is harmless: one inspector opens either way.
+                await asyncio.to_thread(_run_on_client_desktop, self.desktop, lambda: _press_inspector_hotkey(view))
+                repress_at = time.monotonic() + HOTKEY_REPEAT_SECONDS
             titles = await asyncio.to_thread(find_inspector_windows, self.desktop, self.client_pid)
             loaded = any(title for hwnd, title in titles.items() if hwnd not in inspectors)
         # Whatever appeared is a front end and must never be inspected itself.
@@ -1366,6 +1386,9 @@ class HtmlInspector:
         except (HtmlAgentError, TimeoutError) as exc:
             self.last_error = str(exc) or f"The page of WebKit view {view} did not connect within {CONNECT_TIMEOUT_SECONDS:g}s"
             LOGGER.warning("%s", self.last_error)
+            if isinstance(exc, ViewGoneError):
+                self._view_gone = True
+                self._attempts.pop(view, None)
             return None
         finally:
             self._tokens.pop(token, None)
