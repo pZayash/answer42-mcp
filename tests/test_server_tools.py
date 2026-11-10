@@ -2618,7 +2618,7 @@ def test_ui_tree_tool_schema_defaults_and_new_arguments():
     assert props["include_data"]["default"] is False
     assert props["include_rag_types"]["default"] == "auto"
     assert props["profile"]["default"] == "navigation"
-    assert props["format"]["default"] == "json"
+    assert props["format"]["default"] == "outline"
     assert props["command_panels"]["default"] == "auto"
     assert props["group_mode"]["default"] == "include"
     assert props["name"]["default"] == ""
@@ -2714,7 +2714,7 @@ def test_ui_tree_default_params_and_filtered_flat_result(monkeypatch):
 
     monkeypatch.setattr("mcp_1c.server._bridge_call_recorded", fake_bridge_call)
 
-    result = asyncio.run(ui_tree(name="Товары", fields="minimal", session_id="unit"))
+    result = asyncio.run(ui_tree(name="Товары", fields="minimal", format="json", session_id="unit"))
 
     assert calls == [("unit", "ui_tree", {"include_hidden": False, "include_data": False, "include_command_panels": False, "include_timings": False, "include_visibility_state": True, "include_availability_state": False, "include_read_only_state": False, "include_current_state": False, "flat": True, "name": "Товары", "title": "", "type": ""})]
     assert result["found"] is True
@@ -2744,8 +2744,8 @@ def test_ui_tree_timings_are_opt_in(monkeypatch):
 
     monkeypatch.setattr("mcp_1c.server._bridge_call_recorded", fake_bridge_call)
 
-    without_timings = asyncio.run(ui_tree(session_id="unit"))
-    with_timings = asyncio.run(ui_tree(include_timings=True, session_id="unit"))
+    without_timings = asyncio.run(ui_tree(format="json", session_id="unit"))
+    with_timings = asyncio.run(ui_tree(include_timings=True, format="json", session_id="unit"))
 
     assert "_timings" not in without_timings
     assert with_timings["_timings"]["onec"] == {"active_window_ms": 1, "serialize_tree_ms": 9, "total_ms": 10}
@@ -2791,7 +2791,7 @@ def test_ui_tree_parent_not_found_result(monkeypatch):
 
     monkeypatch.setattr("mcp_1c.server._bridge_call_recorded", fake_bridge_call)
 
-    result = asyncio.run(ui_tree(parent_name="НетТакого", session_id="unit"))
+    result = asyncio.run(ui_tree(parent_name="НетТакого", format="json", session_id="unit"))
 
     assert result["found"] is False
     assert result["reason"] == "parent_not_found"
@@ -2809,7 +2809,7 @@ def test_ui_tree_profile_full_enables_expensive_options(monkeypatch):
 
     monkeypatch.setattr("mcp_1c.server._bridge_call_recorded", fake_bridge_call)
 
-    result = asyncio.run(ui_tree(profile="full", include_rag_types=False, session_id="unit"))
+    result = asyncio.run(ui_tree(profile="full", include_rag_types=False, format="json", session_id="unit"))
 
     assert calls == [{
         "include_hidden": False,
@@ -4099,7 +4099,7 @@ def test_ui_tree_rag_enrichment_scopes_lookup_by_active_form(monkeypatch, tmp_pa
     monkeypatch.setattr(server, "_RAG", dummy_rag)
     monkeypatch.setattr(server, "_bridge_call_recorded", fake_bridge_call)
 
-    result = asyncio.run(ui_tree(include_rag_types=True, name="Организация", fields="full", session_id="unit_rag_ui"))
+    result = asyncio.run(ui_tree(include_rag_types=True, name="Организация", fields="full", format="json", session_id="unit_rag_ui"))
 
     assert dummy_rag.calls == [{"snapshot": "summary:bp:test", "object_full_name": "Документ.РеализацияТоваровУслуг"}]
     assert result["objects"][0]["rag_type"] == "CatalogRef.Организации"
