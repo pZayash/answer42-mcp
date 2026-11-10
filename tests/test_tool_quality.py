@@ -515,3 +515,151 @@ def test_creation_window_is_recognised_in_english_interface():
     result = {"set": True, "client_diagnostics": {"active_window_changed": True, "active_window_title": "Sales order (create)", "active_form_name": "Документ.ЗаказКлиента.Форма.ФормаДокумента"}}
     normalized = _normalize_creation_window_result(result, create_if_missing=True)
     assert normalized["set"] is False and normalized["window_opened"] is True
+
+
+# --- token economy of responses --------------------------------------------
+
+
+def _sent(payload, tool="x", arguments=None):
+    return json.loads(server._compact_tool_result(_text_result(payload), tool, arguments or {}).content[0].text)
+
+
+def test_table_rows_are_columnar_and_mark_cut_cells():
+    rows = {"found": True, "count": 2, "rows": [
+        {"values": {"Имя": "А", "Комментарий": "x" * 20}},
+        {"values": {"Имя": "Б", "Комментарий": ""}},
+    ]}
+    full = server._columnar_rows_result(rows, max_cell_chars=0)
+    assert full["columns"] == ["Имя", "Комментарий"]
+    assert full["rows"] == [["А", "x" * 20], ["Б", ""]]
+    assert "truncated_cells" not in full and "rows_count" not in full
+
+    cut = server._columnar_rows_result(rows, max_cell_chars=5)
+    assert cut["rows"][0][1] == "xxxxx…[+15 chars]"
+    assert cut["truncated_cells"] == 1 and "max_cell_chars=0" in cut["truncation"]
+
+    picked = server._columnar_rows_result(rows, columns=" имя , Нет", max_cell_chars=0)
+    assert picked["columns"] == ["Имя"] and picked["rows"] == [["А"], ["Б"]]
+    assert picked["other_columns"] == ["Комментарий"] and picked["unknown_columns"] == ["Нет"]
+
+
+def test_table_rows_keep_row_attributes():
+    rows = {"rows": [{"index": 3, "current": True, "values": {"Имя": "А"}}]}
+    assert server._columnar_rows_result(rows)["rows"] == [{"index": 3, "current": True, "cells": ["А"]}]
+
+
+def test_repeated_column_titles_do_not_overwrite_each_other():
+    pairs = [{"key": "Сумма", "value": "1"}, {"key": "Сумма", "value": "2"}, {"key": "", "value": ""}]
+    assert server._row_values_from_pairs(pairs) == {"Сумма": "1", "Сумма (2)": "2"}
+
+
+def test_single_rows_are_sent_as_values_once():
+    row = {"available": True, "pairs": [{"key": "Имя", "value": "А"}, {"key": "Код", "value": ""}]}
+    sent = _sent({"selected": True, "current_row": row, "positioning": {"found": True, "index": 5, "row": row}})
+    assert sent["current_row"] == {"available": True, "values": {"Имя": "А", "Код": ""}}
+    assert sent["positioning"] == {"found": True, "index": 5}
+    assert _sent({"current_row": row}, arguments={"compact": False})["current_row"] == row
+
+    cell = _sent({"found": True, "cell": {"cell_text": "А", "current_row": row}}, "table_cell_text")
+    assert cell["cell"] == {"cell_text": "А"}
+
+
+def test_search_diagnostics_are_sent_only_with_timings():
+    payload = {"pressed": True, "search_ms": 3, "press_ms": 5, "search_stats": {"nodes": 0}}
+    assert _sent(payload, "click_button") == {"pressed": True}
+    assert _sent(payload, "click_button", {"include_timings": True}) == payload
+
+
+def test_unchanged_window_state_is_not_repeated():
+    diagnostics = {"active_window_title": "Б", "active_form_name": "Форма.Б"}
+    same = {
+        "pressed": True, "window_title_before": "А", "window_title_after": "А", "form_name_before": "Ф",
+        "form_name_after": "Ф", "window_changed": False,
+    }
+    assert _sent(same) == {"pressed": True, "window_changed": False}
+    changed = {
+        "closed": True, "window_title_before": "", "window_title_after": "Б", "form_name_before": "Форма.А",
+        "form_name_after": "Форма.Б", "window_changed": True, "client_diagnostics": diagnostics,
+    }
+    assert _sent(changed) == {
+        "closed": True, "form_name_before": "Форма.А", "window_changed": True, "client_diagnostics": diagnostics,
+    }
+    undiagnosed = {"window_title_before": "А", "window_title_after": "Б"}
+    assert _sent(undiagnosed) == undiagnosed
+
+
+def test_start_session_response_keeps_what_the_caller_acts_on():
+    window = {"type": "Тестируемое окно клиентского приложения", "title": "Окно"}
+    payload = {
+        "session_id": "s", "version": "8.5.1.1", "platform_dir": "C:/1c", "display": "d", "client_display": "c",
+        "ws_port": 1, "ibsrv_port": 2, "testclient_port": 3, "data_dir": "x", "bridge_url": "ws://", "manager_pid": 4,
+        "ws_url": "http://", "log_dir": "l", "rag_snapshot": "", "rag_enabled": False, "server_rag_enabled": True,
+        "rag_notice": {
+            "enabled": False, "auto": True, "summary_backend": {"enabled": True}, "layers": [], "reason": "r", "message": "r",
+        },
+        "configuration_name": "БП", "configuration_version": "3.0", "extension_names": [], "extension_names_loaded": False,
+        "web_runtime_probe": {"attempted": False, "status": "not_applicable"}, "idle_timeout_seconds": 60,
+        "test_client": {
+            "connected": True, "base_url": "b", "connection_mode": "ws", "port": 3, "client_pid": 5, "client_log": "log",
+            "auto_maximize": {"ok": True}, "maximized": {"maximized": True, "method": "m", "window": window},
+        },
+    }
+    assert _sent(payload, "start_session") == {
+        "session_id": "s", "version": "8.5.1.1", "rag_enabled": False, "rag_notice": {"enabled": False, "reason": "r"},
+        "configuration_name": "БП", "configuration_version": "3.0", "extension_names": [], "extension_names_loaded": False,
+        "idle_timeout_seconds": 60, "test_client": {"connected": True, "base_url": "b", "window": window},
+    }
+    probed = _sent({"web_runtime_probe": {"attempted": True, "status": "auth_failed"}}, "start_session")
+    assert probed["web_runtime_probe"]["status"] == "auth_failed"
+
+
+def test_ui_tree_response_has_no_echo_and_no_zero_counters():
+    summary = {
+        "include_hidden": False, "nodes_count": 2, "truncated": False, "truncated_nodes_count": 0,
+        "hidden_children_count": 0, "hidden_nodes_count": 0,
+        "types_count": {"by_family": {"forms": 2}, "by_type": {"Тестируемая форма": 2}},
+    }
+    payload = {
+        "format": "outline", "text": "- Тестируемая форма", "tree_summary": summary, "profile": "navigation",
+        "fields": "auto", "metrics": {"bridge_ms": 1.0},
+    }
+    assert _sent(payload, "ui_tree") == {
+        "format": "outline", "text": "- Тестируемая форма",
+        "tree_summary": {"nodes_count": 2, "types_count": {"Тестируемая форма": 2}},
+    }
+    assert _sent(payload, "ui_tree", {"include_timings": True})["metrics"] == {"bridge_ms": 1.0}
+    truncated = _sent({"tree_summary": dict(summary, truncated=True, truncated_nodes_count=1)}, "ui_tree")
+    assert truncated["tree_summary"]["truncated"] is True and truncated["tree_summary"]["truncated_nodes_count"] == 1
+
+
+def test_outline_shows_only_non_default_state_and_keeps_other_fields():
+    tree = {
+        "type": "Тестируемая форма", "title": "Заказ", "form_name": "Документ.Заказ.Форма.ФормаДокумента",
+        "visible": True, "available": True, "read_only": False,
+        "children": [
+            {
+                "type": "Тестируемое поле формы", "name": "Сумма", "title": "Сумма", "visible": True, "available": False,
+                "enabled": False, "read_only": True, "current": True, "value": "1 000",
+            },
+            {
+                "type": "Тестируемая группа формы", "name": "Страницы", "current_page_name": "Основное",
+                "pages": [{"name": "Основное"}, {"name": "Прочее"}], "current_page": {"name": "Основное"},
+            },
+        ],
+    }
+    assert server._outline_ui_tree(tree).splitlines() == [
+        '- Тестируемая форма — Заказ form_name="Документ.Заказ.Форма.ФормаДокумента"',
+        '  - Тестируемое поле формы Сумма [not_available, read_only, current] value="1 000"',
+        '  - Тестируемая группа формы Страницы current_page_name="Основное" pages=["Основное","Прочее"]',
+    ]
+
+
+def test_table_rows_tool_returns_columns_once(monkeypatch):
+    async def fake_bridge_call(session_id, method, params):
+        return {"found": True, "count": 1, "rows": [{"pairs": [{"key": "Имя", "value": "А"}, {"key": "Код", "value": "1"}]}]}
+
+    monkeypatch.setattr(server, "_bridge_call_recorded", fake_bridge_call)
+    result = asyncio.run(server.table_rows(name="Список", columns="Код", session_id="unit"))
+    assert result == {"found": True, "count": 1, "columns": ["Код"], "rows": [["1"]], "other_columns": ["Имя"]}
+    raw = asyncio.run(server.table_rows(name="Список", compact=False, session_id="unit"))
+    assert raw["rows"][0]["pairs"][0] == {"key": "Имя", "value": "А"}

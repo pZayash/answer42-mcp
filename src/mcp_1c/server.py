@@ -2620,7 +2620,7 @@ _UI_TREE_RAG_AUTO_PROFILES = {"diagnostic", "data", "full"}
 def _validate_ui_tree_choice(kind: str, value: str, allowed: set[str]) -> str:
     normalized = (value or "").strip().lower()
     if not normalized:
-        normalized = "json" if kind == "format" else "auto" if kind == "command_panels" else "include" if kind == "group_mode" else "navigation"
+        normalized = "outline" if kind == "format" else "auto" if kind == "command_panels" else "include" if kind == "group_mode" else "navigation"
     if normalized not in allowed:
         allowed_text = ", ".join(sorted(allowed))
         raise ValueError(f"Unsupported ui_tree {kind}: {value!r}. Expected one of: {allowed_text}.")
@@ -2702,7 +2702,31 @@ def _attach_optional_timings(result: Any, timings: dict[str, Any] | None, includ
     return result
 
 
+_OUTLINE_LABEL_KEYS = {"type", "name", "title", "children", "objects"}
+_OUTLINE_FLAGS = (
+    ("visible", False, "not_visible"), ("available", False, "not_available"), ("enabled", False, "disabled"),
+    ("read_only", True, "read_only"), ("current", True, "current"), ("selected", True, "selected"),
+    ("main", True, "main"), ("home", True, "home"),
+)
+_OUTLINE_SKIPPED_KEYS = (
+    _OUTLINE_LABEL_KEYS | {key for key, _, _ in _OUTLINE_FLAGS}
+    | {"metrics", "_tree_ms", "_nodes_serialized", "_nodes_visited", "flat", "tree_summary", "rag_diagnostic", "root_parent_name"}
+)
+
+
+def _outline_attribute(key: str, value: Any) -> str:
+    if key == "pages" and isinstance(value, list):
+        value = [str(page.get("name") or page.get("title") or "") if isinstance(page, dict) else str(page) for page in value]
+    if isinstance(value, (dict, list)):
+        return f"{key}=" + json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
+    if isinstance(value, str):
+        return f"{key}=" + json.dumps(value, ensure_ascii=False)
+    return f"{key}={_yaml_scalar(value)}"
+
+
 def _outline_ui_tree(node: Any, indent: int = 0) -> str:
+    """One line per node: type, name, title, then only the state that differs from the defaults
+    (visible, available, not read-only) and every other field the node carries as key=value."""
     if not isinstance(node, dict):
         return ""
     label_parts = [str(node.get("type") or "Object")]
@@ -2710,15 +2734,18 @@ def _outline_ui_tree(node: Any, indent: int = 0) -> str:
         label_parts.append(str(node["name"]))
     if node.get("title") and node.get("title") != node.get("name"):
         label_parts.append(f"— {node['title']}")
-    flags = []
-    for key, mark in (("visible", "visible"), ("available", "available"), ("read_only", "read_only")):
-        if node.get(key) is True:
-            flags.append(mark)
-        elif node.get(key) is False and key in node:
-            flags.append(f"not_{mark}")
+    flags = [mark for key, flagged, mark in _OUTLINE_FLAGS if key in node and node.get(key) is flagged]
+    if "disabled" in flags and "not_available" in flags:
+        flags.remove("disabled")
     line = "  " * indent + "- " + " ".join(label_parts)
     if flags:
         line += " [" + ", ".join(flags) + "]"
+    for key, value in node.items():
+        if key in _OUTLINE_SKIPPED_KEYS or value in (None, "", [], {}):
+            continue
+        if key == "current_page" and node.get("current_page_name"):
+            continue
+        line += " " + _outline_attribute(key, value)
     lines = [line]
     for child in node.get("children") or []:
         child_text = _outline_ui_tree(child, indent + 1)
@@ -3028,11 +3055,89 @@ def _compact_rows_result(result: Any, *, include_raw: bool = False) -> Any:
         compact = {key: row[key] for key in ("index", "row", "current", "selected", "expanded", "level") if key in row}
         pairs = row.get("pairs")
         if isinstance(pairs, list):
-            compact["values"] = {str(p.get("key", "")): p.get("value", "") for p in pairs if isinstance(p, dict) and p.get("key")}
+            compact["values"] = _row_values_from_pairs(pairs)
         compact_rows.append(compact)
     out = dict(result)
     out["rows"] = compact_rows
     out.setdefault("rows_count", len(compact_rows))
+    return out
+
+
+TABLE_ROWS_MAX_CELL_CHARS = 500
+
+
+def _normalize_column_title(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value)).strip().casefold()
+
+
+def _parse_columns_argument(columns: str) -> list[str]:
+    text = (columns or "").strip()
+    if not text:
+        return []
+    if text.startswith("["):
+        return [str(item) for item in _json_array_argument(text, "columns")]
+    return [part.strip() for part in text.split(",") if part.strip()]
+
+
+def _columnar_rows_result(result: Any, *, columns: str = "", max_cell_chars: int = TABLE_ROWS_MAX_CELL_CHARS) -> Any:
+    """Column titles once + one array of cells per row, instead of repeating every title in every row.
+
+    Nothing is dropped silently: a cut cell ends with ``…[+N chars]`` and the
+    response says how many cells were cut and how to read them in full.
+    """
+    if not isinstance(result, dict) or not isinstance(result.get("rows"), list):
+        return result
+    rows = result["rows"]
+    if not all(isinstance(row, dict) and isinstance(row.get("values"), dict) for row in rows):
+        return result
+    available: list[str] = []
+    for row in rows:
+        for title in row["values"]:
+            if title not in available:
+                available.append(title)
+    selected = available
+    unknown: list[str] = []
+    requested = _parse_columns_argument(columns)
+    if requested:
+        by_title = {_normalize_column_title(title): title for title in available}
+        selected = []
+        for name in requested:
+            title = by_title.get(_normalize_column_title(name))
+            if title is None:
+                unknown.append(name)
+            elif title not in selected:
+                selected.append(title)
+    limit = max(0, int(max_cell_chars or 0))
+    truncated = 0
+    out_rows: list[Any] = []
+    with_attributes = any(len(row) > 1 for row in rows)
+    for row in rows:
+        cells: list[Any] = []
+        for title in selected:
+            cell = row["values"].get(title, "")
+            if limit and isinstance(cell, str) and len(cell) > limit:
+                cell = f"{cell[:limit]}…[+{len(cell) - limit} chars]"
+                truncated += 1
+            cells.append(cell)
+        if with_attributes:
+            out_rows.append({**{key: value for key, value in row.items() if key != "values"}, "cells": cells})
+        else:
+            out_rows.append(cells)
+    out = {key: value for key, value in result.items() if key not in ("rows", "rows_count")}
+    out["columns"] = selected
+    out["rows"] = out_rows
+    if result.get("count") != len(out_rows):
+        out["rows_count"] = len(out_rows)
+    if requested and len(selected) < len(available):
+        out["other_columns"] = [title for title in available if title not in selected]
+    if unknown:
+        out["unknown_columns"] = unknown
+    if truncated:
+        out["truncated_cells"] = truncated
+        out["truncation"] = (
+            f"cells longer than max_cell_chars={limit} end with '…[+N chars]'; "
+            "repeat with max_cell_chars=0 (and columns=...) to read them in full"
+        )
     return out
 
 
@@ -4057,7 +4162,156 @@ def _compact_payload(value: Any, *, strip_subtrees: bool = False, parent_key: st
     return _compact_outbound_ui_node(compact) if _is_ui_node(compact) else compact
 
 
-def _compact_json_text(text: str, *, strip_subtrees: bool = False) -> str:
+# Diagnostics of how the manager found a control: useful when profiling, noise otherwise.
+_TIMING_ONLY_KEYS = {"search_stats", "search_ms", "press_ms"}
+_UI_TREE_ECHO_KEYS = {
+    "filter", "profile", "fields", "command_panels", "flat", "method", "metrics",
+    "_tree_ms", "_nodes_serialized", "_nodes_visited",
+}
+_START_SESSION_INFRA_KEYS = {
+    "platform_dir", "display", "client_display", "ws_port", "ibsrv_port", "testclient_port", "data_dir",
+    "bridge_url", "manager_pid", "ws_url", "log_dir", "server_rag_enabled",
+}
+_START_SESSION_CLIENT_INFRA_KEYS = {
+    "connection_mode", "connection_value", "target_connection_mode", "port", "client_pid", "client_log",
+    "client_stdout_log", "auto_maximize",
+}
+
+
+def _row_values_from_pairs(pairs: list[Any]) -> dict[str, Any]:
+    """Column title -> cell text; a repeated title gets a numeric suffix instead of overwriting the first cell."""
+    values: dict[str, Any] = {}
+    for pair in pairs:
+        if not isinstance(pair, dict):
+            continue
+        key = str(pair.get("key", ""))
+        value = pair.get("value", "")
+        if not key and value in ("", None):
+            continue
+        unique, number = key, 1
+        while unique in values:
+            number += 1
+            unique = f"{key} ({number})"
+        values[unique] = value
+    return values
+
+
+def _is_pairs_list(value: Any) -> bool:
+    return isinstance(value, list) and all(isinstance(item, dict) and "key" in item for item in value)
+
+
+def _shape_outbound_value(value: Any, *, keep_timings: bool, keep_pairs: bool) -> Any:
+    """Lossless reshaping applied to every tool response on its way to the client."""
+    if isinstance(value, list):
+        return [_shape_outbound_value(item, keep_timings=keep_timings, keep_pairs=keep_pairs) for item in value]
+    if not isinstance(value, dict):
+        return value
+    shaped: dict[str, Any] = {}
+    for key, item in value.items():
+        if not keep_timings and key in _TIMING_ONLY_KEYS:
+            continue
+        if key == "pairs" and not keep_pairs and _is_pairs_list(item):
+            shaped.setdefault("values", {}).update(_row_values_from_pairs(item))
+            continue
+        shaped[key] = _shape_outbound_value(item, keep_timings=keep_timings, keep_pairs=keep_pairs)
+    return _drop_redundant_window_state(shaped)
+
+
+def _drop_redundant_window_state(payload: dict[str, Any]) -> dict[str, Any]:
+    """`*_before`/`*_after` pairs: keep only what differs and what client_diagnostics does not already say."""
+    if "window_title_before" not in payload and "form_name_before" not in payload:
+        return payload
+    diagnostics = payload.get("client_diagnostics") if isinstance(payload.get("client_diagnostics"), dict) else {}
+    for stem, active_key in (("window_title", "active_window_title"), ("form_name", "active_form_name")):
+        before, after = payload.get(f"{stem}_before"), payload.get(f"{stem}_after")
+        if before == after:
+            payload.pop(f"{stem}_before", None)
+            payload.pop(f"{stem}_after", None)
+            continue
+        if before in ("", None):
+            payload.pop(f"{stem}_before", None)
+        if after in ("", None) or after == diagnostics.get(active_key):
+            payload.pop(f"{stem}_after", None)
+    return payload
+
+
+def _shape_ui_tree_summary(summary: Any) -> Any:
+    if not isinstance(summary, dict):
+        return summary
+    shaped = {key: value for key, value in summary.items() if value not in (0, False, None, "", [], {})}
+    types = shaped.get("types_count")
+    if isinstance(types, dict):
+        # by_family is a coarser view of the same counts.
+        by_type = types.get("by_type")
+        if by_type:
+            shaped["types_count"] = by_type
+        else:
+            shaped.pop("types_count")
+    return shaped
+
+
+def _shape_ui_tree_response(payload: dict[str, Any], *, keep_timings: bool) -> dict[str, Any]:
+    shaped = {key: value for key, value in payload.items() if keep_timings or key not in _UI_TREE_ECHO_KEYS}
+    for key in ("tree_summary", "summary"):
+        if key in shaped:
+            shaped[key] = _shape_ui_tree_summary(shaped[key])
+    return shaped
+
+
+def _shape_start_session_response(payload: dict[str, Any]) -> dict[str, Any]:
+    """Keep what the caller acts on; ports, pids, displays and paths stay in session_status."""
+    shaped = {key: value for key, value in payload.items() if key not in _START_SESSION_INFRA_KEYS}
+    client = shaped.get("test_client")
+    if isinstance(client, dict):
+        client = {key: value for key, value in client.items() if key not in _START_SESSION_CLIENT_INFRA_KEYS}
+        maximized = client.pop("maximized", None)
+        if isinstance(maximized, dict):
+            if isinstance(maximized.get("window"), dict):
+                client["window"] = maximized["window"]
+            if maximized.get("errors"):
+                client["maximize_errors"] = maximized["errors"]
+        shaped["test_client"] = client
+    notice = shaped.get("rag_notice")
+    if isinstance(notice, dict):
+        if not notice.get("enabled"):
+            notice = {key: notice[key] for key in ("enabled", "reason") if key in notice}
+        else:
+            notice = {
+                key: value for key, value in notice.items()
+                if key != "summary_backend" and value not in ("", [], {}, None)
+                and not (key == "message" and value == notice.get("reason"))
+            }
+        shaped["rag_notice"] = notice
+    probe = shaped.get("web_runtime_probe")
+    if isinstance(probe, dict) and (not probe.get("attempted") or probe.get("status") == "not_applicable"):
+        shaped.pop("web_runtime_probe")
+    if not shaped.get("rag_snapshot"):
+        shaped.pop("rag_snapshot", None)
+    return shaped
+
+
+def _shape_tool_payload(payload: Any, tool_name: str = "", arguments: Any = None) -> Any:
+    arguments = arguments if isinstance(arguments, dict) else {}
+    keep_timings = bool(arguments.get("include_timings"))
+    keep_pairs = arguments.get("compact") is False or _tool_result_verbosity() == "full"
+    payload = _shape_outbound_value(payload, keep_timings=keep_timings, keep_pairs=keep_pairs)
+    if not isinstance(payload, dict):
+        return payload
+    positioning = payload.get("positioning")
+    if isinstance(positioning, dict) and "current_row" in payload and positioning.get("row") == payload["current_row"]:
+        # choose_current_row found the row and made it current: one copy is enough.
+        payload["positioning"] = {key: value for key, value in positioning.items() if key != "row"}
+    if tool_name == "table_cell_text" and isinstance(payload.get("cell"), dict):
+        # The question was one cell; the whole row is table_current_row's answer.
+        payload["cell"] = {key: value for key, value in payload["cell"].items() if key != "current_row"}
+    elif tool_name == "ui_tree":
+        payload = _shape_ui_tree_response(payload, keep_timings=keep_timings)
+    elif tool_name == "start_session":
+        payload = _shape_start_session_response(payload)
+    return payload
+
+
+def _compact_json_text(text: str, *, strip_subtrees: bool = False, tool_name: str = "", arguments: Any = None) -> str:
     stripped = text.lstrip()
     if not stripped.startswith(("{", "[")):
         return text
@@ -4065,6 +4319,10 @@ def _compact_json_text(text: str, *, strip_subtrees: bool = False) -> str:
         payload = json.loads(text)
     except ValueError:
         return text
+    try:
+        payload = _shape_tool_payload(payload, tool_name, arguments)
+    except Exception:  # an unexpected result shape must not cost the caller the result itself
+        logging.getLogger(__name__).exception("Could not shape the %s response", tool_name)
     payload = _compact_payload(payload, strip_subtrees=strip_subtrees)
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
@@ -4098,7 +4356,9 @@ def _compact_tool_result(result: Any, tool_name: str = "", arguments: Any = None
             if getattr(result, "is_error", False):
                 block.text = _compact_error_text(block.text)
             else:
-                block.text = _compact_json_text(block.text, strip_subtrees=strip_subtrees)
+                block.text = _compact_json_text(
+                    block.text, strip_subtrees=strip_subtrees, tool_name=tool_name, arguments=arguments
+                )
     return result
 
 _MCP_TOOL_CALL_ACTIVE: contextvars.ContextVar[bool] = contextvars.ContextVar(
@@ -7579,7 +7839,7 @@ async def ui_tree(
     title: Annotated[str, "Optional title substring filter. When name, title or type filter is set, ui_tree returns a flat matches list"] = "",
     fields: Annotated[str, "Field-set profile: auto, minimal, navigation, diagnostic, data, full, or comma-separated field names"] = "auto",
     group_mode: Annotated[str, "Group handling mode: include, flatten, flatten_layout, exclude, exclude_empty, or pages_only"] = "include",
-    format: Annotated[str, "Response format: json (structured), outline (readable text outline), yaml/yml (readable YAML text)"] = "json",
+    format: Annotated[str, "Response format: outline (default; one line per node, same fields), json (nested objects), yaml/yml"] = "outline",
     rag_snapshot: Annotated[str, "Optional RAG snapshot name/id used for type enrichment"] = "",
     delivery: Annotated[str, "Delivery mode: auto (default) returns small results inline and saves responses above token threshold as resource; inline always returns the selected JSON/outline/yaml; resource always saves full JSON and returns resource_uri + summary + preview"] = "auto",
     preview_max_nodes: Annotated[int, "For delivery=auto/resource, number of top nodes/matches to include in the small inline preview when a resource is returned"] = 40,
@@ -7590,7 +7850,9 @@ async def ui_tree(
     """Snapshot of the active 1C UI tree.
 
 Default profile `navigation`: visible elements, compact fields, no data, no
-command panels. `parent_name` limits it to a subtree; `name`/`title`/`type`
+command panels, the whole depth. Default format `outline`: one indented line
+per node, `Type Name — Title [state] key=value`; state lists only what differs
+from visible/available/not read-only. `parent_name` limits it to a subtree; `name`/`title`/`type`
 return a flat `objects` list (for one control prefer find_object). Large
 results are saved as a resource (`delivery=auto`); inspect them with
 ui_tree_resource_search/get_node/children or ui_tree_diff. For data use
@@ -7797,6 +8059,8 @@ field_info, table_rows or tabular_documents rather than
         format_start = time.monotonic()
         text = _outline_ui_nodes(result.get("objects", [])) if isinstance(result, dict) and "objects" in result else _outline_ui_tree(result)
         response = {"format": "outline", "text": text, "tree_summary": summary, "profile": profile_key, "fields": fields}
+        if isinstance(tree, dict) and tree.get("rag_diagnostic"):
+            response["rag_diagnostic"] = tree["rag_diagnostic"]
         if parent_name:
             response["parent_name"] = parent_name
         metrics = _ui_tree_metrics(tree, bridge_ms=bridge_ms, python_transform_ms=python_transform_ms, format_ms=(time.monotonic() - format_start) * 1000, result=response)
@@ -7815,6 +8079,8 @@ field_info, table_rows or tabular_documents rather than
     if fmt == "yaml":
         format_start = time.monotonic()
         response = {"format": "yaml", "yaml": _to_simple_yaml(result), "tree_summary": summary, "profile": profile_key, "fields": fields}
+        if isinstance(tree, dict) and tree.get("rag_diagnostic"):
+            response["rag_diagnostic"] = tree["rag_diagnostic"]
         if parent_name:
             response["parent_name"] = parent_name
         metrics = _ui_tree_metrics(tree, bridge_ms=bridge_ms, python_transform_ms=python_transform_ms, format_ms=(time.monotonic() - format_start) * 1000, result=response)
@@ -8908,13 +9174,21 @@ async def table_rows(
     name: Annotated[str, "Table technical name"] = "",
     title: Annotated[str, "Table visible title"] = "",
     limit: Annotated[int, "Maximum rows to return"] = 50,
-    compact: Annotated[bool | None, "Return compact row values; default follows ONEC_MCP_RESULT_VERBOSITY"] = None,
+    compact: Annotated[bool | None, "false: raw rows as key/value pairs, without columns/max_cell_chars; default follows ONEC_MCP_RESULT_VERBOSITY"] = None,
+    columns: Annotated[str, "Comma-separated column titles to return (or a JSON array); empty = all columns"] = "",
+    max_cell_chars: Annotated[int, "Cut longer cell texts, marking them '…[+N chars]'; 0 = never cut"] = TABLE_ROWS_MAX_CELL_CHARS,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
-    """Return rows of a tested table as key/value mappings."""
+    """Return rows of a tested table: `columns` (titles, once) and `rows` (arrays of cell texts in column order).
+
+    Rows that carry attributes (index, current, selected, level) are objects
+    with those attributes and `cells`.
+    """
     result = await _bridge_call_recorded(session_id, "table_rows", {"name": name, "title": title, "limit": limit})
-    return _compact_rows_result(result, include_raw=not _compact_enabled(compact))
+    if not _compact_enabled(compact):
+        return result
+    return _columnar_rows_result(_compact_rows_result(result), columns=columns, max_cell_chars=max_cell_chars)
 
 
 def _table_row_pairs(row: Any) -> dict[str, str]:
