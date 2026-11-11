@@ -195,6 +195,7 @@
   "Dynamic list/table visible title": "Видимый заголовок динамического списка/таблицы",
   "Earlier snapshot id, only if resource URI is unavailable/unambiguous": "Идентификатор более раннего снимка, только если URI ресурса недоступен или неоднозначен",
   "Enable built-in RAG for this session": "Включить встроенный RAG для этой сессии",
+  "Enable built-in RAG for this session; needs a server started with --enable-rag": "Включить встроенный RAG для этой сессии; сервер должен быть запущен с --enable-rag",
   "Enrich UI elements with best-effort types from the RAG index. Use true/false to force; auto/default enables it for diagnostic, data and full profiles when session RAG is enabled": "Дополнить элементы интерфейса типами из индекса RAG (по возможности). true/false — принудительно; auto/по умолчанию включается для профилей diagnostic, data и full, когда в сессии включён RAG",
   "Exact URL pattern to remove from the credentials store": "Точный шаблон URL для удаления из хранилища реквизитов доступа",
   "Exact window name when available": "Точное имя окна, если известно",

@@ -663,3 +663,28 @@ def test_table_rows_tool_returns_columns_once(monkeypatch):
     assert result == {"found": True, "count": 1, "columns": ["Код"], "rows": [["1"]], "other_columns": ["Имя"]}
     raw = asyncio.run(server.table_rows(name="Список", compact=False, session_id="unit"))
     assert raw["rows"][0]["pairs"][0] == {"key": "Имя", "value": "А"}
+
+
+# --- RAG is opt-in -----------------------------------------------------------
+
+
+def _rag_enabled_in_fresh_process(env: dict) -> str:
+    import os
+    import subprocess
+    import sys
+
+    clean = {k: v for k, v in os.environ.items() if k not in {"ONEC_MCP_ENABLE_RAG", "ONEC_MCP_DISABLE_RAG"}}
+    code = "from mcp_1c import server; print(server._RAG_ENABLED)"
+    return subprocess.run([sys.executable, "-c", code], env={**clean, **env}, capture_output=True, text=True, check=True).stdout.strip()
+
+
+def test_rag_is_off_unless_the_server_enables_it():
+    assert _rag_enabled_in_fresh_process({}) == "False"
+    assert _rag_enabled_in_fresh_process({"ONEC_MCP_ENABLE_RAG": "1"}) == "True"
+    assert _rag_enabled_in_fresh_process({"ONEC_MCP_ENABLE_RAG": "1", "ONEC_MCP_DISABLE_RAG": "1"}) == "False"
+
+
+def test_disabled_rag_tells_how_to_enable_it(monkeypatch):
+    monkeypatch.setattr(server, "_RAG_ENABLED", False)
+    result = server._rag_disabled_result()
+    assert result["reason"] == "rag_disabled" and "--enable-rag" in result["message"]

@@ -65,7 +65,12 @@ from .window_control import maximize_test_client_window as _maximize_external_wi
 
 mcp = MCPServer("Answer42")
 _RAG = RagService()
-_RAG_ENABLED = os.getenv("ONEC_MCP_DISABLE_RAG", "").strip().lower() not in {"1", "true", "yes", "on"}
+_TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
+# The built-in RAG is opt-in (--enable-rag / ONEC_MCP_ENABLE_RAG=1); --disable-rag still wins when both are set.
+_RAG_ENABLED = (
+    os.getenv("ONEC_MCP_ENABLE_RAG", "").strip().lower() in _TRUE_ENV_VALUES
+    and os.getenv("ONEC_MCP_DISABLE_RAG", "").strip().lower() not in _TRUE_ENV_VALUES
+)
 AUTO_SUMMARY_RAG_ON_START = os.getenv("ONEC_MCP_AUTO_SUMMARY_RAG_ON_START", "0").strip().lower() in {"1", "true", "yes", "on"}
 _CREDENTIAL_STORE_ENABLED = os.getenv("ONEC_MCP_DISABLE_CREDENTIAL_STORE", "").strip().lower() not in {"1", "true", "yes", "on"}
 _DEV_TOOLS_ENABLED = os.getenv("ONEC_MCP_DEV_TOOLS", "").strip().lower() in {"1", "true", "yes", "on"}
@@ -1907,7 +1912,7 @@ def _rag_disabled_result(session_rag_enabled: bool = True) -> dict[str, Any]:
     message = (
         "Built-in Answer42 RAG is disabled for this session. Start session with rag_enabled=true to use RAG tools."
         if reason == "rag_disabled_for_session"
-        else "Built-in Answer42 RAG is disabled for this MCP server. Start without --disable-rag / ONEC_MCP_DISABLE_RAG to use RAG tools."
+        else "Built-in Answer42 RAG is off for this MCP server (the default). Start the server with --enable-rag / ONEC_MCP_ENABLE_RAG=1 to use RAG tools."
     )
     return {
         "available": False,
@@ -4583,6 +4588,11 @@ async def manage_tool_groups(
         if not names:
             raise ToolError("Pass the groups to change, e.g. groups='lists,commands'")
         if action_key == "enable" and tool_groups.RAG in names and not _rag_active():
+            if not _RAG_ENABLED:
+                raise ToolError(
+                    "RAG is off for this MCP server (the default), so its tools stay hidden. "
+                    "The server must be started with --enable-rag / ONEC_MCP_ENABLE_RAG=1."
+                )
             raise ToolError(
                 "RAG is not active, so its tools stay hidden. Start a session with "
                 "start_session(rag_enabled=true) (or summary_rag_config=...); the rag tools then appear automatically."
@@ -5514,7 +5524,7 @@ async def start_session(
     extra_args: Annotated[str, "Extra raw 1C command-line arguments for the test client"] = "",
     execute: Annotated[str, "External data processor/report path for the test-client /Execute command-line parameter"] = "",
     command_parameter: Annotated[str, "Additional test-client /C value; when extra_args already contains /C, this value is appended with ';'"] = "",
-    rag_enabled: Annotated[bool, "Enable built-in RAG for this session"] = False,
+    rag_enabled: Annotated[bool, "Enable built-in RAG for this session; needs a server started with --enable-rag"] = False,
     summary_rag_config: Annotated[str, "Explicit Summary RAG configuration alias/code, e.g. bp, bpc, ka, ut, zup, Accounting30, Бухгалтерия предприятия. Enables configuration+fresh summary snapshot without live autodetection."] = "",
     include_timings: Annotated[bool, "Include diagnostic startup timing breakdown in the returned _timings field"] = False,
     html_mode: Annotated[str, "How the html_* tools reach live pages in HTML document fields: auto (Linux: remote; Windows: patched when the platform's Web Inspector has the Answer42 bridge, console otherwise; default, or ONEC_MCP_HTML_MODE), console (Windows: the inspector hot key and a loader typed into its console), patched (the bridge built into the inspector front end: Windows — installed into the platform, see html_inspector_patch; Linux — overlaid per session, nothing to install, needs xdotool), remote (Linux: the WebKitGTK remote inspector), disabled (no bridge: the html_* tools are unavailable)"] = "",
@@ -12309,10 +12319,16 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--version", action="version", version=f"answer42 {__version__}")
     parser.add_argument("--log-level", default=os.getenv("ONEC_MCP_LOG_LEVEL", "INFO"))
     parser.add_argument(
+        "--enable-rag",
+        action="store_true",
+        default=os.getenv("ONEC_MCP_ENABLE_RAG", "").strip().lower() in _TRUE_ENV_VALUES,
+        help="enable built-in Answer42 RAG tools and RAG enrichment (off by default)",
+    )
+    parser.add_argument(
         "--disable-rag",
         action="store_true",
-        default=os.getenv("ONEC_MCP_DISABLE_RAG", "").strip().lower() in {"1", "true", "yes", "on"},
-        help="disable built-in Answer42 RAG tools and RAG enrichment",
+        default=os.getenv("ONEC_MCP_DISABLE_RAG", "").strip().lower() in _TRUE_ENV_VALUES,
+        help="keep built-in Answer42 RAG off even when --enable-rag / ONEC_MCP_ENABLE_RAG is set",
     )
     parser.add_argument(
         "--disable-credential-store",
@@ -12440,7 +12456,7 @@ def main(argv: list[str] | None = None) -> None:
 
     _configure_tool_logging(args.tool_log)
 
-    _RAG_ENABLED = not args.disable_rag
+    _RAG_ENABLED = bool(args.enable_rag) and not args.disable_rag
     _CREDENTIAL_STORE_ENABLED = not args.disable_credential_store
     _DEV_TOOLS_ENABLED = bool(args.dev_tools)
     _register_dev_tools(_DEV_TOOLS_ENABLED)
@@ -12448,7 +12464,7 @@ def main(argv: list[str] | None = None) -> None:
     if _RAG_ENABLED:
         _register_startup_rag_source_dirs(args.rag_source_dir or [], args.rag_source_prefix, not args.rag_source_no_recursive, args.rag_source_max_depth)
     else:
-        logging.info("Built-in Answer42 RAG is disabled")
+        logging.info("Built-in Answer42 RAG is off (enable with --enable-rag / ONEC_MCP_ENABLE_RAG=1)")
     _DYNAMIC_TOOL_GROUPS = args.tool_groups == "on"
     tool_profile = args.tool_profile or (tool_groups.DEFAULT_PROFILE if _DYNAMIC_TOOL_GROUPS else "full")
     profile_result = _configure_default_tool_profile(tool_profile)
