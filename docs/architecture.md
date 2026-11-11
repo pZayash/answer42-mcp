@@ -231,6 +231,11 @@ MCP-инструмент `rag_sources_add_from_directory(path, watch=true)` ищ
 проиндексированных данных, результат содержит `rag_diagnostic.diagnostics[]` с
 машиночитаемым кодом и подсказкой агенту, как это исправить.
 
+Встроенный RAG по умолчанию выключен на уровне сервера: инструменты группы `rag` скрыты,
+`ui_tree` не обогащается типами, `start_session(rag_enabled=true)` возвращает
+`rag_notice.reason="rag_disabled"`. Чтобы включить его, запустите сервер с `--enable-rag`
+или `ONEC_MCP_ENABLE_RAG=1`; `--disable-rag` / `ONEC_MCP_DISABLE_RAG=1` имеют приоритет.
+
 `start_session()` по умолчанию запускается с `rag_enabled=false`, чтобы обычные сессии
 не тратили время на чтение реестров живой конфигурации. Чтобы явно привязать сводный
 снимок, передайте `summary_rag_config`, например `summary_rag_config="bp"`.
@@ -272,7 +277,8 @@ MCP-инструмент `rag_sources_add_from_directory(path, watch=true)` ищ
 | `ONEC_MCP_WINDOWS_DESKTOP` | Windows: `hidden` — запускать менеджер и клиент 1С на скрытых рабочих столах сессии; `current` — на текущем рабочем столе | `current` |
 | `ONEC_MCP_DATA_DIR` | Рабочая директория | OS tempdir + `answer42` (`/tmp/answer42` on Linux, `%TEMP%\answer42` on Windows) |
 | `MCP_1C_RAG_DB` | Путь к RAG SQLite | `build/rag/onec-rag.sqlite` |
-| `ONEC_MCP_DISABLE_RAG` | Отключить встроенный RAG (`1/true/yes/on`) | пусто |
+| `ONEC_MCP_ENABLE_RAG` | Включить встроенный RAG (`1/true/yes/on`); по умолчанию он выключен | пусто |
+| `ONEC_MCP_DISABLE_RAG` | Оставить RAG выключенным, даже если задан `ONEC_MCP_ENABLE_RAG` | пусто |
 | `ONEC_MCP_RAG_SOURCE_DIRS` | `:`/`;`-separated directories for startup RAG discovery/watch | пусто |
 | `ONEC_MCP_RAG_SOURCE_PREFIX` | Prefix for auto-discovered source names | пусто |
 | `ONEC_MCP_RAG_SOURCE_MAX_DEPTH` | Discovery depth for RAG source dirs | `4` |

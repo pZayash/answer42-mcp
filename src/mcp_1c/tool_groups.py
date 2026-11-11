@@ -77,7 +77,7 @@ DESCRIPTIONS: dict[str, str] = {
     "commands": "command interface sections/commands/search, command panels and context menus",
     "ui_snapshots": "inspect saved large ui_tree snapshots (search, nodes, children, diff, actions)",
     "metadata": "configuration metadata from the live UI: metadata catalog, subsystem and extension versions",
-    RAG: "configuration source RAG: lookup, search, sources and snapshots (shown only while RAG is active)",
+    RAG: "configuration source RAG: lookup, search, sources and snapshots (server started with --enable-rag; shown only while RAG is active)",
     "html": "live web pages in HTML document fields through the embedded WebKit inspector (start_session bridges them by default): text, query, click, type, wait, console errors; html_eval only with --dev-tools",
     "recording": "evidence recording: screenshots and slides for each step, PDF report",
     "credentials": "manage saved infobase credentials",

@@ -1599,7 +1599,8 @@ def test_dynamic_list_output_passes_include_text_and_limits_to_bridge(monkeypatc
     assert calls == [("unit", "dynamic_list_output", {"button": "СписокВывестиСписок", "wait_seconds": 1, "include_text": False, "max_rows": 5, "max_columns": 7})]
 
 
-def test_rag_diagnostic_reports_missing_session_snapshot():
+def test_rag_diagnostic_reports_missing_session_snapshot(monkeypatch):
+    monkeypatch.setattr("mcp_1c.server._RAG_ENABLED", True)
     _SESSIONS["rag_diag_test"] = SessionState("rag_diag_test", "", Path("."), 10001, 10002, 10003, Path("/tmp/rag_diag_test"))
     try:
         diagnostic = _rag_diagnostic("rag_diag_test", None)
