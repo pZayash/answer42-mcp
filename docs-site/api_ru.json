@@ -92,7 +92,7 @@
   "set_field_value": "Устанавливает значение в поле формы по имени или заголовку.",
   "set_file_dialog_result": "Заранее задает результат для следующего диалога выбора файла 1С.",
   "set_form_fields": "Устанавливает несколько полей формы по очереди через set_field_value; возвращает результат по каждому полю.",
-  "start_session": "Фабрика сеанса в один вызов: определяет версию, запускает инфраструктуру и подключает клиент тестирования 1С.\n\n`base_url` может быть URL веб-публикации, `server/infobase` или путем к файловой\nинформационной базе. Предпочитайте учетные данные, сохраненные через `credentials_save`, передаче\nсекретов в вызовах инструментов. После длительной операции в интерфейсе используйте\n`client_busy_status` или `wait_client_idle`, прежде чем отправлять следующие команды.\n\nИнструменты html_* получают доступ к живым страницам в полях HTML-документа так, как задано в `html_mode`:\nв Windows — через встроенный Web Inspector, который остаётся закреплённым внизу формы; в Linux — через\nудалённый отладчик WebKitGTK.",
+  "start_session": "Фабрика сеанса в один вызов: определяет версию, запускает инфраструктуру и подключает клиент тестирования 1С.\n\n`base_url` может быть URL веб-публикации, `server/infobase` или путем к файловой\nинформационной базе. Предпочитайте учетные данные, сохраненные через `credentials_save`, передаче\nсекретов в вызовах инструментов. После длительной операции в интерфейсе используйте\n`client_busy_status` или `wait_client_idle`, прежде чем отправлять следующие команды.\n\nИнструменты html_* получают доступ к живым страницам в полях HTML-документа так, как задано в `html_mode`:\nв Windows — через встроенный Web Inspector, который остаётся закреплённым внизу формы; в Linux — через\nудалённый отладчик WebKitGTK.\n\nС `client_mode=\"browser\"` клиентом тестирования служит веб-клиент 1С в Chrome/Edge (`base_url` — веб-публикация): Answer42 открывает публикацию с ключами веб-клиента TESTCLIENT/TESTCLIENTID, входит в систему и подключает менеджер тестирования. Инструменты форм и таблиц работают как обычно, а html_* работают со всей страницей клиента как с сайтом (запросы к DOM, текст, клики, ввод, скрипты, консоль), вместе с browser_screenshot, browser_press_key и browser_navigate.",
   "stop_session": "Завершает сеанс: отключает клиент тестирования, останавливает менеджер тестирования, ibsrv, Xvfb и мост.",
   "table_add_row": "Добавляет строку в активную проверяемую таблицу через API клиента тестирования 1С (Вставка / плюс).",
   "table_cell_text": "Возвращает текст ячейки проверяемой таблицы через GetCellText().",
@@ -129,7 +129,10 @@
   "wait_object": "Ожидает появления объекта в дереве интерфейса тестируемого клиента.",
   "wait_window": "Ожидает появления окна клиента.",
   "window_command_interface": "Возвращает командный интерфейс активного окна, если он поддерживается.",
-  "windows_list": "Возвращает все окна тестируемого клиентского приложения 1С (индекс, заголовок, форма, признак активности)."
+  "windows_list": "Возвращает все окна тестируемого клиентского приложения 1С (индекс, заголовок, форма, признак активности).",
+  "browser_screenshot": "Снимок страницы браузера сессии с client_mode=browser (самой страницы, а не рабочего стола).",
+  "browser_press_key": "Нажимает настоящую клавишу в элементе страницы сессии с client_mode=browser, который в фокусе (веб-клиент 1С реагирует на неё как на действие пользователя).",
+  "browser_navigate": "Открывает адрес на странице браузера сессии с client_mode=browser (например, внешнюю ссылку клиента)."
  },
  "params": {
   "1-based occurrence to select when multiple rows contain the same text": "Номер вхождения (с 1), который выбрать, если несколько строк содержат один и тот же текст",
@@ -350,7 +353,7 @@
   "Comma-separated column titles to return (or a JSON array); empty = all columns": "Заголовки нужных колонок через запятую (или JSON-массив); пусто — все колонки",
   "Cut longer cell texts, marking them '…[+N chars]'; 0 = never cut": "Обрезать более длинные тексты ячеек с пометкой '…[+N chars]'; 0 — не обрезать",
   "false: raw rows as key/value pairs, without columns/max_cell_chars; default follows ONEC_MCP_RESULT_VERBOSITY": "false: исходные строки парами «ключ/значение», без columns/max_cell_chars; по умолчанию определяется ONEC_MCP_RESULT_VERBOSITY",
-  "Return compact row values; default follows ONEC_MCP_RESULT_VERBOSITY":"Вернуть компактные значения строк; по умолчанию определяется ONEC_MCP_RESULT_VERBOSITY",
+  "Return compact row values; default follows ONEC_MCP_RESULT_VERBOSITY": "Вернуть компактные значения строк; по умолчанию определяется ONEC_MCP_RESULT_VERBOSITY",
   "Return the text of every match instead of the first": "Вернуть текст каждого совпадения, а не только первого",
   "Search by visible title instead of technical name": "Искать по видимому заголовку, а не по техническому имени",
   "Search child directories": "Искать в дочерних каталогах",
@@ -412,6 +415,16 @@
   "start_page | previous | next": "start_page | previous | next",
   "status: show the platforms; install / uninstall: build the bridge into their Web Inspector or remove it (asks for administrator rights with a UAC prompt when needed)": "status — показать платформы; install / uninstall — встроить мост в их Web Inspector или убрать его (при необходимости запрашивает права администратора через UAC)",
   "true = expand, false = collapse": "true = раскрыть, false = свернуть",
-  "true = select all rows, false = clear the selection": "true = выделить все строки, false = снять выделение"
+  "true = select all rows, false = clear the selection": "true = выделить все строки, false = снять выделение",
+  "Address to open in the page (an http/https URL); the web client's test-client link is not restored": "Адрес для открытия на странице (http/https); ссылка тест-клиента веб-клиента не восстанавливается",
+  "Capture beyond the viewport": "Снимать и то, что за пределами видимой области",
+  "Hold Alt": "Удерживать Alt",
+  "Hold Ctrl": "Удерживать Ctrl",
+  "Hold Shift": "Удерживать Shift",
+  "Key name: Enter, Tab, Escape, Backspace, Delete, Arrow*, Home, End, PageUp, PageDown, F1..F8, or one character": "Имя клавиши: Enter, Tab, Escape, Backspace, Delete, Arrow*, Home, End, PageUp, PageDown, F1..F8 или один символ",
+  "PNG file to write; empty = browser-<time>.png in the session's data directory": "PNG-файл для записи; пусто = browser-<время>.png в каталоге данных сессии",
+  "Test client kind: thin (1cv8c /TESTCLIENT; default, or ONEC_MCP_CLIENT_MODE) or browser (the 1C web client in Chrome/Edge: needs a web publication URL; the html_* tools then work on the whole client page as on a site: DOM, text, clicks, typing, scripts, console, plus browser_screenshot/browser_press_key/browser_navigate)": "Вид клиента тестирования: thin (1cv8c /TESTCLIENT; по умолчанию или ONEC_MCP_CLIENT_MODE) или browser (веб-клиент 1С в Chrome/Edge: нужен URL веб-публикации; инструменты html_* тогда работают со всей страницей клиента как с сайтом: DOM, текст, клики, ввод, скрипты, консоль, а также browser_screenshot/browser_press_key/browser_navigate)",
+  "client_mode=browser: Chrome/Edge executable; empty = ONEC_MCP_BROWSER_PATH or an installed Chrome/Edge": "client_mode=browser: исполняемый файл Chrome/Edge; пусто = ONEC_MCP_BROWSER_PATH или установленный Chrome/Edge",
+  "client_mode=browser: run the browser without a window": "client_mode=browser: запустить браузер без окна"
  }
 }

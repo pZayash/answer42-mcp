@@ -41,6 +41,7 @@ from starlette.responses import FileResponse, PlainTextResponse
 
 from . import (
     __version__,
+    browser_agent,
     html_agent,
     os_support,
     release_helper,
@@ -558,7 +559,8 @@ class SessionState:
         self.last_activity_monotonic: float = time.monotonic()
         self.blocked_action: dict[str, Any] | None = None
         # In-process only: after an MCP restart the restored client's pages point at a dead bridge.
-        self.html_agent: html_agent.HtmlInspector | None = None
+        self.html_agent: html_agent.HtmlInspector | browser_agent.BrowserBridge | None = None
+        self.client_mode = "thin"  # thin: 1cv8c /TESTCLIENT; browser: the web client in Chrome/Edge (browser_agent)
         self.html_disabled = False  # started with html_mode=disabled
 
     def to_json(self) -> dict[str, Any]:
@@ -3641,6 +3643,7 @@ def _compact_start_test_client_result(result: Any, *, include_timings: bool = Fa
         "connected", "base_url", "connection_mode", "connection_value",
         "target_connection_mode", "port", "client_pid", "client_log",
         "client_stdout_log", "auto_maximize", "auto_maximize_error", "connection_fallback",
+        "client_mode", "client_id", "browser", "login", "attach_error", "warning",
     )
     compact = {key: _copy_compact_object(result[key]) for key in keep_keys if key in result and result.get(key) not in (None, "", [], {})}
     if isinstance(compact.get("auto_maximize"), dict):
@@ -5527,6 +5530,9 @@ async def start_session(
     rag_enabled: Annotated[bool, "Enable built-in RAG for this session; needs a server started with --enable-rag"] = False,
     summary_rag_config: Annotated[str, "Explicit Summary RAG configuration alias/code, e.g. bp, bpc, ka, ut, zup, Accounting30, Бухгалтерия предприятия. Enables configuration+fresh summary snapshot without live autodetection."] = "",
     include_timings: Annotated[bool, "Include diagnostic startup timing breakdown in the returned _timings field"] = False,
+    client_mode: Annotated[str, "Test client kind: thin (1cv8c /TESTCLIENT; default, or ONEC_MCP_CLIENT_MODE) or browser (the 1C web client in Chrome/Edge: needs a web publication URL; the html_* tools then work on the whole client page as on a site: DOM, text, clicks, typing, scripts, console, plus browser_screenshot/browser_press_key/browser_navigate)"] = "",
+    browser_path: Annotated[str, "client_mode=browser: Chrome/Edge executable; empty = ONEC_MCP_BROWSER_PATH or an installed Chrome/Edge"] = "",
+    browser_headless: Annotated[bool, "client_mode=browser: run the browser without a window"] = False,
     html_mode: Annotated[str, "How the html_* tools reach live pages in HTML document fields: auto (Linux: remote; Windows: patched when the platform's Web Inspector has the Answer42 bridge, console otherwise; default, or ONEC_MCP_HTML_MODE), console (Windows: the inspector hot key and a loader typed into its console), patched (the bridge built into the inspector front end: Windows — installed into the platform, see html_inspector_patch; Linux — overlaid per session, nothing to install, needs xdotool), remote (Linux: the WebKitGTK remote inspector), disabled (no bridge: the html_* tools are unavailable)"] = "",
 ) -> dict[str, Any]:
     """One-shot session factory: detect version, start infrastructure, and connect the 1C test client.
@@ -5539,12 +5545,25 @@ async def start_session(
     The html_* tools reach live pages in HTML document fields as `html_mode` says:
     on Windows through the embedded Web Inspector, which stays docked at the bottom
     of the form; on Linux through the WebKitGTK remote inspector.
+
+    With `client_mode="browser"` the test client is the 1C web client in Chrome/Edge
+    (`base_url` must be a web publication): Answer42 opens the publication with the web
+    client's TESTCLIENT/TESTCLIENTID switches, logs in, and attaches the test manager. All
+    form/table tools work as usual, and the html_* tools address the whole client page like a
+    site (DOM queries, text, clicks, typing, scripts, console), together with
+    browser_screenshot, browser_press_key and browser_navigate.
     """
     start_monotonic = time.perf_counter()
     stage_monotonic = start_monotonic
     timings: dict[str, float] = {}
     supplied_username = username
     supplied_password = password
+    try:
+        effective_client_mode = browser_agent.resolve_client_mode(client_mode)
+        if effective_client_mode == "browser":
+            browser_agent.find_browser(browser_path)
+    except html_agent.HtmlAgentError as exc:
+        raise ToolError(str(exc)) from exc
 
     def mark_stage(name: str) -> None:
         nonlocal stage_monotonic
@@ -5589,8 +5608,16 @@ async def start_session(
         # a file infobase path (/F or ibsrv) or a server/infobase string (/S).
         connection_value = base_url
         base_url = ""
+    if effective_client_mode == "browser" and connection_value:
+        raise ValueError(
+            "client_mode=browser needs a web publication URL (http/https) as base_url; "
+            f"a file or server infobase ({connection_value!r}) can only be opened with the thin client"
+        )
     web_runtime_probe: dict[str, Any] = {"attempted": False, "status": "not_applicable"}
-    if base_url and initial_connection_mode == "ws":
+    if base_url and initial_connection_mode == "ws" and effective_client_mode == "browser":
+        # The browser logs in by itself; the probe would take one more license session.
+        web_runtime_probe = {"attempted": False, "status": "skipped_browser_mode"}
+    elif base_url and initial_connection_mode == "ws":
         web_runtime_probe = await _probe_web_runtime_before_start(base_url, supplied_username, supplied_password)
         if web_runtime_probe.get("authentication_failed"):
             # No local 1C runtime/process has been started yet. Do not hide a
@@ -5649,6 +5676,7 @@ async def start_session(
             data_dir=data_dir, base_url=base_url, username=username, password=password
         )
         sess.rag_enabled = bool(rag_enabled)
+        sess.client_mode = effective_client_mode
         probe_runtime = web_runtime_probe.get("runtime") if web_runtime_probe.get("status") == "ok" else None
         if isinstance(probe_runtime, dict) and probe_runtime.get("found"):
             sess.configuration_name = str(probe_runtime.get("configuration_name") or "")
@@ -5874,7 +5902,7 @@ async def start_session(
     if not connect_connection_value and pipeline_info.get("client_connection_value"):
         connect_connection_value = str(pipeline_info["client_connection_value"])
         connect_connection_mode = str(pipeline_info.get("client_connection_mode") or "file-direct")
-    if connect_base_url or connect_connection_value:
+    if (connect_base_url or connect_connection_value) and effective_client_mode == "thin":
         try:
             await _start_html_agent(sess, html_mode)
         except Exception:
@@ -5883,12 +5911,18 @@ async def start_session(
         mark_stage("start_html_agent")
     if connect_base_url or connect_connection_value:
         try:
-            connect_result = await _connect_test_client_impl(
-                sess, base_url=connect_base_url, username=username, password=password,
-                port=testclient_port, onec_path=sess.onec_thin, host="localhost",
-                extra_args=extra_args, execute=execute, command_parameter=command_parameter,
-                connection_mode=connect_connection_mode, connection_value=connect_connection_value,
-            )
+            if effective_client_mode == "browser":
+                connect_result = await _connect_browser_client_impl(
+                    sess, base_url=connect_base_url, username=username, password=password,
+                    browser_path=browser_path, headless=browser_headless,
+                )
+            else:
+                connect_result = await _connect_test_client_impl(
+                    sess, base_url=connect_base_url, username=username, password=password,
+                    port=testclient_port, onec_path=sess.onec_thin, host="localhost",
+                    extra_args=extra_args, execute=execute, command_parameter=command_parameter,
+                    connection_mode=connect_connection_mode, connection_value=connect_connection_value,
+                )
             mark_stage("connect_test_client")
         except Exception as exc:
             enriched = await _enrich_auth_failure_for_web_base(exc, connect_base_url)
@@ -5902,7 +5936,8 @@ async def start_session(
             raise diagnostic_error from exc
         if saved_credentials_used:
             _mark_credentials_verified(connect_base_url or connect_connection_value, username, password, credential_account_id)
-        _auto_maximize_test_client_result(connect_result, sess.client_display or sess.display)
+        if effective_client_mode == "thin":
+            _auto_maximize_test_client_result(connect_result, sess.client_display or sess.display)
         mark_stage("auto_maximize_test_client")
 
     if effective_summary_rag_config and _RAG_ENABLED and sess.rag_enabled:
@@ -5969,6 +6004,7 @@ async def start_session(
         "extension_names_loaded": bool(sess.installed_extensions_cache or sess.extension_names),
         "web_runtime_probe": web_runtime_probe,
         "idle_timeout_seconds": sess.idle_timeout_seconds,
+        "client_mode": sess.client_mode,
         "test_client": _compact_start_test_client_result(connect_result, include_timings=include_timings), **pipeline_info,
     }
     if sess.html_agent is not None:
@@ -6692,6 +6728,99 @@ _INFOBASE_LOCK_MARKERS = ("исключительной блокировки", "
 def _is_infobase_exclusive_lock_error(text: str) -> bool:
     lowered = text.lower()
     return any(marker in lowered for marker in _INFOBASE_LOCK_MARKERS)
+
+
+_BROWSER_PAIRING_SECONDS = 90  # how long the manager waits for the browser client to answer
+
+
+async def _connect_browser_client_impl(
+    sess: SessionState,
+    *,
+    base_url: str,
+    username: str = "",
+    password: str = "",
+    browser_path: str = "",
+    headless: bool = False,
+) -> Any:
+    """Open the web client in Chrome/Edge as a test client and attach the test manager to it by identifier."""
+    start_monotonic = time.perf_counter()
+    await _wait_for_bridge_connected(sess, timeout=START_SESSION_BRIDGE_CONNECT_TIMEOUT)
+    await _verify_manager_protocol(sess)
+    r_base = _platform.normalize_infobase_url(base_url or sess.base_url)
+    if not r_base:
+        raise ValueError("base_url is required for client_mode=browser")
+    r_user = username or sess.username
+    r_pass = password if password else sess.password
+    if not r_user and not r_pass:
+        credentials = _lookup_credentials(r_base)
+        if credentials:
+            r_user, r_pass = credentials["username"], credentials["password"]
+    if _is_placeholder_password(r_pass):
+        raise ValueError(
+            "Передан пароль-заглушка из звёздочек вместо реального пароля. "
+            "Укажите настоящий пароль или сохраните корректные креды через credentials_save()."
+        )
+    client_id = browser_agent.new_client_id()
+    try:
+        url = browser_agent.browser_client_url(r_base, client_id)
+        bridge = browser_agent.BrowserBridge(browser_path, headless=headless)
+        host, port = browser_agent.manager_endpoint(r_base)
+    except html_agent.HtmlAgentError as exc:
+        raise RuntimeError(f"Browser test client failed to start: {exc}") from exc
+    sess.html_agent = bridge
+    sess.base_url, sess.username, sess.password = r_base, r_user, r_pass
+    sess.target_connection_mode = "ws"
+    sess.target_connection_value = r_base
+    params = {
+        "base_url": r_base, "username": r_user, "password": r_pass, "port": port, "host": host,
+        "client_id": client_id, "client_pid": 0,
+        "client_log": "", "connection_mode": "ws", "connection_value": r_base,
+        "target_connection_mode": "ws", "expected_manager_protocol_version": MANAGER_PROTOCOL_VERSION,
+        "connect_timeout_seconds": _BROWSER_PAIRING_SECONDS,
+    }
+    _touch_session(sess)
+    page: dict[str, Any] = {}
+    login: dict[str, Any] = {}
+    try:
+        await bridge.launch(url, sess.data_dir / "browser-profile", client_id)
+        params["client_pid"] = bridge.process.pid if bridge.process else 0
+        page = await bridge.wait_ready()
+        login = await bridge.login(r_user, r_pass) if (r_user or r_pass) else {"login_form": None}
+        # The web client registers itself with the server when its interface has started; the manager then finds
+        # it by the identifier (it keeps trying for the pairing time).
+        try:
+            result = await sess.bridge.call("attach_test_client", params)
+        except BridgeError as pairing_error:
+            # The browser and its page tools work without the test manager: keep them and say what is missing.
+            result = {
+                "connected": False,
+                "attach_error": str(pairing_error).splitlines()[0][:500],
+                "warning": (
+                    "The test manager did not pair with the browser client; form/table tools are unavailable, "
+                    "the html_* and browser_* tools work on the page."
+                ),
+            }
+    except html_agent.HtmlAgentError as exc:
+        await _stop_browser_bridge(sess)
+        raise RuntimeError(f"Browser test client failed to start: {exc}") from exc
+    except BaseException:
+        await _stop_browser_bridge(sess)
+        raise
+    if isinstance(result, dict):
+        result["client_mode"] = "browser"
+        result["browser"] = bridge.status()
+        result["page"] = page
+        result["login"] = login
+        result["_timings"] = {"total_seconds": round(time.perf_counter() - start_monotonic, 3)}
+    safe_params = {key: value for key, value in params.items() if key != "password"}
+    return _record_tool(sess.session_id, "connect_test_client", safe_params, result)
+
+
+async def _stop_browser_bridge(sess: SessionState) -> None:
+    bridge, sess.html_agent = sess.html_agent, None
+    if bridge is not None:
+        with suppress(Exception):
+            await bridge.stop()
 
 
 async def _connect_test_client_impl(
@@ -7758,6 +7887,69 @@ async def html_console(
     wanted = frozenset(part.strip().lower() for part in levels.split(",") if part.strip())
     try:
         return await inspector.console(page, levels=wanted, limit=max(0, int(limit)), clear=clear, check_scripts=check_scripts)
+    except html_agent.HtmlAgentError as exc:
+        raise ToolError(str(exc)) from exc
+
+
+async def _browser_for(session_id: str) -> browser_agent.BrowserBridge:
+    inspector = await _html_agent_for(session_id)
+    if not isinstance(inspector, browser_agent.BrowserBridge):
+        raise ToolError("This tool needs a session started with client_mode=browser.")
+    return inspector
+
+
+@mcp.tool()
+async def browser_screenshot(
+    path: Annotated[str, "PNG file to write; empty = browser-<time>.png in the session's data directory"] = "",
+    full_page: Annotated[bool, "Capture beyond the viewport"] = False,
+    page: Annotated[str, "Page id or part of its URL/title; may be empty when one page is live"] = "",
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Screenshot of the browser page of a client_mode=browser session (the page itself, not the desktop)."""
+    bridge = await _browser_for(session_id)
+    try:
+        data = await bridge.screenshot(page, full_page=full_page)
+    except html_agent.HtmlAgentError as exc:
+        raise ToolError(str(exc)) from exc
+    target = Path(path) if path else _SESSIONS[session_id].data_dir / "screenshots" / f"browser-{int(time.time())}.png"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(data)
+    return {"path": str(target), "size": len(data)}
+
+
+@mcp.tool()
+async def browser_press_key(
+    key: Annotated[str, "Key name: Enter, Tab, Escape, Backspace, Delete, Arrow*, Home, End, PageUp, PageDown, F1..F8, or one character"],
+    shift: Annotated[bool, "Hold Shift"] = False,
+    ctrl: Annotated[bool, "Hold Ctrl"] = False,
+    alt: Annotated[bool, "Hold Alt"] = False,
+    page: Annotated[str, "Page id or part of its URL/title; may be empty when one page is live"] = "",
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Press a real key in the focused element of a client_mode=browser session's page (the 1C web client reacts to it like to a user)."""
+    bridge = await _browser_for(session_id)
+    modifiers = (1 if alt else 0) | (2 if ctrl else 0) | (8 if shift else 0)
+    try:
+        return await bridge.press_key(key, page, modifiers)
+    except html_agent.HtmlAgentError as exc:
+        raise ToolError(str(exc)) from exc
+
+
+@mcp.tool()
+async def browser_navigate(
+    url: Annotated[str, "Address to open in the page (an http/https URL); the web client's test-client link is not restored"],
+    page: Annotated[str, "Page id or part of its URL/title; may be empty when one page is live"] = "",
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Open an address in the browser page of a client_mode=browser session (for example an external link of the client)."""
+    if not re.match(r"^https?://", url or "", re.IGNORECASE):
+        raise ToolError("url must start with http:// or https://")
+    bridge = await _browser_for(session_id)
+    try:
+        return await bridge.navigate(url, page)
     except html_agent.HtmlAgentError as exc:
         raise ToolError(str(exc)) from exc
 

@@ -64,6 +64,7 @@ GROUPS: dict[str, frozenset[str]] = {
     "html": frozenset({
         "html_pages", "html_text", "html_query", "html_click", "html_type", "html_wait", "html_eval", "html_console",
         "html_inspector_patch", "html_download",
+        "browser_screenshot", "browser_press_key", "browser_navigate",
     }),
     "recording": frozenset({"recording_start", "recording_capture", "recording_stop"}),
     "credentials": frozenset({"credentials_check", "credentials_save", "credentials_remove", "credentials_list"}),
@@ -78,7 +79,7 @@ DESCRIPTIONS: dict[str, str] = {
     "ui_snapshots": "inspect saved large ui_tree snapshots (search, nodes, children, diff, actions)",
     "metadata": "configuration metadata from the live UI: metadata catalog, subsystem and extension versions",
     RAG: "configuration source RAG: lookup, search, sources and snapshots (server started with --enable-rag; shown only while RAG is active)",
-    "html": "live web pages in HTML document fields through the embedded WebKit inspector (start_session bridges them by default): text, query, click, type, wait, console errors; html_eval only with --dev-tools",
+    "html": "live web pages in HTML document fields through the embedded WebKit inspector (start_session bridges them by default), or the whole 1C web client page with start_session(client_mode=browser) plus browser_screenshot/key/navigate: text, query, click, type, wait, console errors; html_eval only with --dev-tools",
     "recording": "evidence recording: screenshots and slides for each step, PDF report",
     "credentials": "manage saved infobase credentials",
 }
