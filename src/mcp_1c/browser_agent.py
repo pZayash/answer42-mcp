@@ -171,6 +171,7 @@ class BrowserPage:
     closed: bool = False
     console_log: list[dict[str, Any]] = field(default_factory=list)
     reader: asyncio.Task | None = None
+    kind: str = "page"  # "iframe": a cross-origin frame the browser runs as a target of its own
     parent: BrowserPage | None = None  # a frame of the parent page (an HTML document field is one)
     frame_id: str = ""
     contexts: dict[str, int] = field(default_factory=dict)  # frame id -> its main execution context
@@ -185,6 +186,8 @@ class BrowserPage:
         }
         if self.parent is not None:
             data["frame_of"] = self.parent.page_id
+        if self.kind != "page":
+            data["kind"] = self.kind
         return data
 
 
@@ -322,7 +325,7 @@ class BrowserBridge:
         def fetch() -> list[dict[str, Any]]:
             reply = requests.get(f"http://127.0.0.1:{self.cdp_port}/json/list", timeout=3)
             reply.raise_for_status()
-            return [t for t in reply.json() if t.get("type") == "page" and t.get("webSocketDebuggerUrl")]
+            return [t for t in reply.json() if t.get("type") in ("page", "iframe") and t.get("webSocketDebuggerUrl")]
 
         return await asyncio.to_thread(fetch)
 
@@ -411,7 +414,8 @@ class BrowserBridge:
                 if existing is not None and not existing.closed:
                     continue
                 page = BrowserPage(f"browser{next(self._numbers)}", target["id"], target["webSocketDebuggerUrl"],
-                                   url=str(target.get("url") or ""), title=str(target.get("title") or ""))
+                                   url=str(target.get("url") or ""), title=str(target.get("title") or ""),
+                                   kind="iframe" if target.get("type") == "iframe" else "page")
                 try:
                     page.connection = await websockets.connect(page.ws_url, max_size=None, ping_interval=None)
                 except Exception as exc:
@@ -505,6 +509,7 @@ class BrowserBridge:
                 f"{'Several' if found else 'No'} live browser pages match {selector!r}; pages: "
                 + json.dumps([p.to_json() for p in alive], ensure_ascii=False)
             )
+        alive = [p for p in alive if p.kind == "page"]  # without a selector only real pages, not cross-origin frames
         if len(alive) == 1:
             return alive[0]
         if not alive:
