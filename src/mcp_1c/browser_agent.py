@@ -171,15 +171,21 @@ class BrowserPage:
     closed: bool = False
     console_log: list[dict[str, Any]] = field(default_factory=list)
     reader: asyncio.Task | None = None
+    parent: BrowserPage | None = None  # a frame of the parent page (an HTML document field is one)
+    frame_id: str = ""
+    contexts: dict[str, int] = field(default_factory=dict)  # frame id -> its main execution context
 
     def to_json(self) -> dict[str, Any]:
-        return {
+        data = {
             "page": self.page_id,
             "url": self.url,
             "title": self.title,
             "alive": not self.closed,
             "opened_at": _dt.datetime.fromtimestamp(self.opened_at, _dt.UTC).isoformat(timespec="seconds"),
         }
+        if self.parent is not None:
+            data["frame_of"] = self.parent.page_id
+        return data
 
 
 def _console_entry(method: str, params: dict[str, Any]) -> dict[str, Any] | None:
@@ -223,6 +229,7 @@ class BrowserBridge:
         self.process: subprocess.Popen[Any] | None = None
         self.profile_dir: Path | None = None
         self.pages: dict[str, BrowserPage] = {}
+        self.frames: dict[str, BrowserPage] = {}  # child frames of the live pages, rebuilt by refresh_frames
         self.last_error = ""
         self.start_url = ""
         self.client_id = ""
@@ -328,6 +335,20 @@ class BrowserBridge:
                     if future is not None and not future.done():
                         future.set_result(message)
                     continue
+                method = message.get("method")
+                if method == "Runtime.executionContextCreated":
+                    context = (message.get("params") or {}).get("context") or {}
+                    aux = context.get("auxData") or {}
+                    if aux.get("isDefault") and aux.get("frameId"):
+                        page.contexts[str(aux["frameId"])] = int(context["id"])
+                    continue
+                if method == "Runtime.executionContextDestroyed":
+                    gone = (message.get("params") or {}).get("executionContextId")
+                    page.contexts = {k: v for k, v in page.contexts.items() if v != gone}
+                    continue
+                if method == "Runtime.executionContextsCleared":
+                    page.contexts.clear()
+                    continue
                 if message.get("method") == "Network.responseReceived":
                     self._note_test_request(message.get("params") or {})
                     continue
@@ -352,6 +373,7 @@ class BrowserBridge:
         counter[status] = counter.get(status, 0) + 1
 
     async def send(self, page: BrowserPage, method: str, params: dict[str, Any] | None = None, timeout: float = 30.0) -> Any:
+        page = page.parent or page  # a frame is reached through the connection of its page
         if page.closed or page.connection is None:
             raise HtmlAgentError(f"Page {page.page_id} is closed")
         message_id = next(self._ids)
@@ -411,10 +433,14 @@ class BrowserBridge:
     # --- the HtmlInspector interface ---
 
     async def evaluate(self, page: BrowserPage, expression: str, timeout: float = 30.0) -> Any:
-        result = await self.send(
-            page, "Runtime.evaluate",
-            {"expression": expression, "returnByValue": True, "awaitPromise": True, "userGesture": True}, timeout=timeout,
-        )
+        params: dict[str, Any] = {"expression": expression, "returnByValue": True, "awaitPromise": True, "userGesture": True}
+        if page.parent is not None:
+            context = page.parent.contexts.get(page.frame_id)
+            if context is None:  # the frame's own world was not announced: an isolated one sees the same DOM
+                world = await self.send(page, "Page.createIsolatedWorld", {"frameId": page.frame_id, "worldName": "answer42"})
+                context = world.get("executionContextId")
+            params["contextId"] = context
+        result = await self.send(page, "Runtime.evaluate", params, timeout=timeout)
         if result.get("exceptionDetails"):
             details = result["exceptionDetails"]
             exception = details.get("exception") or {}
@@ -431,18 +457,47 @@ class BrowserBridge:
         info = await self.run(page, "info", {}, timeout=10)
         page.url, page.title = str(info.get("url") or ""), str(info.get("title") or "")
 
+    async def refresh_frames(self) -> None:
+        """Rebuild the list of child frames (HTML document fields among them) of the live pages."""
+        fresh: dict[str, BrowserPage] = {}
+
+        def walk(tree: dict[str, Any], top: BrowserPage) -> None:
+            for child in tree.get("childFrames") or []:
+                frame = child.get("frame") or {}
+                page_id = f"{top.page_id}.f{len([k for k in fresh if k.startswith(top.page_id + '.')]) + 1}"
+                fresh[page_id] = BrowserPage(
+                    page_id, f"{top.target_id}:{frame.get('id')}", "", url=str(frame.get("url") or ""),
+                    title=str(frame.get("name") or ""), parent=top, frame_id=str(frame.get("id") or ""),
+                )
+                walk(child, top)
+
+        for top in self.pages.values():
+            if top.closed:
+                continue
+            with suppress(HtmlAgentError):
+                tree = (await self.send(top, "Page.getFrameTree", timeout=10)).get("frameTree") or {}
+                walk(tree, top)
+        self.frames = fresh
+        for frame_page in fresh.values():
+            with suppress(HtmlAgentError):
+                await self.refresh(frame_page)
+
     async def list_pages(self, include_dead: bool = False) -> list[dict[str, Any]]:
         for page in self.pages.values():
             if not page.closed:
                 with suppress(HtmlAgentError):
                     await self.refresh(page)
-        return [p.to_json() for p in self.pages.values() if include_dead or not p.closed]
+        await self.refresh_frames()
+        listed = [p for p in self.pages.values() if include_dead or not p.closed]
+        return [p.to_json() for p in [*listed, *self.frames.values()]]
 
     def resolve_page(self, selector: str = "") -> BrowserPage:
         alive = [p for p in self.pages.values() if not p.closed]
         if selector:
             if selector in self.pages:
                 return self.pages[selector]
+            if selector in self.frames:
+                return self.frames[selector]
             found = [p for p in alive if selector.lower() in p.url.lower() or selector.lower() in p.title.lower()]
             if len(found) == 1:
                 return found[0]
@@ -458,6 +513,8 @@ class BrowserBridge:
 
     async def page(self, selector: str = "") -> BrowserPage:
         await self.open_inspectors()
+        if selector and selector not in self.pages:
+            await self.refresh_frames()
         return self.resolve_page(selector)
 
     async def command(self, selector: str, op: str, args: dict[str, Any], timeout: float = 30.0) -> Any:
@@ -466,9 +523,10 @@ class BrowserBridge:
     async def console(self, selector: str = "", levels: frozenset[str] = frozenset({"error", "warning"}),
                       limit: int = 100, clear: bool = False, check_scripts: bool = True) -> dict[str, Any]:
         page = await self.page(selector)
-        messages = list(page.console_log)
+        log = (page.parent or page).console_log  # frames share the console of their page
+        messages = list(log)
         if clear:
-            page.console_log.clear()
+            log.clear()
         selected = [m for m in messages if not levels or m.get("level") in levels]
         result: dict[str, Any] = {"page": page.page_id, "url": page.url, "collected_since": "page connection"}
         result["messages"] = selected[-limit:] if limit > 0 else selected
