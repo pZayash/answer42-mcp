@@ -48,6 +48,7 @@ from . import (
     runtime,
     skill_installer,
     tool_groups,
+    version_proxy,
     webkit_patch,
     win_desktop,
 )
@@ -541,6 +542,9 @@ class SessionState:
         self.client_xvfb_pid: int = 0
         self.target_connection_mode: str = ""
         self.browser_query: str = ""  # query switches of the browser client address (client_mode=browser)
+        self.client_platform_dir: Path | None = None  # thin client of another version than the manager (manager_version)
+        self.client_version: str = ""
+        self.version_proxy: version_proxy.VersionProxy | None = None
         self.target_connection_value: str = ""
         self.bridge = OneCBridgeServer(
             host="127.0.0.1",
@@ -645,6 +649,13 @@ class SessionState:
     @property
     def onec_thin(self) -> str:
         return str(self.platform_dir / os_support.executable_name("1cv8c"))
+
+    @property
+    def client_onec(self) -> str:
+        """The thin client that runs the test client: the manager's platform unless manager_version is used."""
+        if self.client_platform_dir is not None:
+            return str(self.client_platform_dir / os_support.executable_name("1cv8c"))
+        return self.onec_thin
 
     @property
     def ibcmd(self) -> str:
@@ -5534,6 +5545,7 @@ async def start_session(
     client_mode: Annotated[str, "Test client kind: thin (1cv8c /TESTCLIENT; default, or ONEC_MCP_CLIENT_MODE) or browser (the 1C web client in Chrome/Edge: needs a web publication URL; the html_* tools then work on the whole client page as on a site: DOM, text, clicks, typing, scripts, console, plus browser_screenshot/browser_press_key/browser_navigate)"] = "",
     browser_path: Annotated[str, "client_mode=browser: Chrome/Edge executable; empty = ONEC_MCP_BROWSER_PATH or an installed Chrome/Edge"] = "",
     browser_headless: Annotated[bool, "client_mode=browser: run the browser without a window"] = False,
+    manager_version: Annotated[str, "Thin client mode: platform version for the test manager and the session infrastructure when the target platform (version/base_url) has only a thin client, e.g. a cloud; the manager talks to the client through a proxy that presents the client's version; empty = the target's platform (or ONEC_MCP_MANAGER_VERSION)"] = "",
     browser_test_server: Annotated[str, "client_mode=browser, remote publication: host[:port] of the server the web client registers on for testing (cluster manager, default port 1541; file base: web server, 1538); empty = ONEC_MCP_BROWSER_TEST_SERVER"] = "",
     html_mode: Annotated[str, "How the html_* tools reach live pages in HTML document fields: auto (Linux: remote; Windows: patched when the platform's Web Inspector has the Answer42 bridge, console otherwise; default, or ONEC_MCP_HTML_MODE), console (Windows: the inspector hot key and a loader typed into its console), patched (the bridge built into the inspector front end: Windows — installed into the platform, see html_inspector_patch; Linux — overlaid per session, nothing to install, needs xdotool), remote (Linux: the WebKitGTK remote inspector), disabled (no bridge: the html_* tools are unavailable)"] = "",
 ) -> dict[str, Any]:
@@ -5639,6 +5651,16 @@ async def start_session(
     resolved_version = version or None
     if not resolved_version and base_url and initial_connection_mode == "ws":
         resolved_version = _platform.detect_version_from_url(base_url)
+    manager_platform_version = (manager_version or os.environ.get("ONEC_MCP_MANAGER_VERSION", "")).strip()
+    client_platform_dir: Path | None = None
+    client_platform_version = ""
+    if manager_platform_version and effective_client_mode != "browser":
+        if not resolved_version:
+            raise ValueError("manager_version needs the target platform: pass version or a web publication base_url")
+        if resolved_version != manager_platform_version:
+            client_platform_version = resolved_version
+            client_platform_dir = _platform.find_thin_client_dir(client_platform_version)
+            resolved_version = manager_platform_version
     if resolved_version:
         _platform.require_websocket_support(resolved_version)
 
@@ -5680,6 +5702,8 @@ async def start_session(
         )
         sess.rag_enabled = bool(rag_enabled)
         sess.client_mode = effective_client_mode
+        sess.client_platform_dir = client_platform_dir
+        sess.client_version = client_platform_version
         probe_runtime = web_runtime_probe.get("runtime") if web_runtime_probe.get("status") == "ok" else None
         if isinstance(probe_runtime, dict) and probe_runtime.get("found"):
             sess.configuration_name = str(probe_runtime.get("configuration_name") or "")
@@ -5923,7 +5947,7 @@ async def start_session(
             else:
                 connect_result = await _connect_test_client_impl(
                     sess, base_url=connect_base_url, username=username, password=password,
-                    port=testclient_port, onec_path=sess.onec_thin, host="localhost",
+                    port=testclient_port, onec_path=sess.client_onec, host="localhost",
                     extra_args=extra_args, execute=execute, command_parameter=command_parameter,
                     connection_mode=connect_connection_mode, connection_value=connect_connection_value,
                 )
@@ -6012,7 +6036,7 @@ async def start_session(
         "test_client": _compact_start_test_client_result(connect_result, include_timings=include_timings), **pipeline_info,
     }
     if sess.html_agent is not None:
-        sess.html_agent.attach(sess.client_display or sess.display, sess.test_client_pid, sess.onec_thin)
+        sess.html_agent.attach(sess.client_display or sess.display, sess.test_client_pid, sess.client_onec)
         response["html_agent"] = sess.html_agent.status()
     if include_timings:
         response["_timings"] = timings
@@ -6065,7 +6089,7 @@ async def _start_html_agent(sess: SessionState, mode: str = "") -> None:
             sess.html_disabled = True
             return
         inspector = html_agent.HtmlInspector(mode)
-        inspector.check_platform(sess.onec_thin)
+        inspector.check_platform(sess.client_onec)
     except html_agent.HtmlAgentError as exc:
         raise ToolError(str(exc)) from exc
     inspector.field_driver = _HtmlFieldDriver(sess.session_id)
@@ -6850,6 +6874,13 @@ async def _connect_browser_client_impl(
     return _record_tool(sess.session_id, "connect_test_client", safe_params, result)
 
 
+async def _stop_version_proxy(sess: SessionState) -> None:
+    proxy, sess.version_proxy = sess.version_proxy, None
+    if proxy is not None:
+        with suppress(Exception):
+            await asyncio.to_thread(proxy.stop)
+
+
 async def _stop_browser_bridge(sess: SessionState) -> None:
     bridge, sess.html_agent = sess.html_agent, None
     if bridge is not None:
@@ -6892,7 +6923,7 @@ async def _connect_test_client_impl(
     r_user = username or sess.username
     r_pass = password if password else sess.password
     r_port = port if port else sess.testclient_port
-    r_onec = onec_path or sess.onec_thin
+    r_onec = onec_path or sess.client_onec
     connection_fallback: dict[str, Any] | None = None
 
     if mode == "ws":
@@ -7057,6 +7088,15 @@ async def _connect_test_client_impl(
     try:
         await _wait_for_test_client_ready(sess, host, r_port, timeout=START_SESSION_TEST_CLIENT_READY_TIMEOUT)
         mark_stage("wait_test_client_port")
+        await _stop_version_proxy(sess)
+        if sess.client_platform_dir is not None:
+            # The manager runs on another platform version: it reaches the client through a proxy that rewrites
+            # the version in the handshake.
+            sess.version_proxy = version_proxy.VersionProxy(
+                "127.0.0.1" if host == "localhost" else host, r_port,
+                _platform.platform_version_from_dir(sess.platform_dir), sess.client_version,
+            )
+            params["port"], params["host"] = sess.version_proxy.start(), "127.0.0.1"
         if sess.test_client_process is not None:
             monitor_task = asyncio.create_task(_wait_for_test_client_process_exit(sess.test_client_process))
         attach_task = asyncio.create_task(sess.bridge.call("attach_test_client", params))

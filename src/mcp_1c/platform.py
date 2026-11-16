@@ -75,15 +75,12 @@ def detect_version_from_url(url: str) -> str | None:
     return None
 
 
-def _missing_required_tools(path: Path) -> list[str]:
-    return [
-        tool for tool in ("1cv8c", "ibcmd")
-        if not (path / os_support.executable_name(tool)).exists()
-    ]
+def _missing_required_tools(path: Path, tools: tuple[str, ...] = ("1cv8c", "ibcmd")) -> list[str]:
+    return [tool for tool in tools if not (path / os_support.executable_name(tool)).exists()]
 
 
-def _is_platform_candidate(path: Path) -> bool:
-    return not _missing_required_tools(path)
+def _is_platform_candidate(path: Path, tools: tuple[str, ...] = ("1cv8c", "ibcmd")) -> bool:
+    return not _missing_required_tools(path, tools)
 
 
 def _platform_component_score(path: Path) -> tuple[int, int]:
@@ -94,8 +91,8 @@ def _platform_component_score(path: Path) -> tuple[int, int]:
     )
 
 
-def installed_platform_dirs() -> list[Path]:
-    """Platform directories (with 1cv8c and ibcmd) in the standard installation locations."""
+def installed_platform_dirs(tools: tuple[str, ...] = ("1cv8c", "ibcmd")) -> list[Path]:
+    """Platform directories (with the given tools: 1cv8c and ibcmd by default) in the standard installation locations."""
     candidates: list[Path] = []
     if os_support.IS_WINDOWS:
         bases = []
@@ -108,18 +105,29 @@ def installed_platform_dirs() -> list[Path]:
                 continue
             for sub in base.iterdir():
                 bin_dir = sub / "bin"
-                if bin_dir.is_dir() and _is_platform_candidate(bin_dir):
+                if bin_dir.is_dir() and _is_platform_candidate(bin_dir, tools):
                     candidates.append(bin_dir)
-                elif sub.is_dir() and _is_platform_candidate(sub):
+                elif sub.is_dir() and _is_platform_candidate(sub, tools):
                     candidates.append(sub)
     else:
         for base in [Path("/opt/1cv8/x86_64"), Path("/opt/1cv8/x86"), Path("/opt/1c/x86_64"), Path("/opt/1c/x86")]:
             if not base.exists():
                 continue
             for sub in base.iterdir():
-                if sub.is_dir() and _is_platform_candidate(sub):
+                if sub.is_dir() and _is_platform_candidate(sub, tools):
                     candidates.append(sub)
     return candidates
+
+
+def find_thin_client_dir(version: str) -> Path:
+    """Directory of the installed thin client (1cv8c) of an exact platform version.
+
+    Unlike find_platform_dir it does not need ibcmd: a cloud platform may come as a thin client only.
+    """
+    matching = [c for c in installed_platform_dirs(("1cv8c",)) if platform_version_from_dir(c) == version]
+    if not matching:
+        raise ValueError(f"Тонкий клиент платформы {version} не найден среди установленных")
+    return max(matching, key=_platform_component_score)
 
 
 def find_platform_dir(version: str | None = None) -> Path:
