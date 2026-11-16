@@ -425,6 +425,7 @@
   "PNG file to write; empty = browser-<time>.png in the session's data directory": "PNG-файл для записи; пусто = browser-<время>.png в каталоге данных сессии",
   "Test client kind: thin (1cv8c /TESTCLIENT; default, or ONEC_MCP_CLIENT_MODE) or browser (the 1C web client in Chrome/Edge: needs a web publication URL; the html_* tools then work on the whole client page as on a site: DOM, text, clicks, typing, scripts, console, plus browser_screenshot/browser_press_key/browser_navigate)": "Вид клиента тестирования: thin (1cv8c /TESTCLIENT; по умолчанию или ONEC_MCP_CLIENT_MODE) или browser (веб-клиент 1С в Chrome/Edge: нужен URL веб-публикации; инструменты html_* тогда работают со всей страницей клиента как с сайтом: DOM, текст, клики, ввод, скрипты, консоль, а также browser_screenshot/browser_press_key/browser_navigate)",
   "client_mode=browser: Chrome/Edge executable; empty = ONEC_MCP_BROWSER_PATH or an installed Chrome/Edge": "client_mode=browser: исполняемый файл Chrome/Edge; пусто = ONEC_MCP_BROWSER_PATH или установленный Chrome/Edge",
-  "client_mode=browser: run the browser without a window": "client_mode=browser: запустить браузер без окна"
+  "client_mode=browser: run the browser without a window": "client_mode=browser: запустить браузер без окна",
+  "client_mode=browser, remote publication: host[:port] of the server the web client registers on for testing (cluster manager, default port 1541; file base: web server, 1538); empty = ONEC_MCP_BROWSER_TEST_SERVER": "client_mode=browser, удалённая публикация: host[:порт] сервера, на котором веб-клиент регистрируется для тестирования (менеджер кластера, порт по умолчанию 1541; файловая база: веб-сервер, 1538); пусто = ONEC_MCP_BROWSER_TEST_SERVER"
  }
 }

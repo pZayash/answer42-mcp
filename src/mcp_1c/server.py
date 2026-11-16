@@ -5534,6 +5534,7 @@ async def start_session(
     client_mode: Annotated[str, "Test client kind: thin (1cv8c /TESTCLIENT; default, or ONEC_MCP_CLIENT_MODE) or browser (the 1C web client in Chrome/Edge: needs a web publication URL; the html_* tools then work on the whole client page as on a site: DOM, text, clicks, typing, scripts, console, plus browser_screenshot/browser_press_key/browser_navigate)"] = "",
     browser_path: Annotated[str, "client_mode=browser: Chrome/Edge executable; empty = ONEC_MCP_BROWSER_PATH or an installed Chrome/Edge"] = "",
     browser_headless: Annotated[bool, "client_mode=browser: run the browser without a window"] = False,
+    browser_test_server: Annotated[str, "client_mode=browser, remote publication: host[:port] of the server the web client registers on for testing (cluster manager, default port 1541; file base: web server, 1538); empty = ONEC_MCP_BROWSER_TEST_SERVER"] = "",
     html_mode: Annotated[str, "How the html_* tools reach live pages in HTML document fields: auto (Linux: remote; Windows: patched when the platform's Web Inspector has the Answer42 bridge, console otherwise; default, or ONEC_MCP_HTML_MODE), console (Windows: the inspector hot key and a loader typed into its console), patched (the bridge built into the inspector front end: Windows — installed into the platform, see html_inspector_patch; Linux — overlaid per session, nothing to install, needs xdotool), remote (Linux: the WebKitGTK remote inspector), disabled (no bridge: the html_* tools are unavailable)"] = "",
 ) -> dict[str, Any]:
     """One-shot session factory: detect version, start infrastructure, and connect the 1C test client.
@@ -5917,6 +5918,7 @@ async def start_session(
                 connect_result = await _connect_browser_client_impl(
                     sess, base_url=connect_base_url, username=username, password=password,
                     browser_path=browser_path, headless=browser_headless, query=browser_query,
+                    test_server=browser_test_server,
                 )
             else:
                 connect_result = await _connect_test_client_impl(
@@ -6744,6 +6746,7 @@ async def _connect_browser_client_impl(
     browser_path: str = "",
     headless: bool = False,
     query: str = "",
+    test_server: str = "",
 ) -> Any:
     """Open the web client in Chrome/Edge as a test client and attach the test manager to it by identifier."""
     start_monotonic = time.perf_counter()
@@ -6771,6 +6774,11 @@ async def _connect_browser_client_impl(
     # The manager finds the browser client through the server of its own infobase; a client registered on a
     # remote server is out of its reach.
     remote = (urlsplit(r_base).hostname or "").lower() not in {"localhost", "127.0.0.1", "::1", "[::1]"}
+    pairing_host, pairing_port = "", 0
+    test_server = (test_server or os.environ.get("ONEC_MCP_BROWSER_TEST_SERVER", "")).strip()
+    if test_server:
+        server_parts = urlsplit(f"//{test_server}")
+        pairing_host, pairing_port = server_parts.hostname or "", server_parts.port or 1541
     try:
         open_url = f"{r_base}?{raw_query}" if raw_query else r_base
         url = browser_agent.browser_client_url(open_url, client_id)
@@ -6788,6 +6796,7 @@ async def _connect_browser_client_impl(
         "client_log": "", "connection_mode": "ws", "connection_value": r_base,
         "target_connection_mode": "ws", "expected_manager_protocol_version": MANAGER_PROTOCOL_VERSION,
         "connect_timeout_seconds": _BROWSER_PAIRING_SECONDS,
+        "pairing_host": pairing_host, "pairing_port": pairing_port,
     }
     _touch_session(sess)
     page: dict[str, Any] = {}
@@ -6800,7 +6809,7 @@ async def _connect_browser_client_impl(
         # The web client registers itself with the server when its interface has started; the manager then finds
         # it by the identifier (it keeps trying for the pairing time).
         try:
-            if remote and os.environ.get("ONEC_MCP_BROWSER_FORCE_PAIRING") != "1":
+            if remote and not pairing_host and os.environ.get("ONEC_MCP_BROWSER_FORCE_PAIRING") != "1":
                 # The manager cannot see a client registered on a remote server and then blocks for minutes.
                 raise BridgeError("pairing not attempted: remote publication")
             result = await sess.bridge.call("attach_test_client", params)
@@ -6810,8 +6819,9 @@ async def _connect_browser_client_impl(
                 hint = (
                     f"The publication {urlsplit(r_base).netloc} is on another host: the test manager looks for the "
                     "browser client on the server of its own infobase, so it cannot find a client that registered "
-                    "on a remote server. Open the base on this machine, or work through the html_* and browser_* "
-                    "tools. ONEC_MCP_BROWSER_FORCE_PAIRING=1 tries the pairing anyway."
+                    "on a remote server. Pass browser_test_server (host[:port] of that server reachable from this "
+                    "machine, for example over a VPN: the cluster manager port 1541 or the web server port 1538), "
+                    "open the base on this machine, or work through the html_* and browser_* tools."
                 )
             else:
                 hint = "Check that the web publication is reachable and its web server allows the test-client ports."
