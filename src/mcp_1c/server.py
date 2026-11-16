@@ -540,6 +540,7 @@ class SessionState:
         self.xvfb_pid: int = 0
         self.client_xvfb_pid: int = 0
         self.target_connection_mode: str = ""
+        self.browser_query: str = ""  # query switches of the browser client address (client_mode=browser)
         self.target_connection_value: str = ""
         self.bridge = OneCBridgeServer(
             host="127.0.0.1",
@@ -5599,6 +5600,7 @@ async def start_session(
             and (not original_password or original_password == credential_ref.get("password"))
         )
         saved_credentials_unverified = not bool(credential_ref.get("verified", False))
+    browser_query = urlsplit(str(base_url or "").strip()).query  # switches the browser client keeps, e.g. OIDA-
     base_url = _platform.normalize_infobase_url(base_url)
     connection_mode = "auto"
     connection_value = ""
@@ -5914,7 +5916,7 @@ async def start_session(
             if effective_client_mode == "browser":
                 connect_result = await _connect_browser_client_impl(
                     sess, base_url=connect_base_url, username=username, password=password,
-                    browser_path=browser_path, headless=browser_headless,
+                    browser_path=browser_path, headless=browser_headless, query=browser_query,
                 )
             else:
                 connect_result = await _connect_test_client_impl(
@@ -6741,6 +6743,7 @@ async def _connect_browser_client_impl(
     password: str = "",
     browser_path: str = "",
     headless: bool = False,
+    query: str = "",
 ) -> Any:
     """Open the web client in Chrome/Edge as a test client and attach the test manager to it by identifier."""
     start_monotonic = time.perf_counter()
@@ -6749,6 +6752,10 @@ async def _connect_browser_client_impl(
     r_base = _platform.normalize_infobase_url(base_url or sess.base_url)
     if not r_base:
         raise ValueError("base_url is required for client_mode=browser")
+    # The browser opens the address as given: its query switches (for example OIDA- that turns the single
+    # sign-on off) matter, while the manager and the credentials work with the canonical publication address.
+    raw_query = query or sess.browser_query
+    sess.browser_query = raw_query
     r_user = username or sess.username
     r_pass = password if password else sess.password
     if not r_user and not r_pass:
@@ -6761,8 +6768,12 @@ async def _connect_browser_client_impl(
             "Укажите настоящий пароль или сохраните корректные креды через credentials_save()."
         )
     client_id = browser_agent.new_client_id()
+    # The manager finds the browser client through the server of its own infobase; a client registered on a
+    # remote server is out of its reach.
+    remote = (urlsplit(r_base).hostname or "").lower() not in {"localhost", "127.0.0.1", "::1", "[::1]"}
     try:
-        url = browser_agent.browser_client_url(r_base, client_id)
+        open_url = f"{r_base}?{raw_query}" if raw_query else r_base
+        url = browser_agent.browser_client_url(open_url, client_id)
         bridge = browser_agent.BrowserBridge(browser_path, headless=headless)
         host, port = browser_agent.manager_endpoint(r_base)
     except html_agent.HtmlAgentError as exc:
@@ -6789,16 +6800,29 @@ async def _connect_browser_client_impl(
         # The web client registers itself with the server when its interface has started; the manager then finds
         # it by the identifier (it keeps trying for the pairing time).
         try:
+            if remote and os.environ.get("ONEC_MCP_BROWSER_FORCE_PAIRING") != "1":
+                # The manager cannot see a client registered on a remote server and then blocks for minutes.
+                raise BridgeError("pairing not attempted: remote publication")
             result = await sess.bridge.call("attach_test_client", params)
         except BridgeError as pairing_error:
             # The browser and its page tools work without the test manager: keep them and say what is missing.
+            if remote:
+                hint = (
+                    f"The publication {urlsplit(r_base).netloc} is on another host: the test manager looks for the "
+                    "browser client on the server of its own infobase, so it cannot find a client that registered "
+                    "on a remote server. Open the base on this machine, or work through the html_* and browser_* "
+                    "tools. ONEC_MCP_BROWSER_FORCE_PAIRING=1 tries the pairing anyway."
+                )
+            else:
+                hint = "Check that the web publication is reachable and its web server allows the test-client ports."
             result = {
                 "connected": False,
                 "attach_error": str(pairing_error).splitlines()[0][:500],
                 "warning": (
                     "The test manager did not pair with the browser client; form/table tools are unavailable, "
-                    "the html_* and browser_* tools work on the page."
+                    "the html_* and browser_* tools work on the page. " + hint
                 ),
+                "available_tools": ["html_*", "browser_*"],
             }
     except html_agent.HtmlAgentError as exc:
         await _stop_browser_bridge(sess)
