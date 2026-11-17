@@ -472,6 +472,9 @@ def _release_shared_file_server(key: str, owner_session_id: str) -> bool:
         registry.pop(key, None)
         _save_shared_file_registry(registry)
         _SHARED_FILE_SERVERS.pop(key, None)
+        if entry.get("data_dir"):
+            # The stopped server leaves ~650 MB of session data; what is still locked is left to the sweep.
+            _trim_session_data_dir(Path(str(entry["data_dir"])).parent)
         return True
 
 
@@ -1598,9 +1601,9 @@ async def _recover_scoped_sessions_if_needed(stale_lock_existed: bool) -> None:
 _IBSRV_CACHE_SUBDIRS = ("session-data", "temp", "perf-data")
 
 
-def _trim_session_data_dir(data_dir: Path) -> None:
+def _trim_session_data_dir(data_dir: Path, include_root: bool = False) -> None:
     """Drop the standalone-server caches of a stopped session, keeping the reusable manager infobase and logs."""
-    for ibsrv_dir in data_dir.glob("ibsrv-data*"):
+    for ibsrv_dir in [*data_dir.glob("ibsrv-data*"), *([data_dir] if include_root else [])]:
         for name in _IBSRV_CACHE_SUBDIRS:
             cache = ibsrv_dir / name
             if cache.is_dir():
@@ -1626,17 +1629,19 @@ def _last_modified(path: Path) -> float:
     return latest
 
 
-def _sweep_session_data_dirs(ttl_hours: float | None = None) -> dict[str, Any]:
-    """Delete session folders unused for ttl_hours and trim caches of the other unused ones."""
-    ttl_hours = SESSION_DATA_TTL_HOURS if ttl_hours is None else ttl_hours
-    root = os_support.default_data_dir() / "sessions"
+def _has_ibsrv_caches(data_dir: Path, include_root: bool = False) -> bool:
+    folders = list(data_dir.glob("ibsrv-data*")) + ([data_dir] if include_root else [])
+    return any((folder / name).is_dir() for folder in folders for name in _IBSRV_CACHE_SUBDIRS)
+
+
+def _sweep_dirs(
+    candidates: list[tuple[str, Path]], in_use: set[str], ttl_hours: float, *, trim_root: bool = False
+) -> tuple[list[str], list[str]]:
+    """Delete the unused folders older than ttl_hours, trim the heavy caches of the other unused ones."""
     removed: list[str] = []
     trimmed: list[str] = []
-    if not root.is_dir():
-        return {"removed": removed, "trimmed": trimmed}
-    in_use = _session_data_dirs_in_use()
     now = time.time()
-    for data_dir in sorted(p for p in root.iterdir() if p.is_dir()):
+    for label, data_dir in candidates:
         if os.path.normcase(str(data_dir.resolve())) in in_use:
             continue
         try:
@@ -1644,16 +1649,92 @@ def _sweep_session_data_dirs(ttl_hours: float | None = None) -> dict[str, Any]:
         except OSError:
             continue
         if age_hours < _SESSION_DATA_GRACE_HOURS:
-            continue  # may be a session another process is starting right now
+            continue  # may be started by another process right now
         if ttl_hours > 0 and age_hours >= ttl_hours:
             shutil.rmtree(data_dir, ignore_errors=True)
-            removed.append(data_dir.name)
-        elif any((d / name).is_dir() for d in data_dir.glob("ibsrv-data*") for name in _IBSRV_CACHE_SUBDIRS):
-            _trim_session_data_dir(data_dir)
-            trimmed.append(data_dir.name)
+            removed.append(label)
+        elif _has_ibsrv_caches(data_dir, trim_root):
+            _trim_session_data_dir(data_dir, include_root=trim_root)
+            trimmed.append(label)
+    return removed, trimmed
+
+
+def _sweep_session_data_dirs(ttl_hours: float | None = None) -> dict[str, Any]:
+    """Delete session folders unused for ttl_hours and trim caches of the other unused ones."""
+    ttl_hours = SESSION_DATA_TTL_HOURS if ttl_hours is None else ttl_hours
+    root = os_support.default_data_dir() / "sessions"
+    if not root.is_dir():
+        return {"removed": [], "trimmed": []}
+    candidates = [(p.name, p) for p in sorted(root.iterdir()) if p.is_dir()]
+    removed, trimmed = _sweep_dirs(candidates, _session_data_dirs_in_use(), ttl_hours)
     if removed or trimmed:
         logging.info("Answer42 session data sweep: removed %s, trimmed %s", removed, trimmed)
     return {"removed": removed, "trimmed": trimmed}
+
+
+def _shared_file_servers_root() -> Path:
+    return Path(os.getenv("ONEC_MCP_SHARED_FILE_SERVERS_DIR", str(os_support.default_data_dir() / "shared-file-servers")))
+
+
+def _shared_server_dirs_in_use() -> set[str]:
+    """Folders (<root>/<kind>/<digest>) of the shared ibsrv instances that are still running."""
+    in_use: set[str] = set()
+    with _shared_file_servers_lock():
+        entries = list(_load_shared_file_registry().values())
+    for entry in entries:
+        if isinstance(entry, dict) and entry.get("data_dir") and _shared_file_entry_alive(entry):
+            in_use.add(os.path.normcase(str(Path(entry["data_dir"]).resolve().parent)))
+    for shared in _SHARED_FILE_SERVERS.values():
+        in_use.add(os.path.normcase(str(shared.data_dir.resolve().parent)))
+    return in_use
+
+
+def _sweep_shared_file_server_dirs(ttl_hours: float | None = None) -> dict[str, Any]:
+    """Shared ibsrv folders: the heavy caches (~650 MB each) of stopped servers are dropped, abandoned ones removed."""
+    ttl_hours = SESSION_DATA_TTL_HOURS if ttl_hours is None else ttl_hours
+    root = _shared_file_servers_root()
+    if not root.is_dir():
+        return {"removed": [], "trimmed": []}
+    candidates = [
+        (f"{kind.name}/{base.name}", base)
+        for kind in sorted(root.iterdir()) if kind.is_dir()
+        for base in sorted(kind.iterdir()) if base.is_dir()
+    ]
+    removed, trimmed = _sweep_dirs(candidates, _shared_server_dirs_in_use(), ttl_hours)
+    if removed or trimmed:
+        logging.info("Answer42 shared server data sweep: removed %s, trimmed %s", removed, trimmed)
+    return {"removed": removed, "trimmed": trimmed}
+
+
+# Folders of the data directory that no running session owns: the caches of the CF build infobase, and copies
+# of platform folders that older versions left behind.
+_UNOWNED_DATA_DIRS = ("ib-build-cf", "html-inspector")
+
+
+def _sweep_unowned_data_dirs(ttl_hours: float | None = None) -> dict[str, Any]:
+    ttl_hours = SESSION_DATA_TTL_HOURS if ttl_hours is None else ttl_hours
+    root = os_support.default_data_dir()
+    candidates = [(name, root / name) for name in _UNOWNED_DATA_DIRS if (root / name).is_dir()]
+    removed, trimmed = _sweep_dirs(candidates, set(), ttl_hours, trim_root=True)
+    if removed or trimmed:
+        logging.info("Answer42 service data sweep: removed %s, trimmed %s", removed, trimmed)
+    return {"removed": removed, "trimmed": trimmed}
+
+
+def _sweep_data_dirs(ttl_hours: float | None = None) -> dict[str, Any]:
+    """Free the temporary data directory: sessions, shared ibsrv folders and the unowned service folders."""
+    result: dict[str, Any] = {}
+    for name, sweep in (
+        ("sessions", _sweep_session_data_dirs),
+        ("shared_file_servers", _sweep_shared_file_server_dirs),
+        ("service", _sweep_unowned_data_dirs),
+    ):
+        try:
+            result[name] = sweep(ttl_hours)
+        except Exception as exc:  # one failing folder must not stop the others
+            logging.warning("Answer42 %s data sweep failed: %s", name, exc)
+            result[name] = {"error": str(exc)}
+    return result
 
 
 async def _global_orphan_reaper_loop(interval_seconds: float = 60.0) -> None:
@@ -1668,7 +1749,7 @@ async def _global_orphan_reaper_loop(interval_seconds: float = 60.0) -> None:
         if time.monotonic() - last_sweep >= SESSION_DATA_SWEEP_INTERVAL_SECONDS or not last_sweep:
             last_sweep = time.monotonic()
             try:
-                await asyncio.to_thread(_sweep_session_data_dirs)
+                await asyncio.to_thread(_sweep_data_dirs)
             except Exception as exc:
                 logging.warning("Answer42 session data sweep failed: %s", exc)
         await asyncio.sleep(interval_seconds)

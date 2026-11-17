@@ -139,13 +139,19 @@ def main(argv: list[str]) -> int:
         env["DISPLAY"] = ":99"
 
     ibcmd = _ibcmd_executable(platform_dir)
-    if ibcmd is not None:
-        print(f"Building {out_cf} via ibcmd infobase config import ({ibcmd})", flush=True)
-        _build_with_ibcmd(ibcmd, src_dir, out_cf, db_path, env=env)
-    else:
-        onec = _onec_designer_executable(platform_dir)
-        print(f"ibcmd not found; building {out_cf} via DESIGNER ({onec})", flush=True)
-        _build_with_designer(onec, src_dir, out_cf, db_path, log_path, env=env)
+    try:
+        if ibcmd is not None:
+            print(f"Building {out_cf} via ibcmd infobase config import ({ibcmd})", flush=True)
+            _build_with_ibcmd(ibcmd, src_dir, out_cf, db_path, env=env)
+        else:
+            onec = _onec_designer_executable(platform_dir)
+            print(f"ibcmd not found; building {out_cf} via DESIGNER ({onec})", flush=True)
+            _build_with_designer(onec, src_dir, out_cf, db_path, log_path, env=env)
+    finally:
+        # The standalone-server caches (~650 MB) are regenerated on every start: do not leave them in the temp folder.
+        if not os.getenv("DB_PATH"):
+            for name in ("session-data", "temp", "perf-data"):
+                shutil.rmtree(db_path / name, ignore_errors=True)
 
     print(out_cf)
     return 0
