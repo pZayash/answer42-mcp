@@ -81,9 +81,9 @@
   "rag_source_roots_list": "Возвращает список корневых каталогов поиска источников RAG и при необходимости синхронизирует недавно добавленные конфигурации/расширения.",
   "rag_sources_add_from_directory": "Находит и регистрирует каталоги исходников конфигураций и расширений 1С в корневом каталоге.",
   "rag_sources_list": "Возвращает список зарегистрированных деревьев исходников 1С.",
-  "recording_capture": "Вручную делает снимок экрана/слайд в активном сеансе записи.",
-  "recording_start": "Запускает автоматическую запись доказательств: для каждого записанного вызова инструмента создаются снимок экрана и аннотированный слайд.",
-  "recording_stop": "Останавливает запись и формирует PDF с доказательствами из собранных слайдов.",
+  "recording_capture": "Вручную добавляет снимок и страницу шага в активную запись.",
+  "recording_start": "Запускает автоматическую запись доказательств: для каждого вызова инструмента делается снимок окна, а в отчёт добавляется страница шага.",
+  "recording_stop": "Останавливает запись и собирает PDF-отчёт: обложка, ход проверки, страница на каждый шаг; технические детали вызовов вынесены в приложение в конце.",
   "save_form": "Сохраняет (записывает) активную форму.",
   "screenshot": "Сохраняет снимок экрана активного окна 1С (вместе с его плавающими окнами форм) и возвращает путь.\n\nПри работе через StreamableHTTP результат дополнительно содержит URL для скачивания, действующий один час. Только для\nдоказательств и диагностики интерфейса: данные читайте с помощью table_rows, tabular_documents или\ndynamic_list_output.",
   "search_objects": "Находит все объекты интерфейса, соответствующие имени, заголовку и/или типу объекта теста 1С.",
@@ -185,7 +185,7 @@
   "Deprecated: use only a trusted file-dialog filter instead of probing many filters; unstable formats ignore it": "Устарело: используйте только доверенный фильтр файлового диалога вместо перебора многих фильтров; нестабильные форматы его игнорируют",
   "Desired checkbox value": "Нужное значение флажка",
   "Direct server/infobase (/S) or file infobase path (/F) used only for source dumping": "Прямой сервер/информационная база (/S) или путь к файловой информационной базе (/F), используется только для выгрузки исходников",
-  "Directory for frames/slides/media": "Каталог для кадров/слайдов/медиа",
+  "Directory for the frames and the report": "Каталог для снимков и отчёта",
   "Directory where Answer42 should discover 1C configurations/extensions": "Каталог, в котором Answer42 должен искать конфигурации/расширения 1С",
   "Discover new sources from watched roots before matching": "Обнаружить новые источники в отслеживаемых корневых каталогах перед сопоставлением",
   "Discover new sources in watched roots before listing": "Обнаружить новые источники в отслеживаемых корневых каталогах перед выводом списка",
@@ -386,7 +386,7 @@
   "Target page technical name": "Техническое имя целевой страницы",
   "Target page title": "Заголовок целевой страницы",
   "Text to put into the element": "Текст для ввода в элемент",
-  "Text to put into the slide": "Текст для помещения на слайд",
+  "Text for the step page": "Текст для страницы шага",
   "Text/pattern to enter in the standard 'Найти' dialog": "Текст/шаблон для ввода в стандартном диалоге «Найти»",
   "Then press Enter (and submit the enclosing form if nothing cancels it)": "Затем нажать Enter (и отправить содержащую элемент форму, если ничто не отменяет отправку)",
   "Timeout in seconds": "Тайм-аут в секундах",
@@ -427,6 +427,7 @@
   "client_mode=browser: Chrome/Edge executable; empty = ONEC_MCP_BROWSER_PATH or an installed Chrome/Edge": "client_mode=browser: исполняемый файл Chrome/Edge; пусто = ONEC_MCP_BROWSER_PATH или установленный Chrome/Edge",
   "client_mode=browser: run the browser without a window": "client_mode=browser: запустить браузер без окна",
   "client_mode=browser, base on another host: host[:port] the test manager connects to, 1C server cluster manager (default port 1541) or the web server of a file base (port 1538), for example 10.0.0.5 or myhost:1541. The host must be reachable from this machine (VPN, tailscale); the 80/443 ports of a reverse proxy are not enough. Empty = the test manager is not paired with a base on another host (or ONEC_MCP_BROWSER_TEST_SERVER)": "client_mode=browser, база на другом хосте: host[:порт], к которому подключается менеджер тестирования: менеджер кластера серверов 1С (порт по умолчанию 1541) или веб-сервер файловой базы (порт 1538), например 10.0.0.5 или myhost:1541. Хост должен быть доступен с этой машины (VPN, tailscale); портов 80/443 обратного прокси недостаточно. Пусто = менеджер не сопрягается с базой на другом хосте (или ONEC_MCP_BROWSER_TEST_SERVER)",
-  "Thin client mode, for a target platform that has only a thin client (for example a cloud): version of an installed full platform to run the test manager on, such as 8.5.1.1343. The client still runs on the target's version (version, or the version of base_url); the version difference is hidden by an internal proxy. Empty = one platform for both (or ONEC_MCP_MANAGER_VERSION)": "Режим тонкого клиента, для целевой платформы, где есть только тонкий клиент (например, облако): версия установленной полной платформы, на которой запускается менеджер тестирования, например 8.5.1.1343. Клиент по-прежнему работает на версии цели (version или версия из base_url); разницу версий скрывает внутренний прокси. Пусто = одна платформа для обоих (или ONEC_MCP_MANAGER_VERSION)"
+  "Thin client mode, for a target platform that has only a thin client (for example a cloud): version of an installed full platform to run the test manager on, such as 8.5.1.1343. The client still runs on the target's version (version, or the version of base_url); the version difference is hidden by an internal proxy. Empty = one platform for both (or ONEC_MCP_MANAGER_VERSION)": "Режим тонкого клиента, для целевой платформы, где есть только тонкий клиент (например, облако): версия установленной полной платформы, на которой запускается менеджер тестирования, например 8.5.1.1343. Клиент по-прежнему работает на версии цели (version или версия из base_url); разницу версий скрывает внутренний прокси. Пусто = одна платформа для обоих (или ONEC_MCP_MANAGER_VERSION)",
+  "Report title on the cover; empty = Протокол проверки": "Заголовок отчёта на обложке; пусто = Протокол проверки"
  }
 }

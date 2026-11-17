@@ -12251,24 +12251,34 @@ async def close_form(*,
 
 @mcp.tool()
 def recording_start(
-    output_dir: Annotated[str, "Directory for frames/slides/media"] = "build/recordings/session",
+    output_dir: Annotated[str, "Directory for the frames and the report"] = "build/recordings/session",
     display: Annotated[str, "X11 display to capture"] = "",
     window: Annotated[bool, "Capture best 1C window instead of whole display"] = False,
+    title: Annotated[str, "Report title on the cover; empty = Протокол проверки"] = "",
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> dict[str, Any]:
-    """Start automatic evidence recording: each recorded tool call gets screenshot + annotated slide."""
-    return _session(session_id).recorder.start(output_dir=output_dir, display=display, window=window)
+    """Start automatic evidence recording: each recorded tool call gets a screenshot and a step page in the report."""
+    sess = _session(session_id)
+    meta: dict[str, str] = {}
+    with suppress(Exception):
+        meta = {
+            "База": sess.base_url,
+            "Пользователь": sess.username,
+            "Платформа": _platform.platform_version_from_dir(sess.platform_dir),
+            "Клиент": "браузер" if sess.client_mode == "browser" else "тонкий клиент",
+        }
+    return sess.recorder.start(output_dir=output_dir, display=display, window=window, title=title, meta=meta)
 
 
 @mcp.tool()
 def recording_capture(
     action: Annotated[str, "Manual step/action label"],
-    note: Annotated[str, "Text to put into the slide"] = "",
+    note: Annotated[str, "Text for the step page"] = "",
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> dict[str, Any]:
-    """Manually capture a screenshot/slide in the active recording session."""
+    """Manually capture a screenshot and a step page in the active recording session."""
     event = _session(session_id).recorder.capture(
         lambda path, window, display: _screenshot_for_recorder(path, window, display, session_id),
         action,
@@ -12282,7 +12292,7 @@ def recording_capture(
 def recording_stop(*,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> dict[str, Any]:
-    """Stop recording and build PDF evidence from captured slides."""
+    """Stop recording and build the PDF report: cover, steps, a page per step, technical details in the appendix."""
     return _session(session_id).recorder.stop()
 
 
