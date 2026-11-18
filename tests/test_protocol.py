@@ -1003,3 +1003,24 @@ def test_editor_lookup_logs_one_short_line():
     body = _bsl_function_body(_manager_module(), "НайтиПолеРедактораТаблицыMCP")
     assert "ПредставлениеДанныхПоля(ТекущийЭлементТаблицы)" not in body
     assert "СоответствуетТекущийЭлемент = ЭлементТаблицыСоответствуетПолюMCP(ТекущийЭлементТаблицы" in body
+
+
+def test_press_first_button_remembers_winner_and_skips_slow_misses():
+    module = _manager_module()
+    assert "Перем УдачныеКнопкиMCP;" in module
+    body = _bsl_function_body(module, "НажатьПервуюКнопкуОкна(")
+    first = body.index("НайтиКнопкуБыстроMCP(АктивноеОкно, ИмяКнопки, ЗаголовокКнопки, Неопределено, Истина)")
+    # запомненный кандидат идёт первым, обход дерева остаётся запасным путём
+    assert "УдачныеКнопкиMCP.Получить(СигнатураКнопок)" in body[:first]
+    assert "УдачныеКнопкиMCP.Вставить(СигнатураКнопок, ИндексКандидата)" in body[first:]
+    assert body.index("НайтиКнопкуБыстроMCP(АктивноеОкно, ИмяКнопки, ЗаголовокКнопки);") > first
+    assert "НайтиКнопку(АктивноеОкно, ИмяКнопки, ЗаголовокКнопки, 1)" in body
+
+
+def test_candidate_button_search_skips_wait_and_command_interface_buttons():
+    body = _bsl_function_body(_manager_module(), "НайтиКнопкуБыстроMCP(")
+    assert "РежимКандидата = Ложь" in body.splitlines()[0] or "РежимКандидата = Ложь" in _manager_module()
+    types = body[:body.index("Для Каждого ИмяТипа Из ТипыКнопок Цикл")]
+    assert "Если Не РежимКандидата Тогда" in types and "ТестируемаяКнопкаКомандногоИнтерфейса" in types
+    # ПолучитьОбъект() ждёт появления кнопки: после чистой промашки НайтиОбъект() в режиме кандидата он не нужен
+    assert "Если Кандидат = Неопределено И (Не РежимКандидата Или Не ПоискВыполнен) Тогда" in body
