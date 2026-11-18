@@ -378,7 +378,9 @@ def _image_tag(frame: str) -> str:
 
 def _cover(title: str, meta: dict[str, str], events: list[dict[str, Any]], started_at: float) -> str:
     failed = sum(1 for e in events if e.get("failed"))
-    started = datetime.fromtimestamp(started_at) if started_at else datetime.now()
+    # локальное время отчёта (как и раньше), но с явной зоной: ruff DTZ006 запрещает наивное fromtimestamp()
+    local_tz = datetime.now().astimezone().tzinfo
+    started = datetime.fromtimestamp(started_at, tz=local_tz) if started_at else datetime.now(tz=local_tz)
     cards = [
         f'<div class="card"><div class="n">{len(events)}</div><div class="l">шагов</div></div>',
         f'<div class="card"><div class="n">{html.escape(_duration(started_at, events))}</div><div class="l">длительность</div></div>',
