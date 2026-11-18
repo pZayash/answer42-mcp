@@ -969,3 +969,37 @@ def test_text_input_waits_are_adaptive():
     assert "КлючБыстрогоОжидания = \"\"" in module  # необязательный параметр: прочие вызовы ждут по-старому
     assert "ТаймаутОжиданияОкна = 300" in modal
     assert modal.count("ПоляБезМодальногоОкна.Удалить(КлючБыстрогоОжидания)") == 2  # окно открылось — снова ждём полностью
+
+
+def test_table_set_field_skips_checkbox_search_for_non_boolean_values():
+    setter = _bsl_function_body(_manager_module(), "УстановитьПолеТаблицыMCP")
+    gate = setter.index("Если ЗначениеБулево Тогда")
+    search = setter.index("НайтиПолеФлажкаТекущейСтрокиТаблицыMCP(ИмяТаблицы, ИмяПоля, ИскатьПоЗаголовку, Таблица)")
+    assert gate < search
+    # булево — и значение, и текущее значение ячейки: иначе дорогой поиск не нужен
+    cond = setter[setter.rindex("ЗначениеБулево =", 0, gate):gate]
+    assert "ЗначениеПохожеНаБулевоMCP(Значение)" in cond and "ПроверкаФлажкаДоРедактирования.value" in cond
+    assert 'Новый Структура("found,field,presentation,kind,control", Ложь' in setter  # заглушка с теми же полями
+
+
+def test_table_set_field_reenters_edit_mode_by_activating_the_cell_first():
+    setter = _bsl_function_body(_manager_module(), "УстановитьПолеТаблицыMCP")
+    fast = setter.index("ТекущийЭлементБыстро.Активизировать()")
+    slow = setter.index("ОбеспечитьРедактированиеТекущейСтрокиТаблицыMCP(Таблица, ИмяТаблицы)", fast)
+    assert fast < setter.index("Таблица.ИзменитьСтроку()", fast) < slow  # дорогой поиск команды — только запасной путь
+    assert "Если РезультатПовторногоРедактированияПослеАктивизации = Неопределено Тогда" in setter[fast:slow + 200]
+
+
+def test_cell_without_dropdown_is_remembered_after_full_wait_even_if_edit_mode_ended():
+    body = _bsl_function_body(_manager_module(), "ВвестиТекстВРедакторТаблицыMCP")
+    mark = body.index("ПоляБезВыпадающегоСписка.Вставить(КлючБезСписка, Истина)")
+    cond = body[body.rindex("Если", 0, mark):mark]
+    # числовая ячейка завершает редактирование сразу после ввода: условие по режиму редактирования запоминание ломало
+    assert "НачалоОжиданияСписка >= 2000" in cond
+    assert "ТаблицаВРежимеРедактированияMCP" not in cond
+
+
+def test_editor_lookup_logs_one_short_line():
+    body = _bsl_function_body(_manager_module(), "НайтиПолеРедактораТаблицыMCP")
+    assert "ПредставлениеДанныхПоля(ТекущийЭлементТаблицы)" not in body
+    assert "СоответствуетТекущийЭлемент = ЭлементТаблицыСоответствуетПолюMCP(ТекущийЭлементТаблицы" in body
