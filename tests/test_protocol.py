@@ -301,12 +301,14 @@ def test_set_field_value_reports_creation_window_after_direct_input():
     modal_diagnostics = _bsl_procedure_body(module, "ДобавитьДиагностикуМодальногоОкнаЕслиОткрылосьMCP")
 
     assert 'РезультатВвода = Новый Структура("set,field,value,method", Истина, ИмяПоля, Значение, "ВвестиТекст")' in setter
-    assert "ДобавитьДиагностикуМодальногоОкнаЕслиОткрылосьMCP(РезультатВвода, ЗаголовокОкнаДоВвода)" in setter
+    # третий аргумент — ключ быстрого ожидания "ИмяФормы|ИмяПоля" (см. test_text_input_waits_are_adaptive)
+    assert "ДобавитьДиагностикуМодальногоОкнаЕслиОткрылосьMCP(РезультатВвода, ЗаголовокОкнаДоВвода," in setter
     assert 'РезультатВвода.Вставить("window_opened", Истина)' in setter
     assert "РезультатВвода.set = Ложь" in setter
     assert "Возврат РезультатВвода" in setter
     assert "НачалоОжиданияОкна = ТекущаяУниверсальнаяДатаВМиллисекундах()" in modal_diagnostics
-    assert "ТекущаяУниверсальнаяДатаВМиллисекундах() - НачалоОжиданияОкна < 2000" in modal_diagnostics
+    assert "ТаймаутОжиданияОкна = 2000" in modal_diagnostics
+    assert "ТекущаяУниверсальнаяДатаВМиллисекундах() - НачалоОжиданияОкна < ТаймаутОжиданияОкна" in modal_diagnostics
     assert 'Результат.Вставить("modal_form_name", БезопасноеСвойство(ФормаАктивногоОкна, "ИмяФормы", ""))' in modal_diagnostics
     assert 'СвойствоСтруктуры(ДиагностикаКлиента, "active_window_changed", Ложь)' in module
     assert 'Результат.Вставить("window_opened", Истина)' in module
@@ -914,3 +916,56 @@ def test_command_interface_search_closes_help_panel_after_cleanup():
     assert 'Заголовок = "помощь" Или Заголовок = "help"' in service_section
     assert "КнопкаРаздела.Нажать();" in all_sections
     assert all_sections.count("КнопкаРаздела.Нажать();") >= 3
+
+
+# ---------------------------------------------------------------------------
+# Производительность менеджера на больших формах (БП): быстрые пути и адаптивные ожидания
+# ---------------------------------------------------------------------------
+
+def _manager_module() -> str:
+    return Path("src/cf/DataProcessors/MCPTestManager/Forms/Форма/Ext/Form/Module.bsl").read_text(encoding="utf-8")
+
+
+def test_find_object_has_guarded_fast_path_with_dfs_fallback():
+    body = _bsl_function_body(_manager_module(), "НайтиОбъектРекурсивно")
+    fast = body.index("НайтиОбъектБыстроMCP(РодительскийОбъект, Имя, \"\", ТипОбъекта, КешПоиска)")
+    # быстрый путь только на верхнем уровне, для точного имени и без заголовка (у заголовка своя семантика совпадения)
+    guard = body[body.rindex("Если", 0, fast):fast]
+    assert "ТекущаяГлубина = 0" in guard and "Не ПустаяСтрока(Имя)" in guard and "ПустаяСтрока(Заголовок)" in guard
+    # прежний обход остаётся запасным путём
+    assert "БезопасныеПодчиненные(РодительскийОбъект)" in body[fast:]
+    assert body.index("Возврат БыстрыйРезультат") < body.index("БезопасныеПодчиненные(РодительскийОбъект)")
+
+
+def test_find_table_has_fast_path_only_for_exact_name():
+    body = _bsl_function_body(_manager_module(), "НайтиТаблицуПоПараметрам")
+    fast = body.index('НайтиОбъектБыстроMCP(РодительскийОбъект, ИмяТаблицы, "", "ТестируемаяТаблицаФормы")')
+    guard = body[body.rindex("Если", 0, fast):fast]
+    assert "ТекущаяГлубина = 0" in guard and "Не ПустаяСтрока(ИмяТаблицы)" in guard and "ПустаяСтрока(ЗаголовокТаблицы)" in guard
+    assert "БезопасныеПодчиненные(РодительскийОбъект)" in body[fast:]
+
+
+def test_close_dropdowns_uses_platform_search_with_recursive_fallback():
+    module = _manager_module()
+    body = _bsl_procedure_body(module, "ЗакрытьВсеВыпадающиеСпискиMCP")
+    assert 'НайтиОбъекты(Тип("ТестируемоеПолеФормы")' in body
+    assert "ЗакрытьВсеВыпадающиеСпискиРекурсивноMCP(РодительскийОбъект, 0)" in body  # запасной путь сохранён
+    # вызов по-прежнему идёт до поиска поля (порядок проверяет test_set_field_value_closes_stale_dropdowns...)
+    assert "ЗакрытьВсеВыпадающиеСпискиРекурсивноMCP" in module
+
+
+def test_text_input_waits_are_adaptive():
+    module = _manager_module()
+    # перечень полей/колонок, для которых ожидание выпадающего списка пропускается, и его инвалидация
+    for var in ("ПоляБезВыпадающегоСписка", "ПоляБезМодальногоОкна"):
+        assert f"Перем {var};" in module
+    setter = _bsl_function_body(module, "УстановитьЗначениеПоля")
+    assert "ПоляБезВыпадающегоСписка.Вставить(КлючБезСписка, Истина)" in setter
+    assert "ПоляБезВыпадающегоСписка.Удалить(КлючБезСписка)" in setter  # открывшийся список снимает запись
+    cell = _bsl_function_body(module, "ВвестиТекстВРедакторТаблицыMCP")
+    assert "ПоляБезВыпадающегоСписка.Вставить(КлючБезСписка, Истина)" in cell
+    assert "ПоляБезВыпадающегоСписка.Удалить(КлючБезСписка)" in cell
+    modal = _bsl_procedure_body(module, "ДобавитьДиагностикуМодальногоОкнаЕслиОткрылосьMCP")
+    assert "КлючБыстрогоОжидания = \"\"" in module  # необязательный параметр: прочие вызовы ждут по-старому
+    assert "ТаймаутОжиданияОкна = 300" in modal
+    assert modal.count("ПоляБезМодальногоОкна.Удалить(КлючБыстрогоОжидания)") == 2  # окно открылось — снова ждём полностью
