@@ -9434,17 +9434,37 @@ async def set_field_value(
     value: Annotated[str, "Value to set"],
     search_by_title: Annotated[bool, "If true, match visible title instead of object name"] = False,
     create_if_missing: Annotated[bool, "Allow choosing dropdown items like 'Create: ...' for missing reference values"] = False,
+    value_type: Annotated[str, "Composite-type field: the type 1C asks for first (see available_types in the reply), e.g. Номенклатура"] = "",
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
-    """Set a value in a form field by name or title."""
+    """Set a value in a form field by name or title.
+
+    A field of a composite type (a string, a number or a reference of several kinds) makes 1C open the
+    «Выбор типа данных» dialog first: pass value_type, or read type_selection_required and available_types in the
+    reply and repeat the call (choose_value_type works on the open dialog).
+    """
     params = {
         "field_name": field_name,
         "value": value,
         "search_by_title": search_by_title,
         "create_if_missing": create_if_missing,
     }
-    result = await _bridge_call_recorded(session_id, "set_field_value", params)
+
+    async def enter_again() -> Any:
+        return await _bridge_call_recorded(session_id, "set_field_value", params)
+
+    try:
+        result = await _bridge_call_recorded(session_id, "set_field_value", params)
+    except (TimeoutError, BridgeError):
+        typed = await _type_dialog_outcome(session_id, value_type, value, enter_again=enter_again)
+        if typed is None:
+            raise
+        return typed
+    if isinstance(result, dict) and result.get("set") is False:
+        typed = await _type_dialog_outcome(session_id, value_type, value, enter_again=enter_again)
+        if typed is not None:
+            return typed
     result = _normalize_creation_window_result(result, create_if_missing=create_if_missing)
     if isinstance(result, dict) and result.get("set") is True:
         try:
@@ -9492,11 +9512,181 @@ async def activate_field(
 async def choose_field_from_list(
     field_name: Annotated[str, "Reference field technical name or title"],
     search_by_title: Annotated[bool, "If true, match visible title instead of object name"] = False,
+    value_type: Annotated[str, "Composite-type field: the type 1C asks for first (see available_types in the reply), e.g. Номенклатура"] = "",
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
-    """Open the standard selection form for a reference field."""
-    return await _bridge_call_recorded(session_id, "choose_field_from_list", {"field_name": field_name, "search_by_title": search_by_title})
+    """Open the standard selection form for a reference field.
+
+    For a composite-type field 1C opens «Выбор типа данных» first: pass value_type to pick the type and get the
+    selection form of that type, or read available_types in the reply.
+    """
+    result = await _bridge_call_recorded(session_id, "choose_field_from_list", {"field_name": field_name, "search_by_title": search_by_title})
+    typed = await _type_dialog_outcome(session_id, value_type, "")
+    if typed is None:
+        return result
+    return {**(result if isinstance(result, dict) else {}), **typed}
+
+
+# --- composite-type fields: 1C asks for the type first ---------------------------------------------------------
+
+_TYPE_DIALOG_TITLE = "Выбор типа данных"
+_TYPE_DIALOG_TABLE = "TypeTree"
+_TYPE_HINT = (
+    "1C opened the «Выбор типа данных» dialog: the field has a composite type and wants the type before the value. "
+    "Repeat the call with value_type=<one of available_types>, or call choose_value_type(value_type=...) now."
+)
+
+
+async def _type_dialog_open(session_id: str) -> bool:
+    """Whether the active window is the «Выбор типа данных» dialog."""
+    try:
+        window = await _bridge_call_recorded(session_id, "active_window", {})
+    except Exception:
+        return False
+    return isinstance(window, dict) and str(window.get("title") or "").strip() == _TYPE_DIALOG_TITLE
+
+
+def _first_cell(row: Any) -> str:
+    """Text of the first column of a table row as the manager returns it: {"pairs": [{"key", "value"}, ...]}."""
+    if isinstance(row, dict) and isinstance(row.get("pairs"), list):
+        row = row["pairs"][0].get("value", "") if row["pairs"] and isinstance(row["pairs"][0], dict) else ""
+    elif isinstance(row, dict):
+        row = next(iter(row.values()), "")
+    if isinstance(row, (list, tuple)):
+        row = row[0] if row else ""
+    return str(row or "").strip()
+
+
+async def _type_dialog_types(session_id: str) -> list[str]:
+    result = await _bridge_call_recorded(session_id, "table_rows", {"name": _TYPE_DIALOG_TABLE, "limit": 200})
+    rows = result.get("rows") if isinstance(result, dict) else None
+    return [text for text in (_first_cell(row) for row in rows or []) if text]
+
+
+def _match_value_type(types: list[str], wanted: str) -> int | None:
+    """Index of the type that was asked for: exact name first, then the only name containing the text."""
+    wanted = wanted.strip().casefold()
+    exact = [i for i, name in enumerate(types) if name.casefold() == wanted]
+    if len(exact) == 1:
+        return exact[0]
+    partial = [i for i, name in enumerate(types) if wanted and wanted in name.casefold()]
+    return partial[0] if len(partial) == 1 else None
+
+
+async def _select_value_type(session_id: str, value_type: str, types: list[str]) -> dict[str, Any]:
+    """Put the cursor on the type by index (searching by text can land on a neighbour) and press OK."""
+    index = _match_value_type(types, value_type)
+    if index is None:
+        return {
+            "selected": False, "error": "type_not_found", "requested_type": value_type, "available_types": types,
+            "hint": "Pass the type name exactly as listed in available_types.",
+        }
+    table = {"name": _TYPE_DIALOG_TABLE}
+    await _bridge_call_recorded(session_id, "table_move_row", {**table, "direction": "first", "steps": 1})
+    if index:
+        await _bridge_call_recorded(session_id, "table_move_row", {**table, "direction": "next", "steps": index})
+    current = await _bridge_call_recorded(session_id, "table_current_row", table)
+    pairs = ((current or {}).get("current_row") or {}).get("pairs") or [] if isinstance(current, dict) else []
+    current_text = str(pairs[0].get("value") or "") if pairs else ""
+    if current_text.strip().casefold() != types[index].casefold():
+        return {
+            "selected": False, "error": "type_position_mismatch", "requested_type": types[index],
+            "current_type": current_text, "available_types": types,
+        }
+    pressed = await _bridge_call_recorded(session_id, "click_button", {"name": "OK", "search_by_title": False})
+    pressed = pressed if isinstance(pressed, dict) else {}
+    return {
+        "selected": True, "selected_type": types[index],
+        "window_title_after": pressed.get("window_title_after"), "form_name_after": pressed.get("form_name_after"),
+    }
+
+
+def _row_has_value(row_result: Any, value: str) -> bool:
+    pairs = ((row_result or {}).get("current_row") or {}).get("pairs") or [] if isinstance(row_result, dict) else []
+    wanted = value.strip().casefold()
+    return any(wanted and wanted in str(pair.get("value") or "").casefold() for pair in pairs if isinstance(pair, dict))
+
+
+async def _enter_value_after_type(
+    session_id: str, picked: dict[str, Any], value: str, *, table: str, enter_again: Any
+) -> dict[str, Any]:
+    """The type is chosen: 1C opens the selection form of that type, or leaves the cell ready for typing."""
+    result: dict[str, Any] = {"set": False, "type_selected": picked.get("selected_type")}
+    form_after = str(picked.get("form_name_after") or "")
+    if not value:
+        result["selection_form_open"] = form_after.endswith(".ФормаВыбора")
+        result["hint"] = "The type is chosen; pick the value in the selection form (choose_current_row) or enter it."
+        return result
+    if form_after.endswith(".ФормаВыбора"):
+        try:
+            chosen = await choose_current_row(name="Список", expected_text=value, session_id=session_id)
+        except (TimeoutError, BridgeError) as exc:
+            result["selection_form_open"] = True
+            result["choose_error"] = _compact_error_text(str(exc))
+            result["hint"] = f"The value {value!r} was not found in the selection form of the type; it is still open."
+            return result
+        result["choose"] = chosen
+        if not (isinstance(chosen, dict) and chosen.get("selected") is not False and not chosen.get("entered_group")):
+            result["hint"] = (
+                chosen.get("hint") if isinstance(chosen, dict) and chosen.get("hint")
+                else "The value was not selected in the selection form: it is still open."
+            )
+            result["selection_form_open"] = True
+            return result
+    else:
+        entered = await enter_again()
+        result["entered"] = entered
+        if isinstance(entered, dict) and entered.get("set") is True:
+            result["set"] = True
+            return result
+    if table:
+        row = await _bridge_call_recorded(session_id, "table_current_row", {"name": table})
+        result["current_row"] = (row or {}).get("current_row") if isinstance(row, dict) else None
+        result["set"] = _row_has_value(row, value)
+    else:
+        result["set"] = True
+    if not result["set"]:
+        result["hint"] = f"The value {value!r} is not in the field after the selection."
+    return result
+
+
+async def _type_dialog_outcome(
+    session_id: str, value_type: str, value: str, *, table: str = "", enter_again: Any = None
+) -> dict[str, Any] | None:
+    """What to do when a field call left the «Выбор типа данных» dialog open; None when it is not open."""
+    if not await _type_dialog_open(session_id):
+        return None
+    types = await _type_dialog_types(session_id)
+    if not value_type:
+        return {"set": False, "type_selection_required": True, "available_types": types, "hint": _TYPE_HINT}
+    picked = await _select_value_type(session_id, value_type, types)
+    if not picked.get("selected"):
+        return {"set": False, "type_selection_required": True, **picked}
+    if enter_again is None:
+        return {"opened": True, "type_selected": picked.get("selected_type"), "form_name_after": picked.get("form_name_after")}
+    return await _enter_value_after_type(session_id, picked, value, table=table, enter_again=enter_again)
+
+
+@mcp.tool()
+async def choose_value_type(
+    value_type: Annotated[str, "Type to pick in the «Выбор типа данных» dialog, e.g. Номенклатура; empty = only list the types"] = "",
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Pick the type in the «Выбор типа данных» dialog that 1C opens for a composite-type field.
+
+    Before a value can be entered into a field that may hold a string, a number or a reference of several kinds,
+    1C asks for the type. set_field_value, table_set_field and the choose_* tools take value_type and do this
+    themselves; this tool works on a dialog that is already open. After the type, 1C opens the selection form
+    of that type (a reference) or lets the value be typed. Without value_type it only lists the types.
+    """
+    if not await _type_dialog_open(session_id):
+        return {"dialog_open": False, "hint": "The «Выбор типа данных» dialog is not the active window."}
+    types = await _type_dialog_types(session_id)
+    if not value_type:
+        return {"dialog_open": True, "available_types": types}
+    return {"dialog_open": True, **await _select_value_type(session_id, value_type, types)}
 
 
 @mcp.tool()
@@ -9522,8 +9712,28 @@ async def choose_current_row(
     In hierarchical lists choosing a group row enters the group instead of selecting it:
     the result then has `entered_group: true`, `selected: false` and a hint; read
     `table_rows` and call again with an item inside the group.
+
+    expected_text is looked for on the level that is shown. When it is not there (the item lies in a group of a
+    hierarchical list), the standard «Найти» search runs over the whole list and the row it finds is chosen:
+    the result then has `found_by_search: true`.
     """
-    return await _bridge_call_recorded(session_id, "choose_current_row", {"name": name, "expected_text": expected_text})
+    params = {"name": name, "expected_text": expected_text}
+    not_found: Exception | None = None
+    try:
+        return await _bridge_call_recorded(session_id, "choose_current_row", params)
+    except (TimeoutError, BridgeError) as exc:
+        if not expected_text or "не найдена в таблице" not in str(exc):
+            raise
+        not_found = exc
+    searched = await _bridge_call_recorded(session_id, "dynamic_list_find", {
+        "name": name, "title": "", "field": "", "text": expected_text, "compare_type": "",
+    })
+    if not (isinstance(searched, dict) and searched.get("matched") is True):
+        raise not_found
+    result = await _bridge_call_recorded(session_id, "choose_current_row", params)
+    if isinstance(result, dict):
+        result = {**result, "found_by_search": True}
+    return result
 
 
 @mcp.tool()
@@ -11874,6 +12084,7 @@ async def table_set_field(
     create_if_missing: Annotated[bool, "Allow choosing dropdown items like 'Create: ...' for missing reference values"] = False,
     row: Annotated[str, "Optional row search spec before editing: text, JSON list of texts, or JSON object with text/texts/code/name fields"] = "",
     search_limit: Annotated[int, "Maximum rows to scan when row is set"] = 2000,
+    value_type: Annotated[str, "Composite-type column: the type 1C asks for first (see available_types in the reply), e.g. Номенклатура"] = "",
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
@@ -11881,8 +12092,11 @@ async def table_set_field(
 
     Finds the editor field for the column (e.g. ТоварыНоменклатура), activates it,
     delegates to the general set_field_value logic, ends row editing, and verifies
-    the value in the current table row."""
-    return await _bridge_call_recorded(session_id, "table_set_field", {
+    the value in the current table row.
+
+    A composite-type column makes 1C open «Выбор типа данных» first: pass value_type, or read
+    type_selection_required and available_types in the reply and repeat the call."""
+    params = {
         "table": table,
         "field": field,
         "value": value,
@@ -11890,7 +12104,23 @@ async def table_set_field(
         "create_if_missing": create_if_missing,
         "row": row,
         "search_limit": search_limit,
-    })
+    }
+
+    async def enter_again() -> Any:
+        return await _bridge_call_recorded(session_id, "table_set_field", {**params, "row": ""})
+
+    try:
+        result = await _bridge_call_recorded(session_id, "table_set_field", params)
+    except (TimeoutError, BridgeError):
+        typed = await _type_dialog_outcome(session_id, value_type, value, table=table, enter_again=enter_again)
+        if typed is None:
+            raise
+        return typed
+    if isinstance(result, dict) and result.get("set") is False:
+        typed = await _type_dialog_outcome(session_id, value_type, value, table=table, enter_again=enter_again)
+        if typed is not None:
+            return typed
+    return result
 
 
 @mcp.tool()
@@ -11945,11 +12175,20 @@ async def table_choose_field_from_list(
     table: Annotated[str, "Table technical name"],
     field: Annotated[str, "Column field technical name or title"],
     search_by_title: Annotated[bool, "If true, match visible title instead of object name"] = False,
+    value_type: Annotated[str, "Composite-type column: the type 1C asks for first (see available_types in the reply), e.g. Номенклатура"] = "",
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
-    """Open the selection form for a reference field in a form table row."""
-    return await _bridge_call_recorded(session_id, "table_choose_field_from_list", {"table": table, "field": field, "search_by_title": search_by_title})
+    """Open the selection form for a reference field in a form table row.
+
+    For a composite-type column 1C opens «Выбор типа данных» first: pass value_type to pick the type and get the
+    selection form of that type, or read available_types in the reply.
+    """
+    result = await _bridge_call_recorded(session_id, "table_choose_field_from_list", {"table": table, "field": field, "search_by_title": search_by_title})
+    typed = await _type_dialog_outcome(session_id, value_type, "")
+    if typed is None:
+        return result
+    return {**(result if isinstance(result, dict) else {}), **typed}
 
 
 @mcp.tool()
@@ -12208,13 +12447,36 @@ def _find_message_box_texts_and_buttons(node: Any) -> tuple[str, list[str], list
     return "\n".join(unique_texts), unique_texts, buttons
 
 
+def _close_needs_confirmation(result: Any) -> Any:
+    """close_form that only opened a question («Сохранить изменения?») did not close the form."""
+    if not isinstance(result, dict) or not result.get("closed"):
+        return result
+    diagnostics = result.get("client_diagnostics")
+    diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+    buttons = [b for b in diagnostics.get("modal_buttons") or [] if isinstance(b, dict)]
+    if not (diagnostics.get("modal_opened") and buttons):
+        return result
+    return {
+        **result,
+        "closed": False,
+        "reason": "confirmation_required",
+        "confirmation_text": " ".join(str(text) for text in diagnostics.get("modal_texts") or []),
+        "confirmation_buttons": [str(b.get("title") or b.get("name") or "") for b in buttons],
+        "hint": "1C asks before closing: answer with click_button(name=<one of confirmation_buttons>); the form is not closed yet.",
+    }
+
+
 @mcp.tool()
 async def close_form(*,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
-    """Close the active form."""
+    """Close the active form.
+
+    A form with unsaved changes makes 1C ask «Сохранить изменения?» first: the reply then has
+    `closed: false`, `reason: confirmation_required` and the buttons to answer with click_button.
+    """
     try:
-        return await _bridge_call_recorded(session_id, "close_form", {})
+        return _close_needs_confirmation(await _bridge_call_recorded(session_id, "close_form", {}))
     except (TimeoutError, BridgeError) as exc:
         error_text = _compact_error_text(str(exc).strip()) or "close_form failed without error text"
         try:
@@ -12423,8 +12685,11 @@ dynamic_list_output instead.
         elif os_support.IS_WINDOWS:
             geometry = _active_external_1c_window_geometry() if window else None
             if window and geometry is None:
-                fallback = "full_display"
-                fallback_reason = "1C window geometry was not detected"
+                # The whole screen of a visible desktop shows other applications (mail, chats): not by default.
+                raise RuntimeError(
+                    "Cannot capture the 1C window: it was not found. The whole screen of a visible Windows desktop "
+                    "may show other applications, so it is captured only on request: pass window=false."
+                )
             with mss.mss() as sct:
                 monitor = geometry or sct.monitors[0]
                 image = sct.grab(monitor)

@@ -354,7 +354,8 @@ def test_wait_object_rereads_the_active_window():
 
 def test_table_rows_restore_the_cursor():
     body = _bsl_function("ПолучитьСтрокиТаблицыКакМассив")
-    assert body.count("ВосстановитьТекущуюСтрокуТаблицыMCP(Таблица, ИсходнаяСтрока)") == 2
+    assert body.count("ВосстановитьТекущуюСтрокуТаблицыMCP(Таблица, ИсходнаяСтрока") == 2
+    assert "ВосстановитьТекущуюСтрокуТаблицыMCP(Таблица, ИсходнаяСтрока, Результат)" in body  # by index when the row description is refused
     assert "Если Лимит <= 0 Тогда" in body
 
 

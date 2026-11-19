@@ -18,7 +18,7 @@ GROUPS: dict[str, frozenset[str]] = {
         "start_session", "stop_session", "session_status", "sessions_list", "tool_groups",
         "active_window", "windows_list", "activate_window", "open_navigation_link",
         "ui_tree", "find_object", "search_objects",
-        "click_button", "set_field_value", "field_info", "field_dropdown", "choose_field_from_list",
+        "click_button", "set_field_value", "field_info", "field_dropdown", "choose_field_from_list", "choose_value_type",
         "choose_current_row", "toggle_field", "close_form", "save_form",
         "form_state", "user_messages", "current_error_info", "client_busy_status", "wait_client_idle", "wait_form",
         "table_rows", "table_find_row", "table_current_row", "table_add_row", "table_set_field", "table_delete_row",
