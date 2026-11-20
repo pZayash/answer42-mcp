@@ -9119,6 +9119,36 @@ async def current_element(*,
     return await _bridge_call_recorded(session_id, "current_element", {})
 
 @mcp.tool()
+async def performance_metrics(
+    clear: Annotated[bool, "Reset the accumulated indicators after reading them"] = False,
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Return the performance indicators the 1C test client has accumulated (action and server-call timings)."""
+    return await _bridge_call_recorded(session_id, "performance_metrics", {"clear": clear})
+
+
+@mcp.tool()
+async def action_timeout(
+    seconds: Annotated[int, "New maximum time of one test-client action in seconds; negative = only read the current value"] = -1,
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Read or set the maximum time the test client waits for one action (raise it for slow forms and reports)."""
+    return await _bridge_call_recorded(session_id, "action_timeout", {"seconds": seconds})
+
+
+@mcp.tool()
+async def user_action_log(
+    action: Annotated[str, "start | stop | pause | resume | abort; stop returns the recorded log"],
+    *,
+    session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
+) -> Any:
+    """Record the user-action log of the 1C platform: start, then do steps, then stop to get the log text."""
+    return await _bridge_call_recorded(session_id, "user_action_log", {"action": action})
+
+
+@mcp.tool()
 async def field_dropdown_close(
     field_name: Annotated[str, "Field technical name or title"],
     search_by_title: Annotated[bool, "Search field by visible title"] = False,
