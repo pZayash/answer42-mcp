@@ -727,7 +727,7 @@ def test_selected_new_tool_schemas():
     assert "connection_value" not in tools["start_session"].input_schema["properties"]
     assert tools["credentials_save"].input_schema["required"] == ["url", "username", "password"]
     assert tools["credentials_remove"].input_schema["required"] == ["url"]
-    assert tools["tabular_document_save"].input_schema["properties"]["format"]["default"] == "pdf"
+    assert tools["tabular_document_save"].input_schema["properties"]["format"]["default"] == ""
     assert tools["tabular_document_save"].input_schema["properties"]["watchdog_timeout"]["default"] == 120
     assert tools["client_busy_status"].input_schema["properties"]["probe_timeout"]["default"] == 2
     assert tools["wait_client_idle"].input_schema["properties"]["timeout"]["default"] == 60
@@ -4355,3 +4355,19 @@ def test_ui_tree_diff_samples_are_flat_and_capped_by_limit(tmp_path, monkeypatch
     assert all("children" not in item for item in diff["added"])
     assert diff["added"][0]["children_count"] == 100
     assert len(json.dumps(diff, ensure_ascii=False)) < 5000
+
+
+def test_tabular_document_save_takes_format_from_path_extension(monkeypatch):
+    from mcp_1c import server
+
+    seen = []
+
+    async def fake_filter_by_filter(session_id, params, format, **kwargs):
+        seen.append((params["format"], format))
+        return {"saved": True}
+
+    monkeypatch.setattr(server, "_tabular_document_save_filter_by_filter", fake_filter_by_filter)
+    asyncio.run(server.tabular_document_save(path="out/report.xlsx", session_id="unit"))
+    asyncio.run(server.tabular_document_save(path="out/report.bin", session_id="unit"))
+    asyncio.run(server.tabular_document_save(path="out/report.xlsx", format="html", session_id="unit"))
+    assert seen == [("xlsx", "xlsx"), ("pdf", "pdf"), ("html", "html")]

@@ -175,6 +175,7 @@ def test_error_text_diagnostics_are_compacted():
         ("<custom>", "x", False),
         (None, "", False),  # unreadable field is unknown, not empty
         (None, "x", False),
+        ("строка¶вторая", "строка\nвторая", True),  # 1C shows a line break as ¶
     ],
 )
 def test_values_match_for_verification(actual, expected, match):

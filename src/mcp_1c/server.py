@@ -1912,6 +1912,9 @@ def _record_tool_if_session(
 
 def _normalized_text_for_value_check(value: Any) -> str:
     text = str(value or "").casefold().strip()
+    # 1C shows a line break of a multi-line field as "¶".
+    for line_break in ("¶", "\r", "\n"):
+        text = text.replace(line_break, "")
     return text.replace("\u00a0", "").replace(" ", "").replace(",", ".")
 
 
@@ -9168,7 +9171,7 @@ async def tabular_document_save(
     name: Annotated[str, "Tabular document field technical name"] = "",
     title: Annotated[str, "Tabular document field visible title"] = "",
     path: Annotated[str, "Output file path; empty = auto-generated temp path"] = "",
-    format: Annotated[str, "Output format: pdf | xlsx | xls | html | txt | mxl"] = "pdf",
+    format: Annotated[str, "Output format: pdf | xlsx | xls | html | txt | mxl; empty = taken from the path extension, else pdf"] = "",
     exact_filter_only: Annotated[bool, "Deprecated: file-dialog filters are always tried one at a time, the first one that produces the requested format wins"] = False,
     watchdog_timeout: Annotated[int, "Deadline in seconds for dangerous UI save action before reporting blocked interface; 0 disables watchdog. Default is 120 seconds because thin-client file dialogs and large tabular documents can be slow."] = 120,
     *,
@@ -9184,6 +9187,10 @@ async def tabular_document_save(
     block a thin client; when `interface_blocked=true`, wait with
     `client_busy_status` or `wait_client_idle` before sending further UI calls.
     """
+    if not format.strip():
+        # A path like report.xlsx must not silently produce a PDF just because `format` was omitted.
+        suffix = Path(path).suffix.lstrip(".").lower() if path else ""
+        format = suffix if suffix in {"pdf", "xlsx", "xls", "html", "txt", "mxl"} else "pdf"
     params = {
         "name": name,
         "title": title,

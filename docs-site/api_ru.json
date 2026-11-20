@@ -322,7 +322,7 @@
   "Optional visible field name in 'Где искать', for example 'Наименование в программе' or 'ИНН'; empty uses dialog default": "Необязательное видимое имя поля в «Где искать», например «Наименование в программе» или «ИНН»; пусто = значение диалога по умолчанию",
   "Optional window title substring to activate before reading command interface": "Необязательная подстрока заголовка окна, которое активировать перед чтением командного интерфейса",
   "Output file path; empty = auto-generated temp path": "Путь к выходному файлу; пусто = автоматически созданный временный путь",
-  "Output format: pdf | xlsx | xls | html | txt | mxl": "Формат вывода: pdf | xlsx | xls | html | txt | mxl",
+  "Output format: pdf | xlsx | xls | html | txt | mxl; empty = taken from the path extension, else pdf": "Формат вывода: pdf | xlsx | xls | html | txt | mxl; пусто — по расширению пути, иначе pdf",
   "Output image path": "Путь к выходному изображению",
   "Output profile: navigation (default), diagnostic, data, full, no_command_panels, or command_panels": "Профиль вывода: navigation (по умолчанию), diagnostic, data, full, no_command_panels или command_panels",
   "Page id or part of its URL/title; may be empty when one page is live": "Идентификатор страницы или часть её URL/заголовка; может быть пустым, если живая страница одна",
