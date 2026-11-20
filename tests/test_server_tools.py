@@ -2439,6 +2439,7 @@ def test_effective_dump_connection_rejects_web_without_direct_target(tmp_path):
 def test_tabular_document_save_exact_mode_falls_back_filter_by_filter(monkeypatch):
     from mcp_1c import server
 
+    monkeypatch.setattr(server, "_TABULAR_SAVE_LEARNED_FILTER", {})
     calls = []
 
     async def fake_dangerous_bridge_call(session_id, method, params, *, timeout, danger):
@@ -2482,6 +2483,49 @@ def test_tabular_document_save_exact_mode_falls_back_filter_by_filter(monkeypatc
     assert len(result["attempts"]) == 2
     assert result["attempts"][0]["saved"] is False
     assert result["attempts"][1]["saved"] is True
+
+
+def test_tabular_document_save_creates_folder_remembers_filter_and_closes_error_window(monkeypatch, tmp_path):
+    from mcp_1c import server
+
+    monkeypatch.setattr(server, "_TABULAR_SAVE_LEARNED_FILTER", {})
+    target = tmp_path / "new" / "deep" / "report.xlsx"
+    calls = []
+    clicks = []
+
+    async def fake_dangerous_bridge_call(session_id, method, params, *, timeout, danger):
+        index = params["file_dialog_filter_index"]
+        calls.append(index)
+        result = {"saved": True, "path": params["path"], "format": params["format"], "files": [{"path": f"{params['path']}.f{index}"}]}
+        if index == 2:
+            result["client_diagnostics"] = {"modal_is_error_window": True, "modal_buttons": [{"name": "OK", "title": "OK"}]}
+        return result
+
+    def fake_select_saved_file(result, format):
+        index = int(result["files"][0]["path"].rsplit(".f", 1)[1])
+        selected = dict(result)
+        selected["saved"] = index == 3
+        selected["selected"] = result["files"][0] if index == 3 else None
+        return selected
+
+    async def fake_bridge_call(session_id, method, params):
+        clicks.append((method, params["name"]))
+        return {"pressed": True}
+
+    monkeypatch.setattr(server, "_dangerous_bridge_call_recorded", fake_dangerous_bridge_call)
+    monkeypatch.setattr(server, "_bridge_call_recorded", fake_bridge_call)
+    monkeypatch.setattr(server, "_select_saved_tabular_document_file", fake_select_saved_file)
+
+    first = asyncio.run(server.tabular_document_save(format="xlsx", path=str(target), session_id="unit"))
+    assert first["saved"] is True
+    assert target.parent.is_dir()
+    assert clicks == [("click_button", "OK")]
+    assert calls[:3] == [1, 2, 3]
+
+    calls.clear()
+    second = asyncio.run(server.tabular_document_save(format="xlsx", path=str(target), session_id="unit"))
+    assert second["saved"] is True
+    assert calls == [3]
 
 
 def test_tabular_document_save_filter_order_uses_likely_format_index_first():

@@ -183,7 +183,7 @@
   "Decoration title substring": "Подстрока заголовка декорации",
   "Delivery mode: auto (default) returns small results inline and saves responses above token threshold as resource; inline always returns the selected JSON/outline/yaml; resource always saves full JSON and returns resource_uri + summary + preview": "Режим выдачи: auto (по умолчанию) возвращает небольшие результаты сразу, а ответы больше порога токенов сохраняет как ресурс; inline всегда возвращает выбранный JSON/outline/yaml; resource всегда сохраняет полный JSON и возвращает resource_uri, сводку и предпросмотр",
   "Deprecated compatibility parameter; cache refresh always reads the full saved Universal report. Use max_results to limit returned matches": "Устаревший параметр совместимости: обновление кэша всегда читает полный сохранённый универсальный отчёт. Для ограничения числа совпадений используйте max_results",
-  "Deprecated: use only a trusted file-dialog filter instead of probing many filters; unstable formats ignore it": "Устарело: используйте только доверенный фильтр файлового диалога вместо перебора многих фильтров; нестабильные форматы его игнорируют",
+  "Deprecated: file-dialog filters are always tried one at a time, the first one that produces the requested format wins": "Устарело: фильтры файлового диалога всегда перебираются по одному, побеждает первый, давший нужный формат",
   "Desired checkbox value": "Нужное значение флажка",
   "Direct server/infobase (/S) or file infobase path (/F) used only for source dumping": "Прямой сервер/информационная база (/S) или путь к файловой информационной базе (/F), используется только для выгрузки исходников",
   "Directory for the frames and the report": "Каталог для снимков и отчёта",

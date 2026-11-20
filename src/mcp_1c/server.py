@@ -9167,12 +9167,15 @@ async def tabular_document_save(
     title: Annotated[str, "Tabular document field visible title"] = "",
     path: Annotated[str, "Output file path; empty = auto-generated temp path"] = "",
     format: Annotated[str, "Output format: pdf | xlsx | xls | html | txt | mxl"] = "pdf",
-    exact_filter_only: Annotated[bool, "Deprecated: use only a trusted file-dialog filter instead of probing many filters; unstable formats ignore it"] = False,
+    exact_filter_only: Annotated[bool, "Deprecated: file-dialog filters are always tried one at a time, the first one that produces the requested format wins"] = False,
     watchdog_timeout: Annotated[int, "Deadline in seconds for dangerous UI save action before reporting blocked interface; 0 disables watchdog. Default is 120 seconds because thin-client file dialogs and large tabular documents can be slow."] = 120,
     *,
     session_id: Annotated[str, "Session id"] = DEFAULT_SESSION,
 ) -> Any:
     """Save a tabular document field to a file in the selected format.
+
+    The folder of `path` is created when it does not exist. The file-dialog filter that
+    produces the format is remembered, so the next save of the same format goes straight to it.
 
     Prefer this export to reading a large report cell by cell. Confirm the
     returned `saved` state and output path before reporting success. Saving can
@@ -9186,23 +9189,16 @@ async def tabular_document_save(
         "format": format,
         "exact_filter_only": exact_filter_only,
     }
-    if exact_filter_only:
-        return await _tabular_document_save_filter_by_filter(
-            session_id,
-            params,
-            format,
-            timeout=int(watchdog_timeout),
-        )
-    result = await _dangerous_bridge_call_recorded(
+    if path:
+        # The 1C client reports a missing folder only after every file-dialog filter has failed.
+        with suppress(OSError):
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+    return await _tabular_document_save_filter_by_filter(
         session_id,
-        "tabular_document_save",
         params,
+        format,
         timeout=int(watchdog_timeout),
-        danger="tabular_document_file_save_may_block_thin_client",
     )
-    if isinstance(result, dict) and result.get("interface_blocked"):
-        return result
-    return await asyncio.to_thread(_select_saved_tabular_document_file, result, format)
 
 
 async def _tabular_document_save_filter_by_filter(
@@ -9217,6 +9213,10 @@ async def _tabular_document_save_filter_by_filter(
 ) -> Any:
     """Try file-dialog filters one bridge call at a time until a valid file appears."""
     attempts: list[Any] = []
+    wanted_format = format.strip().lower()
+    learned = _TABULAR_SAVE_LEARNED_FILTER.get(wanted_format)
+    if preferred_filter_indexes is None and learned:
+        preferred_filter_indexes = [learned, *TABULAR_DOCUMENT_SAVE_PREFERRED_FILTER_INDEXES.get(wanted_format, [])]
     filter_indexes = _tabular_document_save_filter_order(
         format,
         max_filter_index=max_filter_index,
@@ -9239,7 +9239,13 @@ async def _tabular_document_save_filter_by_filter(
             return result
         selected = await asyncio.to_thread(_select_saved_tabular_document_file, result, format)
         attempts.append(dict(selected) if isinstance(selected, dict) else selected)
+        if isinstance(selected, dict) and selected.get("saved") is not True:
+            _remove_probe_files(selected.get("files"))
+            # A filter of a format 1C cannot export (e.g. «Превышена допустимая ширина документа Word 2007»)
+            # leaves an error window open that makes every next attempt fail: close it and go on.
+            await _close_error_window_after_save_attempt(session_id, selected)
         if isinstance(selected, dict) and selected.get("saved") is True:
+            _TABULAR_SAVE_LEARNED_FILTER[wanted_format] = filter_index
             final_result = dict(selected)
             final_result["attempts"] = attempts
             final_result["attempted_filter_indexes"] = filter_indexes[: len(attempts)]
@@ -9255,6 +9261,28 @@ async def _tabular_document_save_filter_by_filter(
         "attempted_filter_indexes": filter_indexes,
         "error": f"No produced file matches requested tabular document format after {max_filter_index} file-dialog filters: {format.lower()}",
     }
+
+
+_TABULAR_SAVE_LEARNED_FILTER: dict[str, int] = {}
+
+
+async def _close_error_window_after_save_attempt(session_id: str, attempt: dict[str, Any]) -> None:
+    diagnostics = attempt.get("client_diagnostics")
+    if not isinstance(diagnostics, dict) or not diagnostics.get("modal_is_error_window"):
+        return
+    buttons = [b for b in diagnostics.get("modal_buttons") or [] if isinstance(b, dict)]
+    button = str((buttons[0].get("name") or buttons[0].get("title")) if buttons else "OK")
+    with suppress(TimeoutError, BridgeError):
+        await _bridge_call_recorded(session_id, "click_button", {"name": button, "search_by_title": False})
+
+
+def _remove_probe_files(files: Any) -> None:
+    """Delete the files a failed save attempt left behind (a filter of another format)."""
+    for item in files if isinstance(files, list) else []:
+        file_path = str(item.get("path") or "") if isinstance(item, dict) else ""
+        if file_path:
+            with suppress(OSError):
+                Path(file_path).unlink()
 
 
 def _tabular_document_save_filter_order(
