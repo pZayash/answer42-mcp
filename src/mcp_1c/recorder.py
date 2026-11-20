@@ -163,6 +163,18 @@ _TITLES = {
     "ui_tree": "Дерево элементов формы",
     "table_rows": "Чтение строк таблицы",
     "table_find_row": "Поиск строки таблицы",
+    "table_goto_row": "Переход к строке таблицы",
+    "field_info": "Сведения о поле",
+    "tabular_document_state_display": "Состояние табличного документа",
+    "tabular_documents": "Табличные документы",
+    "table_move_row": "Перемещение по строкам таблицы",
+    "table_choose_field_from_list": "Выбор значения из списка в таблице",
+    "table_cell_text": "Текст ячейки таблицы",
+    "table_edit": "Редактирование строки таблицы",
+    "dynamic_list_find": "Поиск в списке",
+    "dynamic_list_output": "Вывод списка в документ",
+    "dynamic_list_sort_by_column": "Сортировка списка",
+    "choose_value_type": "Выбор типа данных",
     "table_add_row": "Добавление строки",
     "table_delete_row": "Удаление строки",
     "table_set_field": "Ввод значения в таблицу",
@@ -300,7 +312,10 @@ table.steps th { text-align: left; color: var(--muted); font-weight: 600; font-s
 table.steps td { padding: 2.3mm 3mm; border-bottom: 1px solid var(--line); vertical-align: top; }
 table.steps tr { page-break-inside: avoid; }
 td.num { color: var(--muted); width: 12mm; } td.time { color: var(--muted); width: 22mm; white-space: nowrap; }
-td.what { font-weight: 600; } td.what small { display: block; font-weight: 400; color: var(--muted); font-size: 9pt; margin-top: .5mm; }
+td.what { font-weight: 600; } td.what small { display: block; font-weight: 400; color: var(--muted); font-size: 9pt; margin-top: .5mm;
+                white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 175mm; }
+td.what { max-width: 175mm; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.head .sub .cont { color: var(--muted); }
 td.st { width: 24mm; }
 .pill { display: inline-block; border-radius: 99px; padding: .6mm 3mm; font-size: 9pt; font-weight: 600; background: var(--accent-soft); color: var(--accent); }
 .pill.bad { background: var(--bad-soft); color: var(--bad); } .pill.none { background: var(--wash); color: var(--muted); }
@@ -400,24 +415,39 @@ def _cover(title: str, meta: dict[str, str], events: list[dict[str, Any]], start
     )
 
 
+# One page of the step table holds this many single-line rows; a row with details counts 1.5 (the page is cropped, not scrolled).
+_TABLE_PAGE_UNITS = 14.5
+
+
 def _table_pages(events: list[dict[str, Any]]) -> str:
-    rows = []
+    """The step table as many pages as it takes: a page is a fixed sheet, so a long run must not be cropped."""
+    pages: list[list[str]] = [[]]
+    used = 0.0
     for event in events:
         css, label = _status(event)
         details = step_details(event.get("params"))
         sub = " · ".join(f"{k}: {v}" for k, v in details)
-        rows.append(
+        weight = 1.5 if sub else 1.0
+        if pages[-1] and used + weight > _TABLE_PAGE_UNITS:
+            pages.append([])
+            used = 0.0
+        used += weight
+        pages[-1].append(
             f'<tr><td class="num">{event["index"]}</td><td class="time">{_fmt_time(str(event.get("time", "")))}</td>'
             f'<td class="what">{html.escape(humanize(str(event.get("action", ""))))}'
             f"{f'<small>{html.escape(sub)}</small>' if sub else ''}</td>"
             f'<td class="st"><span class="pill {"bad" if css == "bad" else "none" if css == "none" else ""}">{label}</span></td></tr>'
         )
-    return (
-        '<section class="page"><div class="band"></div><div class="head"><h2>Ход проверки</h2>'
-        '<div class="sub">Что выполнялось по шагам. Подробности каждого шага следуют на отдельных страницах.</div></div>'
-        '<table class="steps"><thead><tr><th>№</th><th>Время</th><th>Шаг</th><th>Итог</th></tr></thead>'
-        f'<tbody>{"".join(rows)}</tbody></table></section>'
-    )
+    sections = []
+    for number, rows in enumerate(pages, start=1):
+        suffix = f' <span class="cont">· лист {number} из {len(pages)}</span>' if len(pages) > 1 else ""
+        sections.append(
+            f'<section class="page"><div class="band"></div><div class="head"><h2>Ход проверки{suffix}</h2>'
+            '<div class="sub">Что выполнялось по шагам. Подробности каждого шага следуют на отдельных страницах.</div></div>'
+            '<table class="steps"><thead><tr><th>№</th><th>Время</th><th>Шаг</th><th>Итог</th></tr></thead>'
+            f'<tbody>{"".join(rows)}</tbody></table></section>'
+        )
+    return "".join(sections)
 
 
 def _text_card(facts: list[tuple[str, str]], result: Any) -> str:

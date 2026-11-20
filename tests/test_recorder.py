@@ -78,3 +78,29 @@ def test_without_a_browser_the_html_report_is_kept(tmp_path, monkeypatch):
     stop = session.stop()
 
     assert stop["pdf"] == "" and Path(stop["html"]).exists()
+
+def _events(count):
+    return [
+        {"index": i, "time": "2026-11-20T10:00:00", "action": "table_goto_row", "params": {"name": "Список"}, "raw_result": {"found": True}}
+        for i in range(1, count + 1)
+    ]
+
+
+def test_long_step_table_continues_on_the_next_sheet():
+    html_report = recorder.make_report_html("Прогон", {}, _events(59))
+    sheets = html_report.count("Ход проверки")
+    assert sheets >= 4
+    assert f"лист {sheets} из {sheets}" in html_report
+    for index in range(1, 60):
+        assert f'<td class="num">{index}</td>' in html_report
+
+
+def test_short_step_table_is_one_sheet():
+    html_report = recorder.make_report_html("Прогон", {}, _events(5))
+    assert html_report.count("Ход проверки") == 1
+    assert "лист 1 из" not in html_report
+
+
+def test_table_steps_have_russian_titles():
+    for action in ("table_goto_row", "table_move_row", "dynamic_list_find", "choose_value_type"):
+        assert recorder.humanize(action)[0] in "АБВГДЕЖЗИКЛМНОПРСТУФХЦЧШЩЭЮЯ"
