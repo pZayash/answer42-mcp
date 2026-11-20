@@ -2516,14 +2516,14 @@ def test_tabular_document_save_creates_folder_remembers_filter_and_closes_error_
     monkeypatch.setattr(server, "_bridge_call_recorded", fake_bridge_call)
     monkeypatch.setattr(server, "_select_saved_tabular_document_file", fake_select_saved_file)
 
-    first = asyncio.run(server.tabular_document_save(format="xlsx", path=str(target), session_id="unit"))
+    first = asyncio.run(server.tabular_document_save(format="zzz", path=str(target), session_id="unit"))
     assert first["saved"] is True
     assert target.parent.is_dir()
     assert clicks == [("click_button", "OK")]
     assert calls[:3] == [1, 2, 3]
 
     calls.clear()
-    second = asyncio.run(server.tabular_document_save(format="xlsx", path=str(target), session_id="unit"))
+    second = asyncio.run(server.tabular_document_save(format="zzz", path=str(target), session_id="unit"))
     assert second["saved"] is True
     assert calls == [3]
 
@@ -2531,12 +2531,12 @@ def test_tabular_document_save_creates_folder_remembers_filter_and_closes_error_
 def test_tabular_document_save_filter_order_uses_likely_format_index_first():
     from mcp_1c.server import _tabular_document_save_filter_order
 
-    assert _tabular_document_save_filter_order("xlsx", max_filter_index=5) == [1, 2, 3, 4, 5]
+    assert _tabular_document_save_filter_order("xlsx", max_filter_index=8) == [7, 1, 2, 3, 4, 5, 6, 8]
     assert _tabular_document_save_filter_order("mxl", max_filter_index=5) == [1, 2, 3, 4, 5]
-    assert _tabular_document_save_filter_order("mxl", max_filter_index=12) == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+    assert _tabular_document_save_filter_order("mxl", max_filter_index=12) == [12, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
     assert _tabular_document_save_filter_order("mxl", max_filter_index=12, preferred_filter_indexes=[12, 1]) == [12, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
     assert _tabular_document_save_filter_order("pdf", max_filter_index=5) == [2, 1, 3, 4, 5]
-    assert _tabular_document_save_filter_order("html", max_filter_index=5) == [4, 1, 2, 3, 5]
+    assert _tabular_document_save_filter_order("html", max_filter_index=5) == [1, 4, 2, 3, 5]
     assert _tabular_document_save_filter_order("unknown", max_filter_index=3) == [1, 2, 3]
 
 

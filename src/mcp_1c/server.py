@@ -82,13 +82,15 @@ DEFAULT_SESSION = os.getenv("ONEC_MCP_DEFAULT_SESSION", f"default-{os.getpid()}"
 # signature after every single-index save attempt; these values only choose the
 # first likely attempts, then the remaining indexes are tried without duplicates.
 TABULAR_DOCUMENT_SAVE_PREFERRED_FILTER_INDEXES: dict[str, list[int]] = {
-    "xlsx": [1],  # Verified on live BP Universal report.
-    "pdf": [2],  # Verified on live dynamic-list output.
-    "xls": [3],
-    "html": [4],
-    "htm": [4],
-    "txt": [5],
-    "mxl": [1],
+    # Platform 8.5 file dialog (live BP list output and report): 1 html, 2 pdf, 6 xls, 7 xlsx, 11 txt (UTF-8), 12 mxl.
+    # The older positions stay as the second guess; a wrong guess only costs one more attempt.
+    "xlsx": [7, 1],
+    "pdf": [2],
+    "xls": [6, 3],
+    "html": [1, 4],
+    "htm": [1, 4],
+    "txt": [11, 5],
+    "mxl": [12, 1],
 }
 DYNAMIC_LIST_OUTPUT_MXL_PREFERRED_FILTER_INDEXES = [12, 1]
 
